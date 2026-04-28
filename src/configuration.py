@@ -370,5 +370,5 @@ class ExperimentConfig:
 
 
 def load_config(path: str | Path | None = None) -> ExperimentConfig:
-    default_path = Path(__file__).with_name("pipeline_config.yaml")
+    default_path = Path(__file__).resolve().parent.parent / "configs" / "pipeline_config.yaml"
     return ExperimentConfig.from_yaml(path or default_path)

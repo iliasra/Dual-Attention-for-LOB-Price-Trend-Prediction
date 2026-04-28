@@ -236,12 +236,3 @@ class LobExperimentRunner:
             }
             for split, days in processed_splits.items()
         }
-
-
-if __name__ == "__main__":
-    runner = LobExperimentRunner()
-    summary = runner.run()
-    for split, shapes in summary.items():
-        print(split)
-        for date, shape in shapes.items():
-            print(f"  {date}: {shape}")
