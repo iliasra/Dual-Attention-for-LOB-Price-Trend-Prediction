@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+import numpy as np
+import pandas as pd
+
+try:
+    from configuration import LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
+except ImportError:  # pragma: no cover
+    from .configuration import LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
+
+
+def calculate_midprice(
+    df: pd.DataFrame,
+    bid_col: str = "bid_price_1",
+    ask_col: str = "ask_price_1",
+) -> pd.Series:
+    return (df[bid_col] + df[ask_col]) / 2.0
+
+
+def calculate_spread(
+    df: pd.DataFrame,
+    bid_col: str = "bid_price_1",
+    ask_col: str = "ask_price_1",
+) -> pd.Series:
+    return df[ask_col] - df[bid_col]
+
+
+class SmoothingStrategy(Protocol):
+    def __call__(self, midprices: pd.Series) -> pd.Series:
+        ...
+
+
+@dataclass(slots=True)
+class SmoothingMethodA:
+    k: int = 10
+
+    def __call__(self, midprices: pd.Series) -> pd.Series:
+        m_plus = midprices.rolling(window=self.k + 1).mean().shift(-self.k)
+        return (m_plus - midprices) / midprices
+
+
+@dataclass(slots=True)
+class SmoothingMethodB:
+    k: int = 10
+
+    def __call__(self, midprices: pd.Series) -> pd.Series:
+        m_minus = midprices.rolling(window=self.k + 1).mean()
+        m_plus = midprices.rolling(window=self.k + 1).mean().shift(-self.k)
+        return (m_plus - m_minus) / m_minus
+
+
+@dataclass(slots=True)
+class SmoothingMethodC:
+    k: int = 5
+    h: int = 10
+
+    def __call__(self, midprices: pd.Series) -> pd.Series:
+        w_minus = midprices.rolling(window=self.k + 1).mean()
+        w_plus = midprices.rolling(window=self.k + 1).mean().shift(-self.h)
+        return (w_plus - w_minus) / w_minus
+
+
+def smoothing_method_A(midprices: pd.Series, k: int = 10) -> pd.Series:
+    return SmoothingMethodA(k=k)(midprices)
+
+
+def smoothing_method_B(midprices: pd.Series, k: int = 10) -> pd.Series:
+    return SmoothingMethodB(k=k)(midprices)
+
+
+def smoothing_method_C(midprices: pd.Series, k: int = 5, h: int = 10) -> pd.Series:
+    return SmoothingMethodC(k=k, h=h)(midprices)
+
+
+@dataclass(slots=True)
+class TrendThresholdClassifier:
+    threshold: float
+
+    def __call__(self, l_values: pd.Series) -> pd.Series:
+        labels = pd.Series(0, index=l_values.index, dtype=int)
+        labels[l_values > self.threshold] = 1
+        labels[l_values < -self.threshold] = -1
+        return labels
+
+
+def classify_trend(l_values: pd.Series, threshold: float) -> pd.Series:
+    return TrendThresholdClassifier(threshold=threshold)(l_values)
+
+
+@dataclass(slots=True)
+class TripleBarrierLabeler:
+    horizon: int = 10
+    upper_barrier_ticks: float = 2.0
+    lower_barrier_ticks: float = 3.0
+    price_col: str = "midprice"
+
+    def __call__(self, df: pd.DataFrame) -> pd.Series:
+        prices = df[self.price_col]
+        labels = pd.Series(0, index=prices.index, dtype=int)
+
+        for index in range(len(prices) - self.horizon):
+            current_price = prices.iloc[index]
+            upper_barrier = current_price + self.upper_barrier_ticks
+            lower_barrier = current_price - self.lower_barrier_ticks
+            future_prices = prices.iloc[index + 1 : index + self.horizon + 1]
+
+            upper_candidates = future_prices[future_prices >= upper_barrier]
+            lower_candidates = future_prices[future_prices <= lower_barrier]
+            upper_hit_idx = upper_candidates.index[0] if not upper_candidates.empty else None
+            lower_hit_idx = lower_candidates.index[0] if not lower_candidates.empty else None
+
+            if upper_hit_idx is not None and lower_hit_idx is not None:
+                labels.iloc[index] = 1 if upper_hit_idx < lower_hit_idx else -1
+            elif upper_hit_idx is not None:
+                labels.iloc[index] = 1
+            elif lower_hit_idx is not None:
+                labels.iloc[index] = -1
+
+        return labels
+
+
+def triple_barrier_method(
+    df: pd.DataFrame,
+    horizon: int = 10,
+    upper_barrier_ticks: int = 2,
+    lower_barrier_ticks: int = 3,
+    price_col: str = "midprice",
+) -> pd.Series:
+    labeler = TripleBarrierLabeler(
+        horizon=horizon,
+        upper_barrier_ticks=upper_barrier_ticks,
+        lower_barrier_ticks=lower_barrier_ticks,
+        price_col=price_col,
+    )
+    return labeler(df)
+
+
+class TargetLabelPipeline:
+    def __init__(self, config: LabelConfig):
+        self.config = config
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        strategy = self.config.strategy.lower()
+        if strategy == "smoothing":
+            return self._add_smoothing_labels(df, self.config.smoothing)
+        if strategy == "triple_barrier":
+            return self._add_triple_barrier_labels(df, self.config.triple_barrier)
+        raise ValueError(f"Unsupported labeling strategy: {self.config.strategy}")
+
+    def _add_smoothing_labels(
+        self,
+        df: pd.DataFrame,
+        config: SmoothingLabelConfig,
+    ) -> pd.DataFrame:
+        result = df.copy()
+        midprices = calculate_midprice(result, bid_col=config.bid_column, ask_col=config.ask_column)
+
+        method_name = config.method.upper()
+        if method_name == "A":
+            pct_changes = SmoothingMethodA(k=config.k)(midprices)
+        elif method_name == "B":
+            pct_changes = SmoothingMethodB(k=config.k)(midprices)
+        elif method_name == "C":
+            pct_changes = SmoothingMethodC(k=config.k, h=config.h)(midprices)
+        else:
+            raise ValueError(f"Unknown smoothing method: {config.method}")
+
+        threshold = config.threshold
+        if threshold is None:
+            spread = calculate_spread(result, bid_col=config.bid_column, ask_col=config.ask_column)
+            threshold = float((spread / midprices).mean())
+
+        valid_mask = pct_changes.notna()
+        result = result.loc[valid_mask].copy().reset_index(drop=True)
+        pct_changes = pct_changes.loc[valid_mask].reset_index(drop=True)
+        result["trend_label"] = TrendThresholdClassifier(threshold)(pct_changes)
+        return result
+
+    def _add_triple_barrier_labels(
+        self,
+        df: pd.DataFrame,
+        config: TripleBarrierLabelConfig,
+    ) -> pd.DataFrame:
+        result = df.copy()
+        price_column = config.price_column or "midprice"
+
+        if config.price_column is None:
+            result["midprice"] = calculate_midprice(
+                result,
+                bid_col=config.bid_column,
+                ask_col=config.ask_column,
+            )
+
+        result["trend_label"] = TripleBarrierLabeler(
+            horizon=config.horizon,
+            upper_barrier_ticks=config.upper_barrier_ticks,
+            lower_barrier_ticks=config.lower_barrier_ticks,
+            price_col=price_column,
+        )(result)
+        return result
+
+
+def add_target_labels_smoothing(
+    df: pd.DataFrame,
+    threshold: float | None = None,
+    method: str = "A",
+    k: int = 10,
+    h: int = 10,
+    bid_col: str = "bid_price_1",
+    ask_col: str = "ask_price_1",
+) -> pd.DataFrame:
+    config = LabelConfig(
+        strategy="smoothing",
+        smoothing=SmoothingLabelConfig(
+            threshold=threshold,
+            method=method,
+            k=k,
+            h=h,
+            bid_column=bid_col,
+            ask_column=ask_col,
+        ),
+    )
+    return TargetLabelPipeline(config).transform(df)
+
+
+def add_target_labels_triple_barrier(
+    df: pd.DataFrame,
+    horizon: int = 10,
+    upper_barrier_ticks: float = 0.01,
+    lower_barrier_ticks: float = -0.01,
+    bid_col: str = "bid_price_1",
+    ask_col: str = "ask_price_1",
+    price_col: str | None = None,
+) -> pd.DataFrame:
+    config = LabelConfig(
+        strategy="triple_barrier",
+        triple_barrier=TripleBarrierLabelConfig(
+            horizon=horizon,
+            upper_barrier_ticks=upper_barrier_ticks,
+            lower_barrier_ticks=lower_barrier_ticks,
+            bid_column=bid_col,
+            ask_column=ask_col,
+            price_column=price_col,
+        ),
+    )
+    return TargetLabelPipeline(config).transform(df)

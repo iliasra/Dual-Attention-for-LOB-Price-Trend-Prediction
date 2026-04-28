@@ -1,0 +1,97 @@
+source_files:
+  message: C:\Users\ilias\Desktop\Imperial\Dual-Attention-for-LOB-Price-Trend-Prediction\data\LOBSTER\AAPL_2012-06-21_34200000_57600000_message_10.csv
+  orderbook: C:\Users\ilias\Desktop\Imperial\Dual-Attention-for-LOB-Price-Trend-Prediction\data\LOBSTER\AAPL_2012-06-21_34200000_57600000_orderbook_10.csv
+raw_subset_rows: 128
+shapes:
+  message:
+  - 128
+  - 6
+  orderbook:
+  - 128
+  - 40
+  joined:
+  - 128
+  - 47
+  labeled:
+  - 124
+  - 48
+  message_features:
+  - 124
+  - 52
+  processed:
+  - 121
+  - 214
+  normalized:
+  - 121
+  - 214
+  dataset_windows: 21
+dataset_artifacts:
+  x_path: C:\Users\ilias\Desktop\Imperial\Dual-Attention-for-LOB-Price-Trend-Prediction\tests\smoke\.smoke\lobster_smoke_X.npy
+  t_path: C:\Users\ilias\Desktop\Imperial\Dual-Attention-for-LOB-Price-Trend-Prediction\tests\smoke\.smoke\lobster_smoke_T.npy
+  y_path: C:\Users\ilias\Desktop\Imperial\Dual-Attention-for-LOB-Price-Trend-Prediction\tests\smoke\.smoke\lobster_smoke_y.npy
+train_val_sizes:
+  train_windows: 8
+  val_windows: 8
+first_batch:
+  x_shape:
+  - 4
+  - 4
+  - 212
+  t_shape:
+  - 4
+  - 4
+  y_shape:
+  - 4
+  targets:
+  - 1
+  - 1
+  - 1
+  - 1
+  pre_train_predictions:
+  - 0
+  - 0
+  - 0
+  - 0
+  post_train_predictions:
+  - 0
+  - 0
+  - 0
+  - 0
+  post_train_logits:
+  - - 0.22410422563552856
+    - -0.11096015572547913
+    - -0.3565019965171814
+  - - 0.1816171258687973
+    - 0.001612287014722824
+    - -0.4372616410255432
+  - - 0.20151177048683167
+    - 0.1353105902671814
+    - -0.3722577691078186
+  - - 0.25192296504974365
+    - 0.036413777619600296
+    - -0.42953211069107056
+history:
+- epoch: 1
+  train_loss: 3.7487804293632507
+  val_loss: 3.7772934436798096
+columns_preview:
+- ask_price_1_static_plgs
+- bid_price_1_static_plgs
+- ask_price_2_static_plgs
+- bid_price_2_static_plgs
+- ask_price_3_static_plgs
+- bid_price_3_static_plgs
+- ask_price_4_static_plgs
+- bid_price_4_static_plgs
+- ask_price_5_static_plgs
+- bid_price_5_static_plgs
+- ask_price_6_static_plgs
+- bid_price_6_static_plgs
+- ask_price_7_static_plgs
+- bid_price_7_static_plgs
+- ask_price_8_static_plgs
+- bid_price_8_static_plgs
+- ask_price_9_static_plgs
+- bid_price_9_static_plgs
+- ask_price_10_static_plgs
+- bid_price_10_static_plgs

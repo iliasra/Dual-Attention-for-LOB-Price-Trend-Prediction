@@ -1,0 +1,104 @@
+data:
+  raw_data_dir: ../data/LOBSTER
+  processed_data_dir: ../data/processed_dataframes
+  sequence_data_dir: ../data/sequences
+  time_column: time
+  label_column: trend_label
+  label_mapping: {-1: 0, 0: 1, 1: 2}
+  price_columns: auto
+  volume_columns: auto
+  feature_exclude_columns: []
+  sequence_window: 4
+
+dataset_splits:
+  train_dates: ["2012-06-21"]
+  validation_dates: []
+  test_dates: []
+
+preprocessing:
+  snapshot_window: 4
+  join:
+    method: ffill
+  labels:
+    strategy: smoothing
+    smoothing:
+      method: C
+      threshold: 1.0e-5
+      k: 2
+      h: 2
+      bid_column: bid_price_1
+      ask_column: ask_price_1
+  message:
+    tick_size: 100.0
+    size_column: size
+    price_column: price
+    order_id_column: order_id
+    categorical_value_map:
+      type: [1, 2, 3, 4, 5]
+      direction: [-1, 1]
+    drop_columns: [price, size, type, direction, order_id]
+  temporal_features:
+    add_day_sincos: true
+    day_frequency: 86400
+    keep_timestamp: true
+    market_open_seconds: 34200
+    market_close_seconds: 57600
+    start_offset_minutes: 15
+    end_offset_minutes: 15
+  normalization:
+    derivatives_stats_path: .smoke/derivatives_stats.yaml
+    scope: train_only
+  price_kinematic:
+    enabled: true
+    columns: auto
+    alpha: 2.0
+    tick_size: 100.0
+    reference: tick
+  price_static:
+    enabled: true
+    columns: auto
+    tick_size: 100.0
+    tau_start: 1.0
+    tau_clip: 50.0
+    tau_max: 100.0
+  volume_kinematic:
+    enabled: true
+    columns: auto
+    alpha: 2.0
+    reference: tick
+  volume_static:
+    enabled: true
+    columns: auto
+    k: 2000.0
+
+model:
+  d_input:
+  d_model: 32
+  feature_embed_dim: 8
+  feature_num_frequencies: 4
+  feature_sigma: 1.0
+  num_heads: 4
+  max_dt: 3.0
+  num_experts: 2
+  top_k: 1
+  num_classes: 3
+  rope_type: hybrid_crope
+  rope_base: 10000
+  attention_dropout: 0.1
+  moe_dropout: 0.1
+  moe_expansion_factor: 2
+  moe_router_noise: 0.01
+  moe_load_balancing_weight: 0.01
+  classifier_dropout: 0.1
+
+training:
+  device: cpu
+  epochs: 1
+  batch_size: 4
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  focal_gamma: 2.0
+  class_weights: [2.0, 10.0, 1.0]
+  grad_clip_norm: 1.0
+  best_model_path: .smoke/best_lob_transformer.pth
+  use_amp: false

@@ -1,3 +1,11 @@
+# Misc
+*.env
+
+# Data
+data/*
+!data/.gitkeep 
+old/ 
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -49,6 +57,9 @@ coverage.xml
 *.py.cover
 .hypothesis/
 .pytest_cache/
+pytest-cache-files-*/
+tests/.pytest_tmp/
+tests/integration/.test_artifacts/
 cover/
 
 # Translations

@@ -1,0 +1,330 @@
+from __future__ import annotations
+
+import math
+from dataclasses import replace
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+try:
+    from configuration import ModelConfig, load_config
+except ImportError:  # pragma: no cover
+    from .configuration import ModelConfig, load_config
+
+
+class FeaturePositionalEmbedding(nn.Module):
+    def __init__(
+        self,
+        d_input: int,
+        embed_dim: int = 16,
+        num_frequencies: int = 8,
+        sigma: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.num_features = d_input
+        self.embed_dim = embed_dim
+        self.frequencies = nn.Parameter(torch.randn(d_input, num_frequencies) * sigma)
+        self.linear = nn.Linear(2 * num_frequencies, embed_dim)
+        self.spatial_pe = nn.Parameter(torch.randn(1, 1, d_input, embed_dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.unsqueeze(-1)
+        angles = x * self.frequencies * 2 * math.pi
+        periodic_features = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+        projected = self.linear(periodic_features)
+        return self.spatial_pe + projected
+
+
+class RotaryEmbeddingBase(nn.Module):
+    def __init__(self, head_dim: int, num_heads: int, base: int = 10000) -> None:
+        super().__init__()
+        if head_dim % 2 != 0:  # even head_dim required for RoPE pairing
+            raise ValueError("head_dim must be even for rotary embeddings.")  # fail fast on invalid RoPE dimensions
+        self.head_dim = head_dim
+        self.num_heads = num_heads
+        self.base = base
+
+    @staticmethod
+    def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+        x_rot = torch.stack([-x2, x1], dim=-1).reshape_as(x)
+        return x * cos + x_rot * sin
+
+
+class ContinuousRotaryEmbedding(RotaryEmbeddingBase):
+    def __init__(self, head_dim: int, num_heads: int, base: int = 10000) -> None:
+        super().__init__(head_dim=head_dim, num_heads=num_heads, base=base)
+        self.time_scale = nn.Parameter(torch.ones(self.head_dim // 2))
+        self.log_freqs = nn.Parameter(torch.randn(num_heads, head_dim // 2))
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        t: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        t = t.unsqueeze(-1).unsqueeze(-1)
+        frequencies = torch.exp(self.log_freqs).clamp(min=1e-4, max=1e2).unsqueeze(0).unsqueeze(0)
+        time_scale = self.time_scale.reshape(1, 1, 1, -1)  # reshape avoids contiguous-memory assumptions
+        angles = t * time_scale * frequencies
+        embedding = angles.repeat_interleave(2, dim=-1)
+        cos = embedding.cos()
+        sin = embedding.sin()
+        return self.apply_rope(q, cos, sin), self.apply_rope(k, cos, sin)
+
+
+class HybridContinuousRotaryEmbedding(RotaryEmbeddingBase):
+    def __init__(self, head_dim: int, num_heads: int, base: int = 10000) -> None:
+        super().__init__(head_dim=head_dim, num_heads=num_heads, base=base)
+        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+        self.register_buffer("inv_freq", inv_freq)
+        self.time_scale = nn.Parameter(torch.ones(self.head_dim // 2))
+        self.log_freqs = nn.Parameter(torch.randn(num_heads, head_dim // 2))
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        t: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _, sequence_length, _, _ = q.shape
+        t_expanded = t.unsqueeze(-1).unsqueeze(-1)
+        frequencies = torch.exp(self.log_freqs).clamp(min=1e-4, max=1e2).unsqueeze(0).unsqueeze(0)
+        time_scale = self.time_scale.reshape(1, 1, 1, -1)  # reshape avoids contiguous-memory assumptions
+        angles_time = t_expanded * time_scale * frequencies
+
+        positions = torch.arange(sequence_length, device=q.device, dtype=q.dtype).reshape(1, sequence_length, 1, 1)  # reshape avoids contiguous-memory assumptions
+        angles_pos = positions * self.inv_freq.reshape(1, 1, 1, -1)  # reshape avoids contiguous-memory assumptions
+        angles = angles_time + angles_pos
+
+        embedding = angles.repeat_interleave(2, dim=-1)
+        cos = embedding.cos()
+        sin = embedding.sin()
+        return self.apply_rope(q, cos, sin), self.apply_rope(k, cos, sin)
+
+
+class RotaryEmbeddingFactory:
+    @staticmethod
+    def create(config: ModelConfig, head_dim: int) -> RotaryEmbeddingBase:
+        rope_type = config.rope_type.lower()
+        if rope_type == "crope":
+            return ContinuousRotaryEmbedding(head_dim=head_dim, num_heads=config.num_heads, base=config.rope_base)
+        if rope_type in {"hybrid_crope", "hybrid-crope", "hybrid"}:
+            return HybridContinuousRotaryEmbedding(
+                head_dim=head_dim,
+                num_heads=config.num_heads,
+                base=config.rope_base,
+            )
+        raise ValueError(f"Unsupported rope type: {config.rope_type}")
+
+
+class ContinuousTimeAttention(nn.Module):
+    def __init__(self, config: ModelConfig) -> None:
+        super().__init__()
+        if config.d_model % config.num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads.")
+
+        self.d_model = config.d_model
+        self.num_heads = config.num_heads  #same nb of heads for spatial/timewise
+        self.head_dim = config.d_model // config.num_heads
+        self.dropout = config.attention_dropout
+        self.max_dt = config.max_dt
+
+        self.qkv = nn.Linear(config.d_model, 3 * config.d_model)
+        self.out = nn.Linear(config.d_model, config.d_model)
+        self.rotary = RotaryEmbeddingFactory.create(config, self.head_dim)
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:  # validate x has shape [batch, sequence, d_model]
+            raise ValueError(f"x must have shape [batch, sequence, d_model], got {tuple(x.shape)}.")
+        if t.ndim != 2:  # validate t has shape [batch, sequence]
+            raise ValueError(f"t must have shape [batch, sequence], got {tuple(t.shape)}.")
+        if x.shape[:2] != t.shape:  # validate x and t share batch and sequence dimensions
+            raise ValueError(f"x and t must share [batch, sequence], got {tuple(x.shape[:2])} and {tuple(t.shape)}.")
+        batch_size, sequence_length, hidden_size = x.shape
+        if hidden_size != self.d_model:  # validate temporal attention hidden dimension
+            raise ValueError(f"x last dimension must be d_model={self.d_model}, got {hidden_size}.")
+        qkv = self.qkv(x).reshape(batch_size, sequence_length, 3, self.num_heads, self.head_dim)  # reshape avoids contiguous-memory assumptions
+        q, k, v = qkv.unbind(dim=2)
+        q, k = self.rotary(q, k, t)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        dt = t[:, :, None] - t[:, None, :]
+        time_mask = ((dt >= 0) & (dt <= self.max_dt)).unsqueeze(1)
+        causal_mask = torch.tril(
+            torch.ones((sequence_length, sequence_length), device=x.device, dtype=torch.bool)
+        ).reshape(1, 1, sequence_length, sequence_length)  # reshape avoids contiguous-memory assumptions
+        attention_mask = time_mask & causal_mask
+
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, dropout_p=self.dropout if self.training else 0.0, is_causal=False,)
+        out = out.transpose(1, 2).reshape(batch_size, sequence_length, hidden_size)
+        return self.out(out)
+
+
+class MoE(nn.Module):
+    def __init__(self, config: ModelConfig) -> None:
+        super().__init__()
+        self.num_experts = config.num_experts
+        self.top_k = min(config.top_k, config.num_experts)
+        if self.top_k < 1:  # validate MoE routes at least one expert
+            raise ValueError("top_k must be at least 1 for MoE routing.")
+        self.router_noise = config.moe_router_noise  # routing noise for MoE training
+        self.load_balancing_weight = config.moe_load_balancing_weight  # load-balancing coefficient for MoE training
+        self.load_balancing_loss: torch.Tensor | None = None  # expose MoE auxiliary loss to the trainer
+        self.gate = nn.Linear(config.d_model, config.num_experts)
+        self.experts = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(config.d_model, config.d_model * config.moe_expansion_factor),
+                    nn.GELU(),
+                    nn.Dropout(config.moe_dropout),
+                    nn.Linear(config.d_model * config.moe_expansion_factor, config.d_model),
+                )
+                for _ in range(config.num_experts)
+            ]
+        )
+
+    def _load_balancing_loss(self, weights: torch.Tensor, topk_indices: torch.Tensor) -> torch.Tensor:
+        if self.load_balancing_weight <= 0.0:  # allow disabling MoE load-balancing from config
+            return weights.new_zeros(())
+        expert_mask = F.one_hot(topk_indices, num_classes=self.num_experts).to(weights.dtype)  # selected-expert counts for MoE balancing
+        expert_fraction = expert_mask.mean(dim=(0, 1, 2))  # load-balancing usage estimate across selected experts
+        router_probability = weights.mean(dim=(0, 1))  # load-balancing probability estimate from router softmax
+        balance_loss = self.num_experts * torch.sum(expert_fraction * router_probability)  # load-balancing for MoE training
+        return balance_loss * self.load_balancing_weight  # scale MoE load-balancing loss
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, sequence_length, hidden_size = x.shape
+        gate_logits = self.gate(x)
+        if self.training and self.router_noise > 0.0:  # routing noise for MoE training
+            gate_logits = gate_logits + torch.randn_like(gate_logits) * self.router_noise
+        weights = torch.softmax(gate_logits, dim=-1)
+        topk_weights, topk_indices = torch.topk(weights, self.top_k, dim=-1)
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(topk_weights.dtype).eps)  # renormalize selected MoE expert weights
+        self.load_balancing_loss = self._load_balancing_loss(weights, topk_indices) if self.training else weights.new_zeros(())  # load-balancing for MoE training
+
+        x_flat = x.reshape(-1, hidden_size)
+        topk_indices_flat = topk_indices.reshape(-1, self.top_k)
+        topk_weights_flat = topk_weights.reshape(-1, self.top_k)
+        out_flat = torch.zeros_like(x_flat)
+
+        for expert_index in range(self.num_experts):
+            batch_indices, kth_choice = torch.where(topk_indices_flat == expert_index)
+            if batch_indices.numel() == 0:
+                continue
+
+            selected_tokens = x_flat[batch_indices]
+            expert_output = self.experts[expert_index](selected_tokens)
+            expert_weights = topk_weights_flat[batch_indices, kth_choice].unsqueeze(-1)
+            out_flat.index_add_(0, batch_indices, expert_output * expert_weights)
+
+        return out_flat.reshape(batch_size, sequence_length, hidden_size)  # reshape avoids contiguous-memory assumptions
+
+
+class DualAttentionEncoder(nn.Module):
+    def __init__(self, config: ModelConfig) -> None:
+        super().__init__()
+        if config.feature_embed_dim % config.num_heads != 0:
+            raise ValueError("feature_embed_dim must be divisible by num_heads.")
+
+        self.config = config
+        self.d_input = config.resolved_d_input()  # cache expected feature dimension for input validation
+        self.feature_embedding = FeaturePositionalEmbedding(
+            d_input=self.d_input,
+            embed_dim=config.feature_embed_dim,
+            num_frequencies=config.feature_num_frequencies,
+            sigma=config.feature_sigma,
+        )
+        self.flattened_feature_dim = self.d_input * config.feature_embed_dim
+        self.spatial_attention = nn.MultiheadAttention(
+            embed_dim=config.feature_embed_dim,
+            num_heads=config.num_heads, #same nb of heads for spatial/timewise
+            batch_first=True,
+        )
+        self.projection = nn.Linear(self.flattened_feature_dim, config.d_model)
+        self.norm1 = nn.LayerNorm(config.d_model)
+        self.temporal_attention = ContinuousTimeAttention(config)  #same nb of heads for spatial/timewise
+        self.norm2 = nn.LayerNorm(config.d_model)
+        self.moe = MoE(config)
+
+    def forward(self, x: torch.Tensor, continuous_times: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:  # validate x has shape [batch, sequence, features]
+            raise ValueError(f"x must have shape [batch, sequence, features], got {tuple(x.shape)}.")
+        if continuous_times.ndim != 2:  # validate t has shape [batch, sequence]
+            raise ValueError(f"t must have shape [batch, sequence], got {tuple(continuous_times.shape)}.")
+        if x.shape[:2] != continuous_times.shape:  # validate x and t share batch and sequence dimensions
+            raise ValueError(
+                f"x and t must share [batch, sequence], got {tuple(x.shape[:2])} and {tuple(continuous_times.shape)}."
+            )
+        if x.shape[-1] != self.d_input:  # validate input feature dimension before embedding
+            raise ValueError(f"x last dimension must be d_input={self.d_input}, got {x.shape[-1]}.")
+        batch_size, sequence_length, _ = x.shape
+        relative_time = continuous_times - continuous_times[:, :1]
+
+        embedded = self.feature_embedding(x)
+        embedded = embedded.reshape(batch_size * sequence_length, self.d_input, self.config.feature_embed_dim)  # reshape avoids contiguous-memory assumptions
+        spatial_attended, _ = self.spatial_attention(embedded, embedded, embedded)
+        embedded = (embedded + spatial_attended).reshape(batch_size, sequence_length, self.flattened_feature_dim)  # reshape avoids contiguous-memory assumptions
+
+        projected = self.projection(embedded)
+        projected = projected + self.temporal_attention(self.norm1(projected), relative_time)
+        projected = projected + self.moe(self.norm2(projected))
+        return projected
+
+
+class TrendClassifier(nn.Module):
+    def __init__(self, config: ModelConfig) -> None:
+        super().__init__()
+        self.head = nn.Sequential(
+            nn.LayerNorm(config.d_model),
+            nn.Dropout(config.classifier_dropout),
+            nn.Linear(config.d_model, config.d_model // 2),
+            nn.GELU(),
+            nn.Dropout(config.classifier_dropout),
+            nn.Linear(config.d_model // 2, config.num_classes),
+        )
+
+    def forward(self, transformer_output: torch.Tensor) -> torch.Tensor:
+        return self.head(transformer_output[:, -1, :])
+
+
+class LobTrendTransformer(nn.Module):
+    def __init__(self, config: ModelConfig | None = None, **legacy_kwargs: int | float | str) -> None:
+        super().__init__()
+        if config is None:
+            loaded = load_config().model
+            config = replace(loaded, **legacy_kwargs) if legacy_kwargs else loaded
+        elif legacy_kwargs:
+            config = replace(config, **legacy_kwargs)
+
+        resolved_config = replace(config, d_input=config.resolved_d_input(config.d_input))
+        self.config = resolved_config
+        self.encoder = DualAttentionEncoder(resolved_config)
+        self.classifier = TrendClassifier(resolved_config)
+        self.moe_load_balancing_loss: torch.Tensor | None = None  # expose MoE auxiliary loss to training
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        encoded = self.encoder(x, t)
+        self.moe_load_balancing_loss = self.encoder.moe.load_balancing_loss  # load-balancing for MoE training
+        return self.classifier(encoded)
+
+
+def build_model(config: ModelConfig | None = None, d_input: int | None = None) -> LobTrendTransformer:
+    model_config = config or load_config().model
+    if d_input is not None:
+        model_config = replace(model_config, d_input=d_input)
+    elif model_config.d_input is None:
+        raise ValueError("d_input must be provided either in the YAML file or as an argument.")
+    return LobTrendTransformer(model_config)
+
+
+FeaturePE = FeaturePositionalEmbedding
+cRoPE = ContinuousRotaryEmbedding
+Hybrid_cRoPE = HybridContinuousRotaryEmbedding
+MultiheadAttention_cRoPE = ContinuousTimeAttention
+DualAttention = DualAttentionEncoder
