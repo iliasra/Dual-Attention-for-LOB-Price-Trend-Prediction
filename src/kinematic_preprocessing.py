@@ -612,6 +612,11 @@ class FittedDerivativeNormalizer:
             normalized[column] = (normalized[column] - values["mean"]) / (values["std"] + 1e-8)
         return normalized
 
+# ---------------------------------------------------------------------------
+# Legacy functional API
+# ---------------------------------------------------------------------------
+# These wrappers are kept for compatibility with notebooks or older
+# scripts. The production pipeline uses the class-based processors above.
 
 def price_kinematic_stream(
     df: pd.DataFrame,
@@ -621,6 +626,7 @@ def price_kinematic_stream(
     alpha: float,
     ref: Literal["tick", "time"],
 ) -> pd.DataFrame:
+    """Legacy wrapper"""
     processor = PriceKinematicProcessor(
         time_column=time_col,
         tick_size=tick,
@@ -637,6 +643,7 @@ def price_static_stream(
     tau_clip: float | None,
     tau_max: float,
 ) -> pd.DataFrame:
+    """Legacy wrapper"""
     processor = PriceStaticProcessor(tick_size=tick, tau_start=tau_start, tau_clip=tau_clip, tau_max=tau_max)
     return pd.DataFrame([processor.transform(df, price_cols)], index=[df.index[-1]])
 
@@ -648,6 +655,7 @@ def volume_kinematic_stream(
     alpha: float,
     ref: Literal["tick", "time"],
 ) -> pd.DataFrame:
+    """Legacy wrapper"""
     processor = VolumeKinematicProcessor(
         time_column=timezone_col,
         extractor=KinematicTokenExtractor(alpha=alpha, reference=ref),
@@ -656,6 +664,7 @@ def volume_kinematic_stream(
 
 
 def volume_static_stream(df: pd.DataFrame, volume_cols: list[str], k: float) -> pd.DataFrame:
+    """Legacy wrapper"""
     processor = VolumeStaticProcessor(k=k)
     return pd.DataFrame([processor.transform(df, volume_cols)], index=[df.index[-1]])
 
@@ -666,6 +675,7 @@ def join_message_orderbook(
     time_col: str = "time",
     method: str = "ffill",
 ) -> pd.DataFrame:
+    """Legacy wrapper"""
     return MessageOrderbookJoiner(time_column=time_col, method=method).transform(message_df, orderbook_df)
 
 
@@ -676,6 +686,7 @@ def extract_kinematic_tokens(
     ref: Literal["tick", "time"],
     alpha: float = 5.0,
 ) -> dict[str, float]:
+    """Legacy wrapper"""
     return KinematicTokenExtractor(alpha=alpha, reference=ref).extract(series, time, label)
 
 
@@ -694,6 +705,7 @@ def process_orderbook_snapshot_df_window(
     ref: Literal["tick", "time"] = "tick",
     k: float = 2000.0,
 ) -> dict[str, float]:
+    """Legacy wrapper"""
     config = load_config()
     data_config = DataConfig(
         time_column=timestamp_col,
@@ -734,6 +746,7 @@ def process_all_snapshot_windows(
     ref: Literal["tick", "time"] = "tick",
     k: float = 2000.0,
 ) -> pd.DataFrame:
+    """Legacy wrapper"""
     config = load_config()
     data_config = DataConfig(
         time_column=timestamp_col,
@@ -760,11 +773,13 @@ def process_all_snapshot_windows(
 
 
 def process_message_col(message_df: pd.DataFrame, tick: float) -> pd.DataFrame:
+    """Legacy wrapper"""
     config = load_config()
     config.preprocessing.message.tick_size = tick
     return MessageFeatureProcessor(config.data.time_column, config.preprocessing.message).transform(message_df)
 
 
 def z_score_derivatives(df: pd.DataFrame, filepath: str) -> pd.DataFrame:
+    """Legacy wrapper"""
     normalizer = DerivativeNormalizer(filepath).fit([df])
     return normalizer.transform(df)
