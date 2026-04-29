@@ -54,7 +54,7 @@ def main() -> None:
     if len(train_dataset) == 0:
         raise ValueError(
             f"No training sequences found in {sequence_dir / 'train'}. "
-            "Run scripts/create_datasets.py first."
+            "Run scripts/process_data.py first."
         )
 
     validation_dataset = build_dataset(sequence_dir, "validation", config.data.sequence_window)

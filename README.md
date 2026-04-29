@@ -1,2 +1,146 @@
-# Dual-Attention-for-LOB-Price-Trend-Prediction
-This project aims at creating a SOTA transformer-based architecture to predict price trend prediction based on Limit Order Book Data.
+# Dual Attention for Limit Order Book Price Trend Prediction
+
+This repository contains the research code for a thesis project on price trend
+prediction from Limit Order Book (LOB) data. I use it as an experimental
+framework to study how event-level preprocessing, continuous-time feature
+representations, and transformer-based architectures can be combined for
+short-horizon market movement prediction.
+
+The project is not intended to be a polished trading system. It is a research
+prototype designed to make modelling assumptions explicit, test alternative LOB
+representations, and evaluate whether richer event-window features improve
+classification of future price trends.
+
+## Research Motivation
+
+LOB data is high-frequency, irregular, noisy, and strongly event-driven. A core
+question in this project is whether I can represent local LOB dynamics in a way
+that is more informative than raw snapshots alone, while still preserving the
+temporal structure needed by a transformer model.
+
+I focus on two complementary research directions:
+
+1. **Preprocessing and token construction for LOB events**
+
+   I explore dynamic and static transformations of LOB windows before they are
+   passed to the model. For dynamic streams, I experiment with a spline-based
+   kinematic representation inspired by **"Kinematic Tokenization:
+   Optimization-Based Continuous-Time Tokens for Learnable Decision Policies in
+   Noisy Time Series"**. In practice, this means extracting continuous-time
+   position, velocity, acceleration, and jerk-style features from price and
+   volume trajectories.
+
+   For static LOB state features, I use PLGS-style price scaling and exponential
+   volume scaling inspired by **"LOBERT: Generative AI Foundation Model for Limit
+   Order Book Messages"**. This gives the preprocessing pipeline a way to encode
+   the relative structure of the book while reducing the effect of raw scale.
+
+2. **Dual-attention modelling for price trend prediction**
+
+   I implement a transformer-style architecture inspired by **"TLOB: A Novel
+   Transformer Model with Dual Attention for Price Trend Prediction with Limit
+   Order Book Data"**. The model combines feature-wise attention over LOB-derived
+   variables with temporal attention over event sequences. The goal is to study
+   whether separating feature interactions and temporal dependencies is useful
+   for LOB trend classification.
+
+## Current Pipeline
+
+The codebase is organized around a two-stage workflow.
+
+```powershell
+python scripts\process_data.py
+python scripts\run_training.py
+```
+
+`scripts/process_data.py` runs the preprocessing pipeline. It loads
+LOBSTER-style message and orderbook files, joins them, filters the trading
+session, creates trend labels, computes static and kinematic features,
+normalizes derivative features on the training split, and saves both processed
+dataframes and model-ready sequence tensors.
+
+`scripts/run_training.py` loads the generated sequence tensors, creates PyTorch
+datasets and dataloaders, instantiates the dual-attention model, and trains it
+using the configured training loop.
+
+Each training sample is a full event window of length `sequence_window`, defined
+in `configs/pipeline_config.yaml`.
+
+## Repository Structure
+
+```text
+.
+|-- configs/
+|   `-- pipeline_config.yaml        # Main experiment, preprocessing, model, and training config
+|-- data/
+|   |-- LOBSTER/                    # Raw LOBSTER-style files, ignored by git
+|   |-- processed_dataframes/       # Processed CSV outputs
+|   |-- sequences/                  # Saved X/T/y NumPy sequence tensors
+|   `-- derivatives_z_scores/       # Fitted derivative normalization statistics
+|-- results/                        # Trained model checkpoints and experimental outputs
+|-- scripts/
+|   |-- process_data.py             # Runs the preprocessing pipeline
+|   `-- run_training.py             # Trains the model from saved sequences
+|-- src/
+|   |-- configuration.py            # YAML configuration dataclasses
+|   |-- datasets.py                 # Sequence construction and PyTorch dataset
+|   |-- horizon.py                  # Trend labelling strategies
+|   |-- kinematic_preprocessing.py  # Static and kinematic LOB feature engineering
+|   |-- model.py                    # Dual-attention transformer model
+|   |-- processing.py               # End-to-end preprocessing pipeline
+|   |-- training.py                 # Loss, trainer, optimizer loop
+|   `-- utils.py                    # YAML and helper utilities
+|-- tests/
+|   |-- unit/                       # Focused tests for small components
+|   |-- integration/                # Synthetic pipeline/model integration tests
+|   `-- smoke/                      # Smoke test on a small LOBSTER sample
+|-- requirements.txt
+`-- pytest.ini
+```
+
+## Data Products
+
+The preprocessing stage writes normalized processed dataframes to:
+
+```text
+data/processed_dataframes/<split>/<date>_processed.csv
+```
+
+It writes model-ready sequence tensors to:
+
+```text
+data/sequences/<split>/<date>_X.npy
+data/sequences/<split>/<date>_T.npy
+data/sequences/<split>/<date>_y.npy
+```
+
+These tensors are consumed directly by `LOBDataset` during training.
+
+## Testing
+
+I maintain unit and integration tests to keep the research pipeline stable while
+I iterate on modelling ideas.
+
+```powershell
+python -m pytest -q
+```
+
+On my local machine, I usually run the tests through the `transformer` conda
+environment:
+
+```powershell
+conda --no-plugins run -n transformer python -m pytest -q
+```
+
+The smoke test in `tests/smoke/` is used as a lightweight end-to-end sanity
+check on a small LOBSTER sample.
+
+## Status
+
+This repository is under active development as part of my thesis. The current
+implementation provides the core preprocessing, sequence construction,
+dual-attention model, and training loop. The main ongoing work is experimental:
+I am refining the feature representations, validating the labelling choices, and
+comparing model behaviour across alternative LOB tokenization strategies.
+
+Once a first run is performed on this particular architecture, I would like to implement and test the following ideas: work on a volume-based view of the data (i.e. one snapshot each x traded shares); implement an adaptative horizon framework based on the paper "The Label Horizon Paradox: Rethinking Supervision Targets in Financial Forecasting"; try to apply kinematic processing to a more continuous feature, such as microprice, as raw prices/volumes may be too discrete for the method to perform well.   
