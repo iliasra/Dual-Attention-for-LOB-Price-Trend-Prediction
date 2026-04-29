@@ -55,7 +55,7 @@ class ProcessedDay:
     sequence_paths: tuple[Path, Path, Path] | None = None
 
 
-class LobExperimentRunner:
+class LobProcessingPipeline:
     def __init__(self, config: ExperimentConfig | None = None, data_dir: str | Path | None = None) -> None:
         self.config = config or load_config()
         self.root_dir = Path(__file__).resolve().parent.parent

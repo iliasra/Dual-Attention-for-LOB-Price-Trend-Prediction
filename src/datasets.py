@@ -72,13 +72,49 @@ def process_daily_dataframe(
 
 
 class LOBDataset(Dataset):
-    def __init__(self, x_paths: list[str], t_paths: list[str], y_paths: list[str]):
+    def __init__(
+        self,
+        x_paths: list[str],
+        t_paths: list[str],
+        y_paths: list[str],
+        sequence_window: int | None = None,
+    ):
         self.X_data = [np.load(path, mmap_mode="r") for path in x_paths]
         self.T_data = [np.load(path, mmap_mode="r") for path in t_paths]
         self.y_data = [np.load(path, mmap_mode="r") for path in y_paths]
+        self.sequence_window = sequence_window
+        self._validate_arrays()
 
         self.lengths = [len(labels) for labels in self.y_data]
         self.cumulative_lengths = np.cumsum(self.lengths)
+
+    def _validate_arrays(self) -> None:
+        if not (len(self.X_data) == len(self.T_data) == len(self.y_data)):
+            raise ValueError("x_paths, t_paths, and y_paths must contain the same number of files.")
+
+        for day_idx, (features, times, labels) in enumerate(zip(self.X_data, self.T_data, self.y_data)):
+            if features.ndim != 3:
+                raise ValueError(
+                    f"X file at index {day_idx} must contain pre-built windows with shape "
+                    "[num_windows, sequence_window, num_features]."
+                )
+            if times.ndim != 2:
+                raise ValueError(
+                    f"T file at index {day_idx} must contain time windows with shape "
+                    "[num_windows, sequence_window]."
+                )
+            if len(features) != len(times) or len(features) != len(labels):
+                raise ValueError(f"X, T, and y files at index {day_idx} must contain the same number of windows.")
+            if self.sequence_window is not None and features.shape[1] != self.sequence_window:
+                raise ValueError(
+                    f"X file at index {day_idx} has sequence length {features.shape[1]}, "
+                    f"expected {self.sequence_window}."
+                )
+            if self.sequence_window is not None and times.shape[1] != self.sequence_window:
+                raise ValueError(
+                    f"T file at index {day_idx} has sequence length {times.shape[1]}, "
+                    f"expected {self.sequence_window}."
+                )
 
     def __len__(self) -> int:
         return int(self.cumulative_lengths[-1]) if len(self.cumulative_lengths) else 0

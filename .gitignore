@@ -60,6 +60,7 @@ coverage.xml
 pytest-cache-files-*/
 tests/.pytest_tmp/
 tests/integration/.test_artifacts/
+tests/unit/.test_artifacts/
 cover/
 
 # Translations

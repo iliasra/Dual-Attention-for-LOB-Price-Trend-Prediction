@@ -106,5 +106,5 @@ training:
   focal_gamma: 2.0
   class_weights: [2.0, 10.0, 1.0]
   grad_clip_norm: 1.0
-  best_model_path: results/best_lob_transformer.pth
+  best_model_path: ../results/best_lob_transformer.pth
   use_amp: false

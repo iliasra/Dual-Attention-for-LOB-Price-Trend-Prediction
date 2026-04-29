@@ -131,7 +131,7 @@ def test_sequence_dataset_and_model_forward_use_matching_tensor_shapes(artifact_
     normalized = run_preprocessing_pipeline(artifact_dir)
 
     x_path, t_path, y_path = DailySequenceBuilder(data_config).save(normalized, artifact_dir / "synthetic_lob")
-    dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)])
+    dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=data_config.sequence_window)
     loader = DataLoader(dataset, batch_size=2, shuffle=False)
     x_batch, t_batch, y_batch = next(iter(loader))
 

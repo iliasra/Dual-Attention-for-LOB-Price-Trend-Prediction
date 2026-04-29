@@ -138,7 +138,7 @@ def main() -> None:
 
     builder = DailySequenceBuilder(config.data)
     x_path, t_path, y_path = builder.save(dataset_input, smoke_dir / "lobster_smoke")
-    dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)])
+    dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=config.data.sequence_window)
     subset_length = min(TRAIN_WINDOWS_LIMIT, len(dataset))
     if subset_length < 2:
         raise ValueError("Not enough sequence windows were generated for the smoke test.")
