@@ -28,9 +28,6 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
     },
     "preprocessing": {
         "snapshot_window": None,
-        "join": {
-            "method": None,
-        },
         "labels": {
             "strategy": None,
             "smoothing": {
@@ -131,7 +128,6 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
 
 
 ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
-    "preprocessing.join.method": {"ffill"},
     "preprocessing.labels.strategy": {"smoothing", "triple_barrier"},
     "preprocessing.labels.smoothing.method": {"A", "B", "C"},
     "preprocessing.normalization.scope": {"train_only"},
@@ -317,15 +313,6 @@ class VolumeStaticConfig:
         )
 
 @dataclass(slots=True)
-class JoinConfig:
-    method: str
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "JoinConfig":
-        return cls(method=str(payload["method"]))
-
-
-@dataclass(slots=True)
 class SmoothingLabelConfig:
     method: str
     threshold: float | None
@@ -460,7 +447,6 @@ class DatasetSplitConfig:
 @dataclass(slots=True)
 class PreprocessingConfig:
     snapshot_window: int
-    join: JoinConfig
     labels: LabelConfig
     message: MessageConfig
     temporal_features: TemporalFeaturesConfig
@@ -474,7 +460,6 @@ class PreprocessingConfig:
     def from_dict(cls, payload: dict[str, Any], tick_size: float) -> "PreprocessingConfig":
         return cls(
             snapshot_window=int(payload["snapshot_window"]),
-            join=JoinConfig.from_dict(payload["join"]),
             labels=LabelConfig.from_dict(payload["labels"]),
             message=MessageConfig.from_dict(payload["message"], tick_size=tick_size),
             temporal_features=TemporalFeaturesConfig.from_dict(payload["temporal_features"]),

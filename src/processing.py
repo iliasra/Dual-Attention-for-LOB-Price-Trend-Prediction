@@ -70,7 +70,6 @@ class LobProcessingPipeline:
 
         self.joiner = MessageOrderbookJoiner(
             time_column=self.config.data.time_column,
-            method=self.config.preprocessing.join.method,
         ) #joins the message/orderbook datasets for a particular day, including timestamp column
         self.session_filter = TradingSessionFilter(
             time_column=self.config.data.time_column,

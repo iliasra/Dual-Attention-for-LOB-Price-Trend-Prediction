@@ -283,7 +283,6 @@ class VolumeStaticProcessor:
 @dataclass(slots=True)
 class MessageOrderbookJoiner:
     time_column: str
-    method: str
 
     def transform(self, message_df: pd.DataFrame, orderbook_df: pd.DataFrame) -> pd.DataFrame:
         if self.time_column not in message_df.columns:
@@ -673,10 +672,9 @@ def join_message_orderbook(
     message_df: pd.DataFrame,
     orderbook_df: pd.DataFrame,
     time_col: str = "time",
-    method: str = "ffill",
 ) -> pd.DataFrame:
     """Legacy wrapper"""
-    return MessageOrderbookJoiner(time_column=time_col, method=method).transform(message_df, orderbook_df)
+    return MessageOrderbookJoiner(time_column=time_col).transform(message_df, orderbook_df)
 
 
 def extract_kinematic_tokens(

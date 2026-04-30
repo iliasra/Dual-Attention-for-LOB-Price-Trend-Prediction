@@ -108,10 +108,7 @@ def main() -> None:
     save_preview(message_df, smoke_dir / "raw_message_preview.csv")
     save_preview(orderbook_df, smoke_dir / "raw_orderbook_preview.csv")
 
-    joiner = MessageOrderbookJoiner(
-        time_column=config.data.time_column,
-        method=config.preprocessing.join.method,
-    )
+    joiner = MessageOrderbookJoiner(time_column=config.data.time_column)
     labeler = TargetLabelPipeline(config.preprocessing.labels)
     message_processor = MessageFeatureProcessor(config.data.time_column, config.preprocessing.message)
     snapshot_processor = SnapshotBatchProcessor(config.data, config.preprocessing)

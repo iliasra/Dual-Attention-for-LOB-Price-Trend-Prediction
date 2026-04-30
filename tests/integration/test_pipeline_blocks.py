@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader
 
 from configuration import (
     DataConfig,
-    JoinConfig,
     LabelConfig,
     MessageConfig,
     ModelConfig,
@@ -92,7 +91,6 @@ def make_test_configs() -> tuple[DataConfig, PreprocessingConfig]:
     )
     preprocessing_config = PreprocessingConfig(
         snapshot_window=4,
-        join=JoinConfig(method="ffill"),
         labels=LabelConfig(
             strategy="smoothing",
             smoothing=SmoothingLabelConfig(
@@ -167,10 +165,7 @@ def run_preprocessing_pipeline(artifact_dir: Path) -> pd.DataFrame:
     data_config, preprocessing_config = make_test_configs()
     message_df, orderbook_df = make_synthetic_lob_frames()
 
-    joined = MessageOrderbookJoiner(
-        time_column=data_config.time_column,
-        method=preprocessing_config.join.method,
-    ).transform(message_df, orderbook_df)
+    joined = MessageOrderbookJoiner(time_column=data_config.time_column).transform(message_df, orderbook_df)
     labeled = TargetLabelPipeline(preprocessing_config.labels).transform(joined)
     enriched = MessageFeatureProcessor(data_config.time_column, preprocessing_config.message).transform(labeled)
     processed = SnapshotBatchProcessor(data_config, preprocessing_config).transform(enriched)

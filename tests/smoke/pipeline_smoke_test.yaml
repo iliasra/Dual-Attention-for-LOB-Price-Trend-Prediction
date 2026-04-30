@@ -18,8 +18,6 @@ dataset_splits:
 
 preprocessing:
   snapshot_window: 4
-  join:
-    method: ffill
   labels:
     strategy: smoothing
     smoothing:

@@ -49,3 +49,4 @@ def test_tick_size_is_inherited_from_data_config() -> None:
     assert config.preprocessing.message.tick_size == config.data.tick_size
     assert config.preprocessing.price_kinematic.tick_size == config.data.tick_size
     assert config.preprocessing.price_static.tick_size == config.data.tick_size
+

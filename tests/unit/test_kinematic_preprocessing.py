@@ -52,7 +52,7 @@ def test_message_orderbook_joiner_copies_time_and_delta_t() -> None:
     )
     orderbook_df = pd.DataFrame({"bid_price_1": [100.0, 100.5, 101.0]})
 
-    joined = MessageOrderbookJoiner(time_column="time", method="ffill").transform(message_df, orderbook_df)
+    joined = MessageOrderbookJoiner(time_column="time").transform(message_df, orderbook_df)
 
     assert joined["time"].tolist() == [10.0, 10.5, 11.0]
     assert np.isnan(joined["delta_t"].iloc[0])

@@ -18,9 +18,6 @@ dataset_splits:
 
 preprocessing:
   snapshot_window: 16
-  join:
-    # allowed: ffill
-    method: ffill
   labels:
     # allowed: smoothing, triple_barrier
     strategy: smoothing
