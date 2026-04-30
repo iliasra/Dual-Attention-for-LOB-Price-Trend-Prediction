@@ -11,10 +11,10 @@ from scipy.interpolate import UnivariateSpline
 from tqdm import tqdm
 
 try:
-    from configuration import DataConfig, PreprocessingConfig, StreamConfig, load_config
+    from configuration import DataConfig, PreprocessingConfig, load_config
     from utils import append_to_yaml
 except ImportError:  # pragma: no cover
-    from .configuration import DataConfig, PreprocessingConfig, StreamConfig, load_config
+    from .configuration import DataConfig, PreprocessingConfig, load_config
     from .utils import append_to_yaml
 
 ArrayLike = Union[float, int, np.ndarray, pd.Series]
@@ -174,8 +174,8 @@ class ColumnResolver:
 
 @dataclass(slots=True)
 class KinematicTokenExtractor:
-    alpha: float = 5.0
-    reference: Literal["tick", "time"] = "tick"
+    alpha: float
+    reference: Literal["tick", "time"]
 
     def extract(self, series: pd.Series, time: pd.Series, label: str) -> dict[str, float]:
         if len(series) < 2:
@@ -282,8 +282,8 @@ class VolumeStaticProcessor:
 
 @dataclass(slots=True)
 class MessageOrderbookJoiner:
-    time_column: str = "time"
-    method: str = "ffill"
+    time_column: str
+    method: str
 
     def transform(self, message_df: pd.DataFrame, orderbook_df: pd.DataFrame) -> pd.DataFrame:
         if self.time_column not in message_df.columns:
@@ -373,7 +373,7 @@ class SnapshotWindowProcessor:
     def _resolve_stream_columns(
         self,
         df: pd.DataFrame,
-        stream_config: StreamConfig,
+        stream_config: object,
         kind: Literal["price", "volume"],
     ) -> list[str]:
         if kind == "price":
@@ -708,8 +708,13 @@ def process_orderbook_snapshot_df_window(
     """Legacy wrapper"""
     config = load_config()
     data_config = DataConfig(
+        raw_data_dir=config.data.raw_data_dir,
+        processed_data_dir=config.data.processed_data_dir,
+        sequence_data_dir=config.data.sequence_data_dir,
+        tick_size=tick,
         time_column=timestamp_col,
         label_column=config.data.label_column,
+        label_mapping=config.data.label_mapping,
         price_columns=price_cols,
         volume_columns=volume_cols,
         feature_exclude_columns=config.data.feature_exclude_columns,
@@ -749,8 +754,13 @@ def process_all_snapshot_windows(
     """Legacy wrapper"""
     config = load_config()
     data_config = DataConfig(
+        raw_data_dir=config.data.raw_data_dir,
+        processed_data_dir=config.data.processed_data_dir,
+        sequence_data_dir=config.data.sequence_data_dir,
+        tick_size=tick,
         time_column=timestamp_col,
         label_column=config.data.label_column,
+        label_mapping=config.data.label_mapping,
         price_columns=price_cols,
         volume_columns=volume_cols,
         feature_exclude_columns=config.data.feature_exclude_columns,

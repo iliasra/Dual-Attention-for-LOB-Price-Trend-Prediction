@@ -2,6 +2,7 @@ data:
   raw_data_dir: ../data/LOBSTER
   processed_data_dir: ../data/processed_dataframes
   sequence_data_dir: ../data/sequences
+  tick_size: 100.0
   time_column: time
   label_column: trend_label
   label_mapping: {-1: 0, 0: 1, 1: 2}
@@ -18,10 +19,13 @@ dataset_splits:
 preprocessing:
   snapshot_window: 16
   join:
+    # allowed: ffill
     method: ffill
   labels:
+    # allowed: smoothing, triple_barrier
     strategy: smoothing
     smoothing:
+      # allowed: A, B, C
       method: C
       threshold: 1.0e-5
       k: 5
@@ -36,7 +40,6 @@ preprocessing:
       ask_column: ask_price_1
       price_column:
   message:
-    tick_size: 100.0
     size_column: size
     price_column: price
     order_id_column: order_id
@@ -54,17 +57,17 @@ preprocessing:
     end_offset_minutes: 15
   normalization:
     derivatives_stats_path: ../data/derivatives_z_scores/derivatives_stats.yaml
+    # allowed: train_only
     scope: train_only
   price_kinematic:
     enabled: true
     columns: auto
     alpha: 5.0
-    tick_size: 100.0
+    # allowed: tick, time
     reference: tick
   price_static:
     enabled: true
     columns: auto
-    tick_size: 100.0
     tau_start: 1.0
     tau_clip: 50.0
     tau_max: 100.0
@@ -72,6 +75,7 @@ preprocessing:
     enabled: true
     columns: auto
     alpha: 5.0
+    # allowed: tick, time
     reference: tick
   volume_static:
     enabled: true
@@ -89,6 +93,7 @@ model:
   num_experts: 4
   top_k: 2
   num_classes: 3
+  # allowed: crope, hybrid_crope, hybrid-crope, hybrid
   rope_type: crope
   rope_base: 10000
   attention_dropout: 0.1
@@ -99,6 +104,7 @@ model:
   classifier_dropout: 0.1
 
 training:
+  # allowed: cpu, cuda
   device: cpu
   epochs: 2
   batch_size: 8

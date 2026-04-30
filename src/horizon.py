@@ -222,6 +222,14 @@ def add_target_labels_smoothing(
             bid_column=bid_col,
             ask_column=ask_col,
         ),
+        triple_barrier=TripleBarrierLabelConfig(
+            horizon=10,
+            upper_barrier_ticks=2.0,
+            lower_barrier_ticks=3.0,
+            bid_column=bid_col,
+            ask_column=ask_col,
+            price_column=None,
+        ),
     )
     return TargetLabelPipeline(config).transform(df)
 
@@ -237,6 +245,14 @@ def add_target_labels_triple_barrier(
 ) -> pd.DataFrame:
     config = LabelConfig(
         strategy="triple_barrier",
+        smoothing=SmoothingLabelConfig(
+            threshold=None,
+            method="C",
+            k=5,
+            h=10,
+            bid_column=bid_col,
+            ask_column=ask_col,
+        ),
         triple_barrier=TripleBarrierLabelConfig(
             horizon=horizon,
             upper_barrier_ticks=upper_barrier_ticks,

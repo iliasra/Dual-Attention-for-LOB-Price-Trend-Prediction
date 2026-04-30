@@ -17,9 +17,9 @@ class FeaturePositionalEmbedding(nn.Module):
     def __init__(
         self,
         d_input: int,
-        embed_dim: int = 16,
-        num_frequencies: int = 8,
-        sigma: float = 1.0,
+        embed_dim: int,
+        num_frequencies: int,
+        sigma: float,
     ) -> None:
         super().__init__()
         self.num_features = d_input
@@ -37,7 +37,7 @@ class FeaturePositionalEmbedding(nn.Module):
 
 
 class RotaryEmbeddingBase(nn.Module):
-    def __init__(self, head_dim: int, num_heads: int, base: int = 10000) -> None:
+    def __init__(self, head_dim: int, num_heads: int, base: int) -> None:
         super().__init__()
         if head_dim % 2 != 0:  # even head_dim required for RoPE pairing
             raise ValueError("head_dim must be even for rotary embeddings.")  # fail fast on invalid RoPE dimensions
@@ -54,7 +54,7 @@ class RotaryEmbeddingBase(nn.Module):
 
 
 class ContinuousRotaryEmbedding(RotaryEmbeddingBase):
-    def __init__(self, head_dim: int, num_heads: int, base: int = 10000) -> None:
+    def __init__(self, head_dim: int, num_heads: int, base: int) -> None:
         super().__init__(head_dim=head_dim, num_heads=num_heads, base=base)
         self.time_scale = nn.Parameter(torch.ones(self.head_dim // 2))
         self.log_freqs = nn.Parameter(torch.randn(num_heads, head_dim // 2))
@@ -76,7 +76,7 @@ class ContinuousRotaryEmbedding(RotaryEmbeddingBase):
 
 
 class HybridContinuousRotaryEmbedding(RotaryEmbeddingBase):
-    def __init__(self, head_dim: int, num_heads: int, base: int = 10000) -> None:
+    def __init__(self, head_dim: int, num_heads: int, base: int) -> None:
         super().__init__(head_dim=head_dim, num_heads=num_heads, base=base)
         inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
         self.register_buffer("inv_freq", inv_freq)
@@ -294,14 +294,8 @@ class TrendClassifier(nn.Module):
 
 
 class LobTrendTransformer(nn.Module):
-    def __init__(self, config: ModelConfig | None = None, **legacy_kwargs: int | float | str) -> None:
+    def __init__(self, config: ModelConfig) -> None:
         super().__init__()
-        if config is None:
-            loaded = load_config().model
-            config = replace(loaded, **legacy_kwargs) if legacy_kwargs else loaded
-        elif legacy_kwargs:
-            config = replace(config, **legacy_kwargs)
-
         resolved_config = replace(config, d_input=config.resolved_d_input(config.d_input))
         self.config = resolved_config
         self.encoder = DualAttentionEncoder(resolved_config)

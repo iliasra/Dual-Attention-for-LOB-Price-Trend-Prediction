@@ -2,6 +2,7 @@ data:
   raw_data_dir: ../data/LOBSTER
   processed_data_dir: ../data/processed_dataframes
   sequence_data_dir: ../data/sequences
+  tick_size: 100.0
   time_column: time
   label_column: trend_label
   label_mapping: {-1: 0, 0: 1, 1: 2}
@@ -28,8 +29,14 @@ preprocessing:
       h: 2
       bid_column: bid_price_1
       ask_column: ask_price_1
+    triple_barrier:
+      horizon: 10
+      upper_barrier_ticks: 2.0
+      lower_barrier_ticks: 3.0
+      bid_column: bid_price_1
+      ask_column: ask_price_1
+      price_column:
   message:
-    tick_size: 100.0
     size_column: size
     price_column: price
     order_id_column: order_id
@@ -52,12 +59,10 @@ preprocessing:
     enabled: true
     columns: auto
     alpha: 2.0
-    tick_size: 100.0
     reference: tick
   price_static:
     enabled: true
     columns: auto
-    tick_size: 100.0
     tau_start: 1.0
     tau_clip: 50.0
     tau_max: 100.0

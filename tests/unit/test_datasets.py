@@ -11,6 +11,25 @@ from configuration import DataConfig
 from datasets import DailySequenceBuilder, LOBDataset
 
 
+def make_data_config(
+    sequence_window: int = 64,
+    feature_exclude_columns: list[str] | None = None,
+) -> DataConfig:
+    return DataConfig(
+        raw_data_dir="",
+        processed_data_dir="",
+        sequence_data_dir="",
+        tick_size=1.0,
+        time_column="time",
+        label_column="trend_label",
+        label_mapping={-1: 0, 0: 1, 1: 2},
+        price_columns=None,
+        volume_columns=None,
+        feature_exclude_columns=feature_exclude_columns or [],
+        sequence_window=sequence_window,
+    )
+
+
 @pytest.fixture()
 def artifact_dir(request: pytest.FixtureRequest) -> Path:
     path = Path(__file__).resolve().parent / ".test_artifacts" / request.node.name
@@ -30,7 +49,7 @@ def test_feature_columns_excludes_time_label_and_configured_columns() -> None:
             "keep_b": [30.0],
         }
     )
-    config = DataConfig(feature_exclude_columns=["drop_me"])
+    config = make_data_config(feature_exclude_columns=["drop_me"])
 
     assert DailySequenceBuilder(config).feature_columns(df) == ["keep_a", "keep_b"]
 
@@ -44,7 +63,7 @@ def test_build_creates_sliding_feature_time_and_label_windows() -> None:
             "trend_label": [-1, 0, 1, -1, 0],
         }
     )
-    config = DataConfig(sequence_window=3)
+    config = make_data_config(sequence_window=3)
 
     features, times, labels = DailySequenceBuilder(config).build(df)
 
@@ -64,7 +83,7 @@ def test_lob_dataset_getitem_returns_sequence_window_starting_at_idx(artifact_di
             "trend_label": [-1, 0, 1, -1, 0],
         }
     )
-    config = DataConfig(sequence_window=3)
+    config = make_data_config(sequence_window=3)
     x_path, t_path, y_path = DailySequenceBuilder(config).save(df, artifact_dir / "toy_day")
     dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=config.sequence_window)
 
@@ -85,7 +104,7 @@ def test_build_rejects_unknown_labels() -> None:
             "trend_label": [-1, 7, 1],
         }
     )
-    config = DataConfig(sequence_window=2)
+    config = make_data_config(sequence_window=2)
 
     with pytest.raises(ValueError, match="label_mapping"):
         DailySequenceBuilder(config).build(df)

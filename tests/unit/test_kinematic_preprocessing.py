@@ -52,7 +52,7 @@ def test_message_orderbook_joiner_copies_time_and_delta_t() -> None:
     )
     orderbook_df = pd.DataFrame({"bid_price_1": [100.0, 100.5, 101.0]})
 
-    joined = MessageOrderbookJoiner(time_column="time").transform(message_df, orderbook_df)
+    joined = MessageOrderbookJoiner(time_column="time", method="ffill").transform(message_df, orderbook_df)
 
     assert joined["time"].tolist() == [10.0, 10.5, 11.0]
     assert np.isnan(joined["delta_t"].iloc[0])
@@ -74,7 +74,16 @@ def test_message_feature_processor_adds_log_static_and_one_hot_features() -> Non
         }
     )
 
-    result = MessageFeatureProcessor("time", MessageConfig(tick_size=1.0)).transform(df)
+    config = MessageConfig(
+        tick_size=1.0,
+        size_column="size",
+        price_column="price",
+        order_id_column="order_id",
+        categorical_value_map={"type": [1, 2, 3, 4, 5], "direction": [-1, 1]},
+        drop_columns=["price", "size", "type", "direction", "order_id"],
+    )
+
+    result = MessageFeatureProcessor("time", config).transform(df)
 
     assert {"size_log1p", "price_static", "type_1", "type_5", "direction_1", "direction_-1"} <= set(result.columns)
     assert {"size", "price", "type", "direction", "order_id"}.isdisjoint(result.columns)

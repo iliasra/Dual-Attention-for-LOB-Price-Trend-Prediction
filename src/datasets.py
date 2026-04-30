@@ -67,7 +67,19 @@ def process_daily_dataframe(
     label_col: str = "trend_label",
     save_prefix: str = "day_1",
 ) -> tuple[Path, Path, Path]:
-    config = DataConfig(time_column=time_col, label_column=label_col, sequence_window=T_window)
+    config = DataConfig(
+        raw_data_dir="",
+        processed_data_dir="",
+        sequence_data_dir="",
+        tick_size=0.0,
+        time_column=time_col,
+        label_column=label_col,
+        label_mapping={-1: 0, 0: 1, 1: 2},
+        price_columns=None,
+        volume_columns=None,
+        feature_exclude_columns=[],
+        sequence_window=T_window,
+    )
     return DailySequenceBuilder(config).save(df, save_prefix)
 
 

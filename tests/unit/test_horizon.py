@@ -14,6 +14,59 @@ from horizon import (
 )
 
 
+def make_smoothing_config(
+    method: str = "C",
+    threshold: float | None = None,
+    k: int = 5,
+    h: int = 10,
+) -> LabelConfig:
+    return LabelConfig(
+        strategy="smoothing",
+        smoothing=SmoothingLabelConfig(
+            method=method,
+            threshold=threshold,
+            k=k,
+            h=h,
+            bid_column="bid_price_1",
+            ask_column="ask_price_1",
+        ),
+        triple_barrier=TripleBarrierLabelConfig(
+            horizon=10,
+            upper_barrier_ticks=2.0,
+            lower_barrier_ticks=3.0,
+            bid_column="bid_price_1",
+            ask_column="ask_price_1",
+            price_column=None,
+        ),
+    )
+
+
+def make_triple_barrier_config(
+    horizon: int = 10,
+    upper_barrier_ticks: float = 2.0,
+    lower_barrier_ticks: float = 3.0,
+) -> LabelConfig:
+    return LabelConfig(
+        strategy="triple_barrier",
+        smoothing=SmoothingLabelConfig(
+            method="C",
+            threshold=None,
+            k=5,
+            h=10,
+            bid_column="bid_price_1",
+            ask_column="ask_price_1",
+        ),
+        triple_barrier=TripleBarrierLabelConfig(
+            horizon=horizon,
+            upper_barrier_ticks=upper_barrier_ticks,
+            lower_barrier_ticks=lower_barrier_ticks,
+            bid_column="bid_price_1",
+            ask_column="ask_price_1",
+            price_column=None,
+        ),
+    )
+
+
 def test_calculate_midprice_and_spread() -> None:
     df = pd.DataFrame(
         {
@@ -64,10 +117,7 @@ def test_target_label_pipeline_adds_smoothing_labels() -> None:
             "ask_price_1": [101.0, 102.0, 103.0, 104.0, 105.0],
         }
     )
-    config = LabelConfig(
-        strategy="smoothing",
-        smoothing=SmoothingLabelConfig(method="A", threshold=0.001, k=1),
-    )
+    config = make_smoothing_config(method="A", threshold=0.001, k=1, h=10)
 
     result = TargetLabelPipeline(config).transform(df)
 
@@ -82,14 +132,7 @@ def test_target_label_pipeline_adds_triple_barrier_labels() -> None:
             "ask_price_1": [101.0, 104.0, 98.0, 101.0],
         }
     )
-    config = LabelConfig(
-        strategy="triple_barrier",
-        triple_barrier=TripleBarrierLabelConfig(
-            horizon=2,
-            upper_barrier_ticks=2.0,
-            lower_barrier_ticks=2.0,
-        ),
-    )
+    config = make_triple_barrier_config(horizon=2, upper_barrier_ticks=2.0, lower_barrier_ticks=2.0)
 
     result = TargetLabelPipeline(config).transform(df)
 
