@@ -59,6 +59,7 @@ preprocessing:
     enabled: true
     columns: auto
     alpha: 5.0
+    tick_size: 100.0
     reference: tick
   price_static:
     enabled: true
