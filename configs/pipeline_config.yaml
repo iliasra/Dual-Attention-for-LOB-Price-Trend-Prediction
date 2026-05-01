@@ -80,6 +80,9 @@ preprocessing:
     k: 2000.0
 
 model:
+  # nb of input features to be passed to spatial attention
+  # when not provided (None value), the value used is infered from the size
+  # of tensor x which has shape=[batch, sequence, d_input]
   d_input:
   d_model: 64
   feature_embed_dim: 16

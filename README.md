@@ -24,15 +24,15 @@ I focus on two complementary research directions:
 
    I explore dynamic and static transformations of LOB windows before they are
    passed to the model. For dynamic streams, I experiment with a spline-based
-   kinematic representation inspired by **"Kinematic Tokenization:
+   kinematic representation inspired by **["Kinematic Tokenization:
    Optimization-Based Continuous-Time Tokens for Learnable Decision Policies in
-   Noisy Time Series"**. In practice, this means extracting continuous-time
+   Noisy Time Series"](https://arxiv.org/abs/2601.09949)**. In practice, this means extracting continuous-time
    position, velocity, acceleration, and jerk-style features from price and
    volume trajectories.
 
    For static LOB state features, I use PLGS-style price scaling and exponential
-   volume scaling inspired by **"LOBERT: Generative AI Foundation Model for Limit
-   Order Book Messages"**. This gives the preprocessing pipeline a way to encode
+   volume scaling inspired by **["LOBERT: Generative AI Foundation Model for Limit
+   Order Book Messages"](https://arxiv.org/abs/2511.12563)**. This gives the preprocessing pipeline a way to encode
    the relative structure of the book while reducing the effect of raw scale.
 
 2. **Dual-attention modelling for price trend prediction**
@@ -143,4 +143,4 @@ dual-attention model, and training loop. The main ongoing work is experimental:
 I am refining the feature representations, validating the labelling choices, and
 comparing model behaviour across alternative LOB tokenization strategies.
 
-Once a first run is performed on this particular architecture, I would like to implement and test the following ideas: work on a volume-based view of the data (i.e. one snapshot each x traded shares); implement an adaptative horizon framework based on the paper "The Label Horizon Paradox: Rethinking Supervision Targets in Financial Forecasting"; try to apply kinematic processing to a more continuous feature, such as microprice, as raw prices/volumes may be too discrete for the method to perform well.   
+Once a first run is performed on this particular architecture, I would like to implement and test the following ideas: work on a volume-based view of the data (i.e. one snapshot each x traded shares); switch temporal/spatial attentions execution order, to see what impact the order has; implement an adaptative horizon framework based on the paper ["The Label Horizon Paradox: Rethinking Supervision Targets in Financial Forecasting"](https://arxiv.org/abs/2602.03395); try to apply kinematic processing to a more continuous feature, such as microprice, as raw prices/volumes may be too discrete for the method to perform well.   

@@ -233,7 +233,7 @@ class DualAttentionEncoder(nn.Module):
             raise ValueError("feature_embed_dim must be divisible by num_heads.")
 
         self.config = config
-        self.d_input = config.resolved_d_input()  # cache expected feature dimension for input validation
+        self.d_input = config.resolved_d_input()
         self.feature_embedding = FeaturePositionalEmbedding(
             d_input=self.d_input,
             embed_dim=config.feature_embed_dim,
