@@ -111,8 +111,35 @@ def _log1p(x: ArrayLike) -> pd.Series:
 def _exp_scaling(x: ArrayLike, k: float) -> pd.Series:
     return 1 - np.exp(-x / k)
 
-def _static_centering(price: ArrayLike, center: ArrayLike, tick: float) -> pd.Series:
-    return np.round(price - center) / tick - 1
+def _static_centering(
+    price: ArrayLike,
+    center: ArrayLike,
+    tick: float,
+    *,
+    absolute: bool = False,
+    remove_touch_tick: bool = False,
+    side: ArrayLike | None = None,
+) -> pd.Series:
+    if tick <= 0:
+        raise ValueError("tick must be > 0 for static price centering.")
+
+    distance = np.round((price - center) / tick)
+    if not isinstance(distance, pd.Series):
+        distance = pd.Series(distance)
+
+    if side is not None:
+        side_values = side if isinstance(side, pd.Series) else pd.Series(side, index=distance.index)
+        side_values = side_values.reindex(distance.index)
+        known_side = side_values.notna()
+        distance.loc[known_side] = distance.loc[known_side] * side_values.loc[known_side]
+
+    if absolute:
+        distance = distance.abs()
+
+    if remove_touch_tick:
+        distance = (distance - 1).clip(lower=0)
+
+    return distance
 
 def _kine_centering(x: ArrayLike, mid_price: float, tick: float) -> pd.Series:
     return (x - mid_price) / tick
@@ -242,7 +269,13 @@ class PriceStaticProcessor:
             else:
                 continue
 
-            centered = _static_centering(last_row[column], center, self.tick_size).abs()
+            centered = _static_centering(
+                last_row[column],
+                center,
+                self.tick_size,
+                absolute=True,
+                remove_touch_tick=True,
+            )
             transformed = PLGS(
                 centered,
                 tau_start=self.tau_start,
@@ -328,12 +361,16 @@ class MessageFeatureProcessor:
         best_bid = result["bid_price_1"]
         best_ask = result["ask_price_1"]
         opposite_best = pd.Series(index=result.index, dtype=float)
+        directional_side: pd.Series | None = None
 
         if "direction" in result.columns:
             buy_mask = result["direction"] == 1
             sell_mask = result["direction"] == -1
             opposite_best.loc[buy_mask] = best_ask.loc[buy_mask]
             opposite_best.loc[sell_mask] = best_bid.loc[sell_mask]
+            directional_side = pd.Series(index=result.index, dtype=float)
+            directional_side.loc[buy_mask] = 1.0
+            directional_side.loc[sell_mask] = -1.0
 
         unknown_mask = opposite_best.isna()
         if unknown_mask.any():
@@ -349,6 +386,7 @@ class MessageFeatureProcessor:
             result[price_column],
             opposite_best,
             self.message_config.tick_size,
+            side=directional_side,
         )
 
         for column, allowed_values in self.message_config.categorical_value_map.items():

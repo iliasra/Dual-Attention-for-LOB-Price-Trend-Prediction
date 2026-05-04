@@ -7,6 +7,7 @@ from configuration import MessageConfig
 from kinematic_preprocessing import (
     MessageFeatureProcessor,
     MessageOrderbookJoiner,
+    _static_centering,
     handle_abnormal_prices,
     min_max_norm,
     time_to_sincos,
@@ -41,6 +42,25 @@ def test_min_max_norm_returns_zeros_for_constant_values() -> None:
     result = min_max_norm(pd.Series([5.0, 5.0, 5.0]))
 
     np.testing.assert_allclose(result, [0.0, 0.0, 0.0])
+
+
+def test_static_centering_removes_touch_tick_symmetrically() -> None:
+    price = pd.Series([101.0, 102.0, 100.0, 99.0])
+    opposite_best = pd.Series([100.0, 100.0, 101.0, 101.0])
+
+    result = _static_centering(price, opposite_best, tick=1.0, absolute=True, remove_touch_tick=True)
+
+    np.testing.assert_allclose(result, [0.0, 1.0, 0.0, 1.0])
+
+
+def test_static_centering_can_encode_directional_message_distance() -> None:
+    price = pd.Series([102.0, 100.0, 98.0, 102.0])
+    opposite_best = pd.Series([101.0, 101.0, 100.0, 100.0])
+    direction = pd.Series([1.0, 1.0, -1.0, -1.0])
+
+    result = _static_centering(price, opposite_best, tick=1.0, side=direction)
+
+    np.testing.assert_allclose(result, [1.0, -1.0, 2.0, -2.0])
 
 
 def test_message_orderbook_joiner_copies_time_and_delta_t() -> None:
@@ -88,3 +108,30 @@ def test_message_feature_processor_adds_log_static_and_one_hot_features() -> Non
     assert {"size_log1p", "price_static", "type_1", "type_5", "direction_1", "direction_-1"} <= set(result.columns)
     assert {"size", "price", "type", "direction", "order_id"}.isdisjoint(result.columns)
     np.testing.assert_allclose(result["size_log1p"], np.log1p([9.0, 99.0]))
+
+
+def test_message_price_static_uses_directional_distance_to_opposite_best() -> None:
+    df = pd.DataFrame(
+        {
+            "time": [1.0, 2.0, 3.0, 4.0],
+            "bid_price_1": [100.0, 100.0, 100.0, 100.0],
+            "ask_price_1": [101.0, 101.0, 101.0, 101.0],
+            "size": [10.0, 10.0, 10.0, 10.0],
+            "price": [102.0, 100.0, 98.0, 102.0],
+            "type": [1, 1, 1, 1],
+            "direction": [1, 1, -1, -1],
+            "order_id": [10, 11, 12, 13],
+        }
+    )
+    config = MessageConfig(
+        tick_size=1.0,
+        size_column="size",
+        price_column="price",
+        order_id_column="order_id",
+        categorical_value_map={"type": [1], "direction": [-1, 1]},
+        drop_columns=["price", "size", "type", "direction", "order_id"],
+    )
+
+    result = MessageFeatureProcessor("time", config).transform(df)
+
+    np.testing.assert_allclose(result["price_static"], [1.0, -1.0, 2.0, -2.0])
