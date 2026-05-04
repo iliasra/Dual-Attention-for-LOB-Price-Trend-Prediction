@@ -62,8 +62,19 @@ def main() -> None:
         print("No validation sequences found; using the training dataset for validation.")
         validation_dataset = train_dataset
 
-    train_loader = DataLoader(train_dataset, batch_size=config.training.batch_size, shuffle=True)
-    validation_loader = DataLoader(validation_dataset, batch_size=config.training.batch_size, shuffle=False)
+    loader_kwargs = config.training.data_loader_kwargs()
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=True,
+        **loader_kwargs,
+    )
+    validation_loader = DataLoader(
+        validation_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=False,
+        **loader_kwargs,
+    )
 
     x_sample, _, _ = train_dataset[0]
     model = build_model(config.model, d_input=x_sample.shape[-1])

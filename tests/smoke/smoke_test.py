@@ -146,8 +146,19 @@ def main() -> None:
     if len(val_subset) == 0:
         val_subset = Subset(dataset, list(range(subset_length)))
 
-    train_loader = DataLoader(train_subset, batch_size=config.training.batch_size, shuffle=False)
-    val_loader = DataLoader(val_subset, batch_size=config.training.batch_size, shuffle=False)
+    loader_kwargs = config.training.data_loader_kwargs()
+    train_loader = DataLoader(
+        train_subset,
+        batch_size=config.training.batch_size,
+        shuffle=False,
+        **loader_kwargs,
+    )
+    val_loader = DataLoader(
+        val_subset,
+        batch_size=config.training.batch_size,
+        shuffle=False,
+        **loader_kwargs,
+    )
 
     first_batch = next(iter(train_loader))
     x_batch, t_batch, y_batch = first_batch

@@ -50,3 +50,41 @@ def test_tick_size_is_inherited_from_data_config() -> None:
     assert config.preprocessing.price_kinematic.tick_size == config.data.tick_size
     assert config.preprocessing.price_static.tick_size == config.data.tick_size
 
+
+def test_training_data_loader_settings_are_loaded() -> None:
+    config = load_config()
+
+    assert config.training.num_workers == 0
+    assert config.training.persistent_workers is False
+    assert config.training.pin_memory is False
+    assert config.training.data_loader_kwargs() == {
+        "num_workers": 0,
+        "persistent_workers": False,
+        "pin_memory": False,
+    }
+
+
+def test_training_pin_memory_is_enabled_for_cuda(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["device"] = "cuda"
+
+    cuda_config_path = artifact_dir / "cuda_config.yaml"
+    cuda_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    cuda_config = ExperimentConfig.from_yaml(cuda_config_path)
+
+    assert cuda_config.training.pin_memory is True
+
+
+def test_persistent_workers_requires_positive_num_workers(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["num_workers"] = 0
+    payload["training"]["persistent_workers"] = True
+
+    broken_config_path = artifact_dir / "invalid_workers.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training\\.persistent_workers"):
+        ExperimentConfig.from_yaml(broken_config_path)

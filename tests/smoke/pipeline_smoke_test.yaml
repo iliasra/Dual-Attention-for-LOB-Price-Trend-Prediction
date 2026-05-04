@@ -98,6 +98,8 @@ training:
   device: cpu
   epochs: 1
   batch_size: 4
+  num_workers: 0
+  persistent_workers: false
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   focal_gamma: 2.0

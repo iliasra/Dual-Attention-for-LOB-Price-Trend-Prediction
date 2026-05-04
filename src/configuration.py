@@ -116,6 +116,8 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "device": None,
         "epochs": None,
         "batch_size": None,
+        "num_workers": None,
+        "persistent_workers": None,
         "learning_rate": None,
         "weight_decay": None,
         "focal_gamma": None,
@@ -528,6 +530,8 @@ class TrainingConfig:
     device: str
     epochs: int
     batch_size: int
+    num_workers: int
+    persistent_workers: bool
     learning_rate: float
     weight_decay: float
     focal_gamma: float
@@ -536,13 +540,32 @@ class TrainingConfig:
     best_model_path: str
     use_amp: bool
 
+    def __post_init__(self) -> None:
+        if self.num_workers < 0:
+            raise ValueError("training.num_workers must be >= 0.")
+        if self.persistent_workers and self.num_workers == 0:
+            raise ValueError("training.persistent_workers requires training.num_workers > 0.")
+
+    @property
+    def pin_memory(self) -> bool:
+        return self.device.lower() == "cuda"
+
+    def data_loader_kwargs(self) -> dict[str, bool | int]:
+        return {
+            "num_workers": self.num_workers,
+            "persistent_workers": self.persistent_workers,
+            "pin_memory": self.pin_memory,
+        }
+
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TrainingConfig":
         raw_weights = payload["class_weights"]
         return cls(
-            device=str(payload["device"]),
+            device=str(payload["device"]).lower(),
             epochs=int(payload["epochs"]),
             batch_size=int(payload["batch_size"]),
+            num_workers=int(payload["num_workers"]),
+            persistent_workers=bool(payload["persistent_workers"]),
             learning_rate=float(payload["learning_rate"]),
             weight_decay=float(payload["weight_decay"]),
             focal_gamma=float(payload["focal_gamma"]),
