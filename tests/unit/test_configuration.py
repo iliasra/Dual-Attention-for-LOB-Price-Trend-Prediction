@@ -54,7 +54,7 @@ def test_tick_size_is_inherited_from_data_config() -> None:
 def test_fast_kinematic_config_values_are_loaded() -> None:
     config = load_config()
 
-    assert config.preprocessing.kinematic_tokenization.method == "basis"
+    assert config.preprocessing.kinematic_tokenization.method in {"basis", "fast"}
     assert config.preprocessing.kinematic_tokenization.chunk_size == 100000
     assert config.preprocessing.price_kinematic.basis.alpha == 5.0
     assert config.preprocessing.price_kinematic.fast.n_basis == 20

@@ -17,7 +17,7 @@ dataset_splits:
   test_dates: []
 
 preprocessing:
-  snapshot_window: 16
+  snapshot_window: 100
   labels:
     # allowed: smoothing, triple_barrier
     strategy: smoothing

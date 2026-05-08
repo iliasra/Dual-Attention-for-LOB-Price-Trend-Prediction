@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, NamedTuple, Union
 import re
@@ -258,21 +258,20 @@ class PriceStaticProcessor:
     tau_clip: float | None
     tau_max: float
 
-    def transform(self, df: pd.DataFrame, columns: list[str]) -> dict[str, float]:
+    def transform_rows(self, df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
         best_bid, best_ask = _best_prices(df)
-        last_row = df.iloc[[-1]]
-        features: dict[str, float] = {}
+        features: dict[str, np.ndarray] = {}
 
         for column in columns:
             if "ask" in column.lower():
-                center = best_bid.iloc[[-1]]
+                center = best_bid
             elif "bid" in column.lower():
-                center = best_ask.iloc[[-1]]
+                center = best_ask
             else:
                 continue
 
             centered = _static_centering(
-                last_row[column],
+                df[column],
                 center,
                 self.tick_size,
                 absolute=True,
@@ -284,9 +283,13 @@ class PriceStaticProcessor:
                 tau_clip=self.tau_clip,
                 tau_max=self.tau_max,
             )
-            features[f"{column}_static_plgs"] = float(transformed.iloc[-1])
+            features[f"{column}_static_plgs"] = transformed.to_numpy(dtype=float)
 
-        return features
+        return pd.DataFrame(features, index=df.index)
+
+    def transform(self, df: pd.DataFrame, columns: list[str]) -> dict[str, float]:
+        rows = self.transform_rows(df, columns)
+        return {column: float(rows[column].iloc[-1]) for column in rows.columns}
 
 
 @dataclass(slots=True)
@@ -417,13 +420,16 @@ class FastVolumeKinematicProcessor:
 class VolumeStaticProcessor:
     k: float
 
-    def transform(self, df: pd.DataFrame, columns: list[str]) -> dict[str, float]:
-        last_row = df.iloc[[-1]]
-        features: dict[str, float] = {}
+    def transform_rows(self, df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        features: dict[str, np.ndarray] = {}
         for column in columns:
-            transformed = _exp_scaling(last_row[column], self.k)
-            features[f"{column}_static_exp"] = float(transformed.iloc[-1])
-        return features
+            transformed = _exp_scaling(df[column], self.k)
+            features[f"{column}_static_exp"] = np.asarray(transformed, dtype=float)
+        return pd.DataFrame(features, index=df.index)
+
+    def transform(self, df: pd.DataFrame, columns: list[str]) -> dict[str, float]:
+        rows = self.transform_rows(df, columns)
+        return {column: float(rows[column].iloc[-1]) for column in rows.columns}
 
 
 @dataclass(slots=True)
@@ -651,52 +657,144 @@ class SnapshotBatchProcessor:
             return self._transform_fast(df)
         return self._transform_basis(df)
 
-    def _transform_basis(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _window_end_positions(self, df: pd.DataFrame) -> np.ndarray:
         window_size = self.preprocessing_config.snapshot_window
         if len(df) < window_size:
             raise ValueError(f"Dataframe length ({len(df)}) < window size ({window_size}).")
+        return np.arange(window_size - 1, len(df))
 
+    @staticmethod
+    def _empty_component(n_rows: int) -> pd.DataFrame:
+        return pd.DataFrame(index=pd.RangeIndex(n_rows))
+
+    @staticmethod
+    def _slice_window_ends(frame: pd.DataFrame, end_positions: np.ndarray) -> pd.DataFrame:
+        return frame.iloc[end_positions].reset_index(drop=True)
+
+    def _build_static_frame(self, df: pd.DataFrame, end_positions: np.ndarray) -> pd.DataFrame:
+        frames: list[pd.DataFrame] = []
+        end_rows = df.iloc[end_positions].reset_index(drop=True)
+
+        if self.preprocessing_config.price_static.enabled:
+            processor = PriceStaticProcessor(
+                tick_size=self.preprocessing_config.price_static.tick_size,
+                tau_start=self.preprocessing_config.price_static.tau_start,
+                tau_clip=self.preprocessing_config.price_static.tau_clip,
+                tau_max=self.preprocessing_config.price_static.tau_max,
+            )
+            price_columns = self.window_processor._resolve_stream_columns(
+                df,
+                self.preprocessing_config.price_static,
+                "price",
+            )
+            frames.append(processor.transform_rows(end_rows, price_columns).reset_index(drop=True))
+
+        if self.preprocessing_config.volume_static.enabled:
+            processor = VolumeStaticProcessor(k=self.preprocessing_config.volume_static.k)
+            volume_columns = self.window_processor._resolve_stream_columns(
+                df,
+                self.preprocessing_config.volume_static,
+                "volume",
+            )
+            frames.append(processor.transform_rows(end_rows, volume_columns).reset_index(drop=True))
+
+        if not frames:
+            return self._empty_component(len(end_positions))
+        return pd.concat(frames, axis=1)
+
+    def _build_passthrough_temporal_frame(self, df: pd.DataFrame, end_positions: np.ndarray) -> pd.DataFrame:
+        time_column = self.data_config.time_column
+        if time_column not in df.columns:
+            raise ValueError(f"Unable to find timestamp column '{time_column}'.")
+
+        price_cols = self.window_processor.column_resolver.price_columns(df)
+        volume_cols = self.window_processor.column_resolver.volume_columns(df)
+        passthrough = self.window_processor._passthrough_columns(df, price_cols, volume_cols)
+        end_rows = df.iloc[end_positions].reset_index(drop=True)
+        result = self._empty_component(len(end_positions))
+
+        for column in passthrough:
+            if column == time_column and not self.preprocessing_config.temporal_features.keep_timestamp:
+                continue
+            result[column] = end_rows[column].to_numpy()
+
+        final_time = end_rows[time_column].to_numpy(dtype=float)
+        if self.preprocessing_config.temporal_features.keep_timestamp:
+            result[time_column] = final_time
+        else:
+            window_size = self.preprocessing_config.snapshot_window
+            start_positions = end_positions - window_size + 1
+            start_time = df.iloc[start_positions][time_column].to_numpy(dtype=float)
+            result["time_rel"] = final_time - start_time
+
+        if self.preprocessing_config.temporal_features.add_day_sincos:
+            sincos_day = time_to_sincos(
+                final_time,
+                freq=self.preprocessing_config.temporal_features.day_frequency,
+            )
+            result["time_day_sin"] = sincos_day[:, 0]
+            result["time_day_cos"] = sincos_day[:, 1]
+
+        return result
+
+    def _build_basis_kinematic_frame(self, df: pd.DataFrame, end_positions: np.ndarray) -> pd.DataFrame:
         results: list[dict[str, float]] = []
-        for index in tqdm(
-            range(window_size - 1, len(df)),
+        time_column = self.data_config.time_column
+        window_size = self.preprocessing_config.snapshot_window
+
+        price_processor: PriceKinematicProcessor | None = None
+        price_columns: list[str] = []
+        if self.preprocessing_config.price_kinematic.enabled:
+            price_processor = PriceKinematicProcessor(
+                time_column=time_column,
+                tick_size=self.preprocessing_config.price_kinematic.tick_size,
+                extractor=KinematicTokenExtractor(
+                    alpha=self.preprocessing_config.price_kinematic.basis.alpha,
+                    reference=self.preprocessing_config.price_kinematic.reference,
+                ),
+            )
+            price_columns = self.window_processor._resolve_stream_columns(
+                df,
+                self.preprocessing_config.price_kinematic,
+                "price",
+            )
+
+        volume_processor: VolumeKinematicProcessor | None = None
+        volume_columns: list[str] = []
+        if self.preprocessing_config.volume_kinematic.enabled:
+            volume_processor = VolumeKinematicProcessor(
+                time_column=time_column,
+                extractor=KinematicTokenExtractor(
+                    alpha=self.preprocessing_config.volume_kinematic.basis.alpha,
+                    reference=self.preprocessing_config.volume_kinematic.reference,
+                ),
+            )
+            volume_columns = self.window_processor._resolve_stream_columns(
+                df,
+                self.preprocessing_config.volume_kinematic,
+                "volume",
+            )
+
+        for end_position in tqdm(
+            end_positions,
             desc="Processing snapshot windows",
-            total=len(df) - window_size + 1,
+            total=len(end_positions),
             mininterval=2,
         ):
-            window_data = df.iloc[index - window_size + 1 : index + 1].reset_index(drop=True)
-            results.append(self.window_processor.transform_window(window_data))
+            window_data = df.iloc[end_position - window_size + 1 : end_position + 1].reset_index(drop=True)
+            tokens: dict[str, float] = {}
+            if price_processor is not None:
+                tokens.update(price_processor.transform(window_data, price_columns))
+            if volume_processor is not None:
+                tokens.update(volume_processor.transform(window_data, volume_columns))
+            results.append(tokens)
 
+        if not results:
+            return self._empty_component(len(end_positions))
         return pd.DataFrame(results)
 
-    def _kinematics_disabled_config(self) -> PreprocessingConfig:
-        return replace(
-            self.preprocessing_config,
-            price_kinematic=replace(self.preprocessing_config.price_kinematic, enabled=False),
-            volume_kinematic=replace(self.preprocessing_config.volume_kinematic, enabled=False),
-        )
-
-    def _transform_base_without_kinematics(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _build_fast_kinematic_frame(self, df: pd.DataFrame) -> pd.DataFrame:
         window_size = self.preprocessing_config.snapshot_window
-        base_window_processor = SnapshotWindowProcessor(self.data_config, self._kinematics_disabled_config())
-        results: list[dict[str, float]] = []
-
-        for index in tqdm(
-            range(window_size - 1, len(df)),
-            desc="Processing snapshot windows",
-            total=len(df) - window_size + 1,
-            mininterval=2,
-        ):
-            window_data = df.iloc[index - window_size + 1 : index + 1].reset_index(drop=True)
-            results.append(base_window_processor.transform_window(window_data))
-
-        return pd.DataFrame(results)
-
-    def _transform_fast(self, df: pd.DataFrame) -> pd.DataFrame:
-        window_size = self.preprocessing_config.snapshot_window
-        if len(df) < window_size:
-            raise ValueError(f"Dataframe length ({len(df)}) < window size ({window_size}).")
-
-        base = self._transform_base_without_kinematics(df)
         token_frames: list[pd.DataFrame] = []
         chunk_size = self.preprocessing_config.kinematic_tokenization.chunk_size
 
@@ -731,9 +829,24 @@ class SnapshotBatchProcessor:
             )
             token_frames.append(_kinematic_tokens_to_frame(volume_tokens, volume_columns))
 
+        n_windows = len(df) - window_size + 1
         if not token_frames:
-            return base
-        return pd.concat([base, *token_frames], axis=1)
+            return self._empty_component(n_windows)
+        return pd.concat(token_frames, axis=1)
+
+    def _transform_basis(self, df: pd.DataFrame) -> pd.DataFrame:
+        end_positions = self._window_end_positions(df)
+        static_frame = self._build_static_frame(df, end_positions)
+        kinematic_frame = self._build_basis_kinematic_frame(df, end_positions)
+        passthrough_frame = self._build_passthrough_temporal_frame(df, end_positions)
+        return pd.concat([static_frame, kinematic_frame, passthrough_frame], axis=1)
+
+    def _transform_fast(self, df: pd.DataFrame) -> pd.DataFrame:
+        end_positions = self._window_end_positions(df)
+        static_frame = self._build_static_frame(df, end_positions)
+        passthrough_frame = self._build_passthrough_temporal_frame(df, end_positions)
+        kinematic_frame = self._build_fast_kinematic_frame(df)
+        return pd.concat([static_frame, passthrough_frame, kinematic_frame], axis=1)
 
 
 def derivative_feature_columns(df: pd.DataFrame) -> list[str]:
