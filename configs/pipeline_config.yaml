@@ -56,12 +56,22 @@ preprocessing:
     derivatives_stats_path: ../data/derivatives_z_scores/derivatives_stats.yaml
     # allowed: train_only
     scope: train_only
+  kinematic_tokenization:
+    # allowed: basis, fast
+    method: fast
+    # shared by fast price and volume tokenization
+    chunk_size: 100000
   price_kinematic:
     enabled: true
     columns: auto
-    alpha: 5.0
     # allowed: tick, time
     reference: tick
+    basis:
+      alpha: 5.0
+    fast:
+      n_basis: 20
+      smoothing_lambda: 1.0
+      eval_at: 1.0
   price_static:
     enabled: true
     columns: auto
@@ -71,9 +81,14 @@ preprocessing:
   volume_kinematic:
     enabled: true
     columns: auto
-    alpha: 5.0
     # allowed: tick, time
     reference: tick
+    basis:
+      alpha: 5.0
+    fast:
+      n_basis: 20
+      smoothing_lambda: 1.0
+      eval_at: 1.0
   volume_static:
     enabled: true
     columns: auto

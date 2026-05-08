@@ -67,11 +67,22 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "derivatives_stats_path": None,
             "scope": None,
         },
+        "kinematic_tokenization": {
+            "method": None,
+            "chunk_size": None,
+        },
         "price_kinematic": {
             "enabled": None,
             "columns": None,
-            "alpha": None,
             "reference": None,
+            "basis": {
+                "alpha": None,
+            },
+            "fast": {
+                "n_basis": None,
+                "smoothing_lambda": None,
+                "eval_at": None,
+            },
         },
         "price_static": {
             "enabled": None,
@@ -83,8 +94,15 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "volume_kinematic": {
             "enabled": None,
             "columns": None,
-            "alpha": None,
             "reference": None,
+            "basis": {
+                "alpha": None,
+            },
+            "fast": {
+                "n_basis": None,
+                "smoothing_lambda": None,
+                "eval_at": None,
+            },
         },
         "volume_static": {
             "enabled": None,
@@ -133,6 +151,7 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.labels.strategy": {"smoothing", "triple_barrier"},
     "preprocessing.labels.smoothing.method": {"A", "B", "C"},
     "preprocessing.normalization.scope": {"train_only"},
+    "preprocessing.kinematic_tokenization.method": {"basis", "fast"},
     "preprocessing.price_kinematic.reference": {"tick", "time"},
     "preprocessing.volume_kinematic.reference": {"tick", "time"},
     "model.rope_type": {"crope", "hybrid_crope", "hybrid-crope", "hybrid"},
@@ -193,6 +212,12 @@ def _get_nested(payload: dict[str, Any], dotted_path: str) -> Any:
     return current
 
 
+def _require_explicit_value(value: Any, dotted_path: str) -> Any:
+    if value is None:
+        raise ValueError(f"Invalid experiment config; {dotted_path} must be set explicitly.")
+    return value
+
+
 def _validate_allowed_values(payload: dict[str, Any]) -> None:
     invalid: list[str] = []
 
@@ -244,21 +269,87 @@ class DataConfig:
 
 
 @dataclass(slots=True)
+class KinematicTokenizationConfig:
+    method: str
+    chunk_size: int
+
+    def __post_init__(self) -> None:
+        self.method = self.method.lower()
+        if self.method not in {"basis", "fast"}:
+            raise ValueError("preprocessing.kinematic_tokenization.method must be 'basis' or 'fast'.")
+        if self.chunk_size <= 0:
+            raise ValueError("preprocessing.kinematic_tokenization.chunk_size must be > 0.")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "KinematicTokenizationConfig":
+        return cls(
+            method=str(_require_explicit_value(payload["method"], "preprocessing.kinematic_tokenization.method")),
+            chunk_size=int(
+                _require_explicit_value(payload["chunk_size"], "preprocessing.kinematic_tokenization.chunk_size")
+            ),
+        )
+
+
+@dataclass(slots=True)
+class FastKinematicConfig:
+    n_basis: int
+    smoothing_lambda: float
+    eval_at: float
+
+    def __post_init__(self) -> None:
+        if self.n_basis <= 3:
+            raise ValueError("Fast kinematic n_basis must be > 3 for cubic B-splines.")
+        if self.smoothing_lambda < 0:
+            raise ValueError("Fast kinematic smoothing_lambda must be >= 0.")
+        if not 0.0 <= self.eval_at <= 1.0:
+            raise ValueError("Fast kinematic eval_at must be in [0, 1].")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any], prefix: str) -> "FastKinematicConfig":
+        return cls(
+            n_basis=int(_require_explicit_value(payload["n_basis"], f"{prefix}.n_basis")),
+            smoothing_lambda=float(
+                _require_explicit_value(payload["smoothing_lambda"], f"{prefix}.smoothing_lambda")
+            ),
+            eval_at=float(_require_explicit_value(payload["eval_at"], f"{prefix}.eval_at")),
+        )
+
+
+@dataclass(slots=True)
+class BasisKinematicConfig:
+    alpha: float
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any], prefix: str) -> "BasisKinematicConfig":
+        return cls(
+            alpha=float(_require_explicit_value(payload["alpha"], f"{prefix}.alpha")),
+        )
+
+
+@dataclass(slots=True)
 class PriceKinematicConfig:
     enabled: bool
     columns: list[str] | None
-    alpha: float
     tick_size: float
     reference: str
+    basis: BasisKinematicConfig
+    fast: FastKinematicConfig
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], tick_size: float) -> "PriceKinematicConfig":
         return cls(
             enabled=bool(payload["enabled"]),
             columns=_ensure_list(payload["columns"]),
-            alpha=float(payload["alpha"]),
             tick_size=float(tick_size),
             reference=str(payload["reference"]),
+            basis=BasisKinematicConfig.from_dict(
+                payload["basis"],
+                "preprocessing.price_kinematic.basis",
+            ),
+            fast=FastKinematicConfig.from_dict(
+                payload["fast"],
+                "preprocessing.price_kinematic.fast",
+            ),
         )
 
 
@@ -287,16 +378,24 @@ class PriceStaticConfig:
 class VolumeKinematicConfig:
     enabled: bool
     columns: list[str] | None
-    alpha: float
     reference: str
+    basis: BasisKinematicConfig
+    fast: FastKinematicConfig
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "VolumeKinematicConfig":
         return cls(
             enabled=bool(payload["enabled"]),
             columns=_ensure_list(payload["columns"]),
-            alpha=float(payload["alpha"]),
             reference=str(payload["reference"]),
+            basis=BasisKinematicConfig.from_dict(
+                payload["basis"],
+                "preprocessing.volume_kinematic.basis",
+            ),
+            fast=FastKinematicConfig.from_dict(
+                payload["fast"],
+                "preprocessing.volume_kinematic.fast",
+            ),
         )
 
 
@@ -453,10 +552,27 @@ class PreprocessingConfig:
     message: MessageConfig
     temporal_features: TemporalFeaturesConfig
     normalization: NormalizationConfig
+    kinematic_tokenization: KinematicTokenizationConfig
     price_kinematic: PriceKinematicConfig
     price_static: PriceStaticConfig
     volume_kinematic: VolumeKinematicConfig
     volume_static: VolumeStaticConfig
+
+    def __post_init__(self) -> None:
+        if self.kinematic_tokenization.method != "fast":
+            return
+
+        invalid_references: list[str] = []
+        if self.price_kinematic.enabled and self.price_kinematic.reference != "tick":
+            invalid_references.append("preprocessing.price_kinematic.reference")
+        if self.volume_kinematic.enabled and self.volume_kinematic.reference != "tick":
+            invalid_references.append("preprocessing.volume_kinematic.reference")
+        if invalid_references:
+            raise ValueError(
+                "Fast kinematic tokenization only supports tick reference; set "
+                + ", ".join(invalid_references)
+                + " to 'tick'."
+            )
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], tick_size: float) -> "PreprocessingConfig":
@@ -466,6 +582,7 @@ class PreprocessingConfig:
             message=MessageConfig.from_dict(payload["message"], tick_size=tick_size),
             temporal_features=TemporalFeaturesConfig.from_dict(payload["temporal_features"]),
             normalization=NormalizationConfig.from_dict(payload["normalization"]),
+            kinematic_tokenization=KinematicTokenizationConfig.from_dict(payload["kinematic_tokenization"]),
             price_kinematic=PriceKinematicConfig.from_dict(payload["price_kinematic"], tick_size=tick_size),
             price_static=PriceStaticConfig.from_dict(payload["price_static"], tick_size=tick_size),
             volume_kinematic=VolumeKinematicConfig.from_dict(payload["volume_kinematic"]),

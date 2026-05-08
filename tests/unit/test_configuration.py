@@ -51,6 +51,56 @@ def test_tick_size_is_inherited_from_data_config() -> None:
     assert config.preprocessing.price_static.tick_size == config.data.tick_size
 
 
+def test_fast_kinematic_config_values_are_loaded() -> None:
+    config = load_config()
+
+    assert config.preprocessing.kinematic_tokenization.method == "basis"
+    assert config.preprocessing.kinematic_tokenization.chunk_size == 100000
+    assert config.preprocessing.price_kinematic.basis.alpha == 5.0
+    assert config.preprocessing.price_kinematic.fast.n_basis == 20
+    assert config.preprocessing.price_kinematic.fast.smoothing_lambda == 1.0
+    assert config.preprocessing.price_kinematic.fast.eval_at == 1.0
+    assert config.preprocessing.volume_kinematic.basis.alpha == 5.0
+    assert config.preprocessing.volume_kinematic.fast.n_basis == 20
+
+
+def test_basis_kinematic_config_requires_explicit_values(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["volume_kinematic"]["basis"]["alpha"] = None
+
+    broken_config_path = artifact_dir / "missing_basis_param.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="preprocessing\\.volume_kinematic\\.basis\\.alpha"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+
+def test_fast_kinematic_config_requires_explicit_values(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["price_kinematic"]["fast"]["n_basis"] = None
+
+    broken_config_path = artifact_dir / "missing_fast_param.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="preprocessing\\.price_kinematic\\.fast\\.n_basis"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+
+def test_fast_kinematic_method_requires_tick_reference(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["kinematic_tokenization"]["method"] = "fast"
+    payload["preprocessing"]["volume_kinematic"]["reference"] = "time"
+
+    broken_config_path = artifact_dir / "fast_time_reference.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="volume_kinematic\\.reference"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+
 def test_training_data_loader_settings_are_loaded() -> None:
     config = load_config()
 

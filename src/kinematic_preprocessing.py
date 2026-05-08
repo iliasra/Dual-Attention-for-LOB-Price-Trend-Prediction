@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, NamedTuple, Union
 import re
@@ -11,10 +11,12 @@ from scipy.interpolate import UnivariateSpline
 from tqdm import tqdm
 
 try:
-    from configuration import DataConfig, PreprocessingConfig, load_config
+    from configuration import DataConfig, FastKinematicConfig, PreprocessingConfig, load_config
+    from fast_kinematic_preprocessing import KINEMATIC_SUFFIXES, PenalizedBSplineKinematicTokenizer
     from utils import append_to_yaml
 except ImportError:  # pragma: no cover
-    from .configuration import DataConfig, PreprocessingConfig, load_config
+    from .configuration import DataConfig, FastKinematicConfig, PreprocessingConfig, load_config
+    from .fast_kinematic_preprocessing import KINEMATIC_SUFFIXES, PenalizedBSplineKinematicTokenizer
     from .utils import append_to_yaml
 
 ArrayLike = Union[float, int, np.ndarray, pd.Series]
@@ -300,6 +302,117 @@ class VolumeKinematicProcessor:
         return tokens
 
 
+def _make_fast_tokenizer(
+    window: int,
+    fast_config: FastKinematicConfig,
+    chunk_size: int,
+) -> PenalizedBSplineKinematicTokenizer:
+    return PenalizedBSplineKinematicTokenizer(
+        window=window,
+        n_basis=fast_config.n_basis,
+        smoothing_lambda=fast_config.smoothing_lambda,
+        eval_at=fast_config.eval_at,
+        chunk_size=chunk_size,
+        dtype=np.float64,
+    )
+
+
+def _empty_kinematic_tokens(n_windows: int) -> np.ndarray:
+    return np.empty((n_windows, 0, len(KINEMATIC_SUFFIXES)), dtype=np.float64)
+
+
+def _fast_price_tokens(
+    df: pd.DataFrame,
+    columns: list[str],
+    *,
+    window: int,
+    tick_size: float,
+    fast_config: FastKinematicConfig,
+    chunk_size: int,
+) -> np.ndarray:
+    n_windows = len(df) - window + 1
+    if not columns:
+        return _empty_kinematic_tokens(n_windows)
+
+    tokenizer = _make_fast_tokenizer(window, fast_config, chunk_size)
+    values = df[columns].to_numpy(dtype=np.float64)
+    tokens = tokenizer.transform_values(values)
+
+    best_bid, best_ask = _best_prices(df)
+    centers = ((best_bid.to_numpy(dtype=np.float64) + best_ask.to_numpy(dtype=np.float64)) * 0.5)[:n_windows]
+    constant_response = tokenizer.H @ np.ones(window, dtype=np.float64)
+
+    return (tokens - centers[:, None, None] * constant_response[None, None, :]) / tick_size
+
+
+def _fast_volume_tokens(
+    df: pd.DataFrame,
+    columns: list[str],
+    *,
+    window: int,
+    fast_config: FastKinematicConfig,
+    chunk_size: int,
+) -> np.ndarray:
+    n_windows = len(df) - window + 1
+    if not columns:
+        return _empty_kinematic_tokens(n_windows)
+
+    tokenizer = _make_fast_tokenizer(window, fast_config, chunk_size)
+    values = np.log1p(df[columns].to_numpy(dtype=np.float64))
+    return tokenizer.transform_values(values)
+
+
+def _kinematic_tokens_to_frame(tokens: np.ndarray, columns: list[str]) -> pd.DataFrame:
+    data: dict[str, np.ndarray] = {}
+    for feature_index, column in enumerate(columns):
+        for suffix_index, suffix in enumerate(KINEMATIC_SUFFIXES):
+            data[f"{column}_kin_{suffix}"] = tokens[:, feature_index, suffix_index]
+    return pd.DataFrame(data)
+
+
+def _kinematic_tokens_to_dict(tokens: np.ndarray, columns: list[str]) -> dict[str, float]:
+    if len(tokens) != 1:
+        raise ValueError("Expected exactly one fast kinematic token window.")
+    return {
+        column_name: float(values.iloc[0])
+        for column_name, values in _kinematic_tokens_to_frame(tokens, columns).items()
+    }
+
+
+@dataclass(slots=True)
+class FastPriceKinematicProcessor:
+    tick_size: float
+    fast_config: FastKinematicConfig
+    chunk_size: int
+
+    def transform(self, df: pd.DataFrame, columns: list[str]) -> dict[str, float]:
+        tokens = _fast_price_tokens(
+            df,
+            columns,
+            window=len(df),
+            tick_size=self.tick_size,
+            fast_config=self.fast_config,
+            chunk_size=self.chunk_size,
+        )
+        return _kinematic_tokens_to_dict(tokens, columns)
+
+
+@dataclass(slots=True)
+class FastVolumeKinematicProcessor:
+    fast_config: FastKinematicConfig
+    chunk_size: int
+
+    def transform(self, df: pd.DataFrame, columns: list[str]) -> dict[str, float]:
+        tokens = _fast_volume_tokens(
+            df,
+            columns,
+            window=len(df),
+            fast_config=self.fast_config,
+            chunk_size=self.chunk_size,
+        )
+        return _kinematic_tokens_to_dict(tokens, columns)
+
+
 @dataclass(slots=True)
 class VolumeStaticProcessor:
     k: float
@@ -454,15 +567,24 @@ class SnapshotWindowProcessor:
                 )
             )
 
+        tokenization_method = self.preprocessing_config.kinematic_tokenization.method
+
         if self.preprocessing_config.price_kinematic.enabled:
-            processor = PriceKinematicProcessor(
-                time_column=time_column,
-                tick_size=self.preprocessing_config.price_kinematic.tick_size,
-                extractor=KinematicTokenExtractor(
-                    alpha=self.preprocessing_config.price_kinematic.alpha,
-                    reference=self.preprocessing_config.price_kinematic.reference,
-                ),
-            )
+            if tokenization_method == "fast":
+                processor = FastPriceKinematicProcessor(
+                    tick_size=self.preprocessing_config.price_kinematic.tick_size,
+                    fast_config=self.preprocessing_config.price_kinematic.fast,
+                    chunk_size=self.preprocessing_config.kinematic_tokenization.chunk_size,
+                )
+            else:
+                processor = PriceKinematicProcessor(
+                    time_column=time_column,
+                    tick_size=self.preprocessing_config.price_kinematic.tick_size,
+                    extractor=KinematicTokenExtractor(
+                        alpha=self.preprocessing_config.price_kinematic.basis.alpha,
+                        reference=self.preprocessing_config.price_kinematic.reference,
+                    ),
+                )
             result.update(
                 processor.transform(
                     window,
@@ -471,13 +593,19 @@ class SnapshotWindowProcessor:
             )
 
         if self.preprocessing_config.volume_kinematic.enabled:
-            processor = VolumeKinematicProcessor(
-                time_column=time_column,
-                extractor=KinematicTokenExtractor(
-                    alpha=self.preprocessing_config.volume_kinematic.alpha,
-                    reference=self.preprocessing_config.volume_kinematic.reference,
-                ),
-            )
+            if tokenization_method == "fast":
+                processor = FastVolumeKinematicProcessor(
+                    fast_config=self.preprocessing_config.volume_kinematic.fast,
+                    chunk_size=self.preprocessing_config.kinematic_tokenization.chunk_size,
+                )
+            else:
+                processor = VolumeKinematicProcessor(
+                    time_column=time_column,
+                    extractor=KinematicTokenExtractor(
+                        alpha=self.preprocessing_config.volume_kinematic.basis.alpha,
+                        reference=self.preprocessing_config.volume_kinematic.reference,
+                    ),
+                )
             result.update(
                 processor.transform(
                     window,
@@ -519,6 +647,11 @@ class SnapshotBatchProcessor:
         self.window_processor = SnapshotWindowProcessor(self.data_config, self.preprocessing_config)
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        if self.preprocessing_config.kinematic_tokenization.method == "fast":
+            return self._transform_fast(df)
+        return self._transform_basis(df)
+
+    def _transform_basis(self, df: pd.DataFrame) -> pd.DataFrame:
         window_size = self.preprocessing_config.snapshot_window
         if len(df) < window_size:
             raise ValueError(f"Dataframe length ({len(df)}) < window size ({window_size}).")
@@ -534,6 +667,73 @@ class SnapshotBatchProcessor:
             results.append(self.window_processor.transform_window(window_data))
 
         return pd.DataFrame(results)
+
+    def _kinematics_disabled_config(self) -> PreprocessingConfig:
+        return replace(
+            self.preprocessing_config,
+            price_kinematic=replace(self.preprocessing_config.price_kinematic, enabled=False),
+            volume_kinematic=replace(self.preprocessing_config.volume_kinematic, enabled=False),
+        )
+
+    def _transform_base_without_kinematics(self, df: pd.DataFrame) -> pd.DataFrame:
+        window_size = self.preprocessing_config.snapshot_window
+        base_window_processor = SnapshotWindowProcessor(self.data_config, self._kinematics_disabled_config())
+        results: list[dict[str, float]] = []
+
+        for index in tqdm(
+            range(window_size - 1, len(df)),
+            desc="Processing snapshot windows",
+            total=len(df) - window_size + 1,
+            mininterval=2,
+        ):
+            window_data = df.iloc[index - window_size + 1 : index + 1].reset_index(drop=True)
+            results.append(base_window_processor.transform_window(window_data))
+
+        return pd.DataFrame(results)
+
+    def _transform_fast(self, df: pd.DataFrame) -> pd.DataFrame:
+        window_size = self.preprocessing_config.snapshot_window
+        if len(df) < window_size:
+            raise ValueError(f"Dataframe length ({len(df)}) < window size ({window_size}).")
+
+        base = self._transform_base_without_kinematics(df)
+        token_frames: list[pd.DataFrame] = []
+        chunk_size = self.preprocessing_config.kinematic_tokenization.chunk_size
+
+        if self.preprocessing_config.price_kinematic.enabled:
+            price_columns = self.window_processor._resolve_stream_columns(
+                df,
+                self.preprocessing_config.price_kinematic,
+                "price",
+            )
+            price_tokens = _fast_price_tokens(
+                df,
+                price_columns,
+                window=window_size,
+                tick_size=self.preprocessing_config.price_kinematic.tick_size,
+                fast_config=self.preprocessing_config.price_kinematic.fast,
+                chunk_size=chunk_size,
+            )
+            token_frames.append(_kinematic_tokens_to_frame(price_tokens, price_columns))
+
+        if self.preprocessing_config.volume_kinematic.enabled:
+            volume_columns = self.window_processor._resolve_stream_columns(
+                df,
+                self.preprocessing_config.volume_kinematic,
+                "volume",
+            )
+            volume_tokens = _fast_volume_tokens(
+                df,
+                volume_columns,
+                window=window_size,
+                fast_config=self.preprocessing_config.volume_kinematic.fast,
+                chunk_size=chunk_size,
+            )
+            token_frames.append(_kinematic_tokens_to_frame(volume_tokens, volume_columns))
+
+        if not token_frames:
+            return base
+        return pd.concat([base, *token_frames], axis=1)
 
 
 def derivative_feature_columns(df: pd.DataFrame) -> list[str]:
@@ -759,10 +959,10 @@ def process_orderbook_snapshot_df_window(
     preprocessing_config = config.preprocessing
     preprocessing_config.snapshot_window = window
     preprocessing_config.temporal_features.keep_timestamp = keep_timestamp
-    preprocessing_config.price_kinematic.alpha = alpha
+    preprocessing_config.price_kinematic.basis.alpha = alpha
     preprocessing_config.price_kinematic.reference = ref
     preprocessing_config.price_kinematic.tick_size = tick
-    preprocessing_config.volume_kinematic.alpha = alpha
+    preprocessing_config.volume_kinematic.basis.alpha = alpha
     preprocessing_config.volume_kinematic.reference = ref
     preprocessing_config.price_static.tick_size = tick
     preprocessing_config.price_static.tau_start = tau_start
@@ -805,10 +1005,10 @@ def process_all_snapshot_windows(
     preprocessing_config = config.preprocessing
     preprocessing_config.snapshot_window = window
     preprocessing_config.temporal_features.keep_timestamp = keep_timestamp
-    preprocessing_config.price_kinematic.alpha = alpha
+    preprocessing_config.price_kinematic.basis.alpha = alpha
     preprocessing_config.price_kinematic.reference = ref
     preprocessing_config.price_kinematic.tick_size = tick
-    preprocessing_config.volume_kinematic.alpha = alpha
+    preprocessing_config.volume_kinematic.basis.alpha = alpha
     preprocessing_config.volume_kinematic.reference = ref
     preprocessing_config.price_static.tick_size = tick
     preprocessing_config.price_static.tau_start = tau_start

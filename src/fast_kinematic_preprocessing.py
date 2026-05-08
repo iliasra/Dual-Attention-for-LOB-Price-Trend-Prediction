@@ -8,7 +8,7 @@ a simple matrix multiplication H @ y, y being the data points.
 
 from __future__ import annotations
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
@@ -100,7 +100,7 @@ def endpoint_derivative_matrix(
     degree: int,
     n_basis: int,
     window: int,
-    eval_at: float = 1.0,
+    eval_at: float,
 ) -> np.ndarray:
     """
     returns R such that:
@@ -133,10 +133,10 @@ def endpoint_derivative_matrix(
 
 def penalized_bspline_filter_matrix(
     window: int,
-    n_basis: int = 20,
+    n_basis: int,
+    smoothing_lambda: float,
+    eval_at: float,
     degree: int = 3,
-    smoothing_lambda: float = 1.0,
-    eval_at: float = 1.0, # we can try to evaluate at 0.95, 0.99 for more stability
     ridge: float = 1e-8, #for stability, to ease the matrix inversion 
 ) -> np.ndarray:
     """
@@ -190,14 +190,17 @@ def sliding_windows_2d(values: np.ndarray, window: int) -> np.ndarray:
 @dataclass(slots=True)
 class PenalizedBSplineKinematicTokenizer:
     window: int
-    n_basis: int = 20
+    n_basis: int
+    smoothing_lambda: float
+    eval_at: float
+    chunk_size: int
     degree: int = 3
-    smoothing_lambda: float = 1.0
-    eval_at: float = 1.0
-    chunk_size: int = 100_000
     dtype: np.dtype = np.float32
+    H: np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.chunk_size <= 0:
+            raise ValueError("chunk_size must be > 0.")
         self.H = penalized_bspline_filter_matrix(
             window=self.window,
             n_basis=self.n_basis,

@@ -10,7 +10,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from configuration import (
+    BasisKinematicConfig,
     DataConfig,
+    FastKinematicConfig,
+    KinematicTokenizationConfig,
     LabelConfig,
     MessageConfig,
     ModelConfig,
@@ -75,7 +78,7 @@ def make_synthetic_lob_frames(rows: int = 14) -> tuple[pd.DataFrame, pd.DataFram
     return message_df, orderbook_df
 
 
-def make_test_configs() -> tuple[DataConfig, PreprocessingConfig]:
+def make_test_configs(tokenization_method: str = "basis") -> tuple[DataConfig, PreprocessingConfig]:
     data_config = DataConfig(
         raw_data_dir="",
         processed_data_dir="",
@@ -131,12 +134,23 @@ def make_test_configs() -> tuple[DataConfig, PreprocessingConfig]:
             derivatives_stats_path="derivatives_stats.yaml",
             scope="train_only",
         ),
+        kinematic_tokenization=KinematicTokenizationConfig(
+            method=tokenization_method,
+            chunk_size=3,
+        ),
         price_kinematic=PriceKinematicConfig(
             enabled=True,
             columns=None,
-            alpha=2.0,
             tick_size=1.0,
             reference="tick",
+            basis=BasisKinematicConfig(
+                alpha=2.0,
+            ),
+            fast=FastKinematicConfig(
+                n_basis=6,
+                smoothing_lambda=1.0,
+                eval_at=1.0,
+            ),
         ),
         price_static=PriceStaticConfig(
             enabled=True,
@@ -149,8 +163,15 @@ def make_test_configs() -> tuple[DataConfig, PreprocessingConfig]:
         volume_kinematic=VolumeKinematicConfig(
             enabled=True,
             columns=None,
-            alpha=2.0,
             reference="tick",
+            basis=BasisKinematicConfig(
+                alpha=2.0,
+            ),
+            fast=FastKinematicConfig(
+                n_basis=6,
+                smoothing_lambda=1.0,
+                eval_at=1.0,
+            ),
         ),
         volume_static=VolumeStaticConfig(
             enabled=True,
@@ -161,8 +182,8 @@ def make_test_configs() -> tuple[DataConfig, PreprocessingConfig]:
     return data_config, preprocessing_config
 
 
-def run_preprocessing_pipeline(artifact_dir: Path) -> pd.DataFrame:
-    data_config, preprocessing_config = make_test_configs()
+def run_preprocessing_pipeline(artifact_dir: Path, tokenization_method: str = "basis") -> pd.DataFrame:
+    data_config, preprocessing_config = make_test_configs(tokenization_method=tokenization_method)
     message_df, orderbook_df = make_synthetic_lob_frames()
 
     joined = MessageOrderbookJoiner(time_column=data_config.time_column).transform(message_df, orderbook_df)
@@ -198,6 +219,22 @@ def test_preprocessing_blocks_produce_expected_columns(artifact_dir: Path) -> No
     assert expected_columns <= set(normalized.columns)
     assert not normalized.empty
     assert normalized["trend_label"].isin([-1, 0, 1]).all()
+    assert np.isfinite(normalized.select_dtypes(include=[np.number]).to_numpy()).all()
+
+
+def test_fast_kinematic_tokenization_produces_expected_columns(artifact_dir: Path) -> None:
+    normalized = run_preprocessing_pipeline(artifact_dir, tokenization_method="fast")
+
+    expected_columns = {
+        "bid_price_1_kin_pos",
+        "bid_price_1_kin_vel",
+        "ask_price_1_kin_acc",
+        "bid_size_1_kin_jrk",
+        "ask_size_1_kin_pos",
+    }
+
+    assert expected_columns <= set(normalized.columns)
+    assert not normalized.empty
     assert np.isfinite(normalized.select_dtypes(include=[np.number]).to_numpy()).all()
 
 
