@@ -332,6 +332,7 @@ def _fast_price_tokens(
     tick_size: float,
     fast_config: FastKinematicConfig,
     chunk_size: int,
+    progress_desc: str | None = None,
 ) -> np.ndarray:
     n_windows = len(df) - window + 1
     if not columns:
@@ -339,7 +340,7 @@ def _fast_price_tokens(
 
     tokenizer = _make_fast_tokenizer(window, fast_config, chunk_size)
     values = df[columns].to_numpy(dtype=np.float64)
-    tokens = tokenizer.transform_values(values)
+    tokens = tokenizer.transform_values(values, progress_desc=progress_desc)
 
     best_bid, best_ask = _best_prices(df)
     centers = ((best_bid.to_numpy(dtype=np.float64) + best_ask.to_numpy(dtype=np.float64)) * 0.5)[:n_windows]
@@ -355,6 +356,7 @@ def _fast_volume_tokens(
     window: int,
     fast_config: FastKinematicConfig,
     chunk_size: int,
+    progress_desc: str | None = None,
 ) -> np.ndarray:
     n_windows = len(df) - window + 1
     if not columns:
@@ -362,7 +364,7 @@ def _fast_volume_tokens(
 
     tokenizer = _make_fast_tokenizer(window, fast_config, chunk_size)
     values = np.log1p(df[columns].to_numpy(dtype=np.float64))
-    return tokenizer.transform_values(values)
+    return tokenizer.transform_values(values, progress_desc=progress_desc)
 
 
 def _kinematic_tokens_to_frame(tokens: np.ndarray, columns: list[str]) -> pd.DataFrame:
@@ -652,10 +654,16 @@ class SnapshotBatchProcessor:
     def __post_init__(self) -> None:
         self.window_processor = SnapshotWindowProcessor(self.data_config, self.preprocessing_config)
 
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+    @staticmethod
+    def _label(source_label: str | None) -> str:
+        return source_label or "dataset"
+
+    def transform(self, df: pd.DataFrame, source_label: str | None = None) -> pd.DataFrame:
+        label = self._label(source_label)
+        print(f"Starting snapshot processing for {label}: {len(df)} input rows.")
         if self.preprocessing_config.kinematic_tokenization.method == "fast":
-            return self._transform_fast(df)
-        return self._transform_basis(df)
+            return self._transform_fast(df, source_label=label)
+        return self._transform_basis(df, source_label=label)
 
     def _window_end_positions(self, df: pd.DataFrame) -> np.ndarray:
         window_size = self.preprocessing_config.snapshot_window
@@ -671,7 +679,12 @@ class SnapshotBatchProcessor:
     def _slice_window_ends(frame: pd.DataFrame, end_positions: np.ndarray) -> pd.DataFrame:
         return frame.iloc[end_positions].reset_index(drop=True)
 
-    def _build_static_frame(self, df: pd.DataFrame, end_positions: np.ndarray) -> pd.DataFrame:
+    def _build_static_frame(
+        self,
+        df: pd.DataFrame,
+        end_positions: np.ndarray,
+        source_label: str | None = None,
+    ) -> pd.DataFrame:
         frames: list[pd.DataFrame] = []
         end_rows = df.iloc[end_positions].reset_index(drop=True)
 
@@ -699,8 +712,12 @@ class SnapshotBatchProcessor:
             frames.append(processor.transform_rows(end_rows, volume_columns).reset_index(drop=True))
 
         if not frames:
-            return self._empty_component(len(end_positions))
-        return pd.concat(frames, axis=1)
+            static_frame = self._empty_component(len(end_positions))
+        else:
+            static_frame = pd.concat(frames, axis=1)
+
+        print(f"Static stream calculated for {self._label(source_label)}: {len(end_positions)} window-end rows.")
+        return static_frame
 
     def _build_passthrough_temporal_frame(self, df: pd.DataFrame, end_positions: np.ndarray) -> pd.DataFrame:
         time_column = self.data_config.time_column
@@ -737,10 +754,16 @@ class SnapshotBatchProcessor:
 
         return result
 
-    def _build_basis_kinematic_frame(self, df: pd.DataFrame, end_positions: np.ndarray) -> pd.DataFrame:
+    def _build_basis_kinematic_frame(
+        self,
+        df: pd.DataFrame,
+        end_positions: np.ndarray,
+        source_label: str | None = None,
+    ) -> pd.DataFrame:
         results: list[dict[str, float]] = []
         time_column = self.data_config.time_column
         window_size = self.preprocessing_config.snapshot_window
+        print(f"Starting basis kinematic stream for {self._label(source_label)}: {len(end_positions)} rows.")
 
         price_processor: PriceKinematicProcessor | None = None
         price_columns: list[str] = []
@@ -779,7 +802,7 @@ class SnapshotBatchProcessor:
             end_positions,
             desc="Processing snapshot windows",
             total=len(end_positions),
-            mininterval=2,
+            mininterval=5,
         ):
             window_data = df.iloc[end_position - window_size + 1 : end_position + 1].reset_index(drop=True)
             tokens: dict[str, float] = {}
@@ -790,13 +813,19 @@ class SnapshotBatchProcessor:
             results.append(tokens)
 
         if not results:
-            return self._empty_component(len(end_positions))
-        return pd.DataFrame(results)
+            frame = self._empty_component(len(end_positions))
+        else:
+            frame = pd.DataFrame(results)
+        print(f"Basis kinematic stream calculated for {self._label(source_label)}: {len(end_positions)} rows.")
+        return frame
 
-    def _build_fast_kinematic_frame(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _build_fast_kinematic_frame(self, df: pd.DataFrame, source_label: str | None = None) -> pd.DataFrame:
         window_size = self.preprocessing_config.snapshot_window
         token_frames: list[pd.DataFrame] = []
         chunk_size = self.preprocessing_config.kinematic_tokenization.chunk_size
+        n_windows = len(df) - window_size + 1
+        label = self._label(source_label)
+        print(f"Starting fast kinematic stream for {label}: {n_windows} rows.")
 
         if self.preprocessing_config.price_kinematic.enabled:
             price_columns = self.window_processor._resolve_stream_columns(
@@ -811,6 +840,7 @@ class SnapshotBatchProcessor:
                 tick_size=self.preprocessing_config.price_kinematic.tick_size,
                 fast_config=self.preprocessing_config.price_kinematic.fast,
                 chunk_size=chunk_size,
+                progress_desc=f"Fast price kinematic [{label}]",
             )
             token_frames.append(_kinematic_tokens_to_frame(price_tokens, price_columns))
 
@@ -826,27 +856,34 @@ class SnapshotBatchProcessor:
                 window=window_size,
                 fast_config=self.preprocessing_config.volume_kinematic.fast,
                 chunk_size=chunk_size,
+                progress_desc=f"Fast volume kinematic [{label}]",
             )
             token_frames.append(_kinematic_tokens_to_frame(volume_tokens, volume_columns))
 
-        n_windows = len(df) - window_size + 1
         if not token_frames:
-            return self._empty_component(n_windows)
-        return pd.concat(token_frames, axis=1)
+            frame = self._empty_component(n_windows)
+        else:
+            frame = pd.concat(token_frames, axis=1)
+        print(f"Fast kinematic stream calculated for {label}: {n_windows} rows.")
+        return frame
 
-    def _transform_basis(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _transform_basis(self, df: pd.DataFrame, source_label: str | None = None) -> pd.DataFrame:
         end_positions = self._window_end_positions(df)
-        static_frame = self._build_static_frame(df, end_positions)
-        kinematic_frame = self._build_basis_kinematic_frame(df, end_positions)
+        static_frame = self._build_static_frame(df, end_positions, source_label=source_label)
+        kinematic_frame = self._build_basis_kinematic_frame(df, end_positions, source_label=source_label)
         passthrough_frame = self._build_passthrough_temporal_frame(df, end_positions)
-        return pd.concat([static_frame, kinematic_frame, passthrough_frame], axis=1)
+        result = pd.concat([static_frame, kinematic_frame, passthrough_frame], axis=1)
+        print(f"Snapshot processing finished for {self._label(source_label)}: {len(result)} output rows.")
+        return result
 
-    def _transform_fast(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _transform_fast(self, df: pd.DataFrame, source_label: str | None = None) -> pd.DataFrame:
         end_positions = self._window_end_positions(df)
-        static_frame = self._build_static_frame(df, end_positions)
+        static_frame = self._build_static_frame(df, end_positions, source_label=source_label)
         passthrough_frame = self._build_passthrough_temporal_frame(df, end_positions)
-        kinematic_frame = self._build_fast_kinematic_frame(df)
-        return pd.concat([static_frame, passthrough_frame, kinematic_frame], axis=1)
+        kinematic_frame = self._build_fast_kinematic_frame(df, source_label=source_label)
+        result = pd.concat([static_frame, passthrough_frame, kinematic_frame], axis=1)
+        print(f"Snapshot processing finished for {self._label(source_label)}: {len(result)} output rows.")
+        return result
 
 
 def derivative_feature_columns(df: pd.DataFrame) -> list[str]:

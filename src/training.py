@@ -77,6 +77,7 @@ class LobTrainer:
         best_val_loss = float("inf")
         history: list[EpochResult] = []
 
+        print(f"Starting training for {self.config.epochs} epoch(s) on {self.device}.")
         for epoch in range(self.config.epochs):
             train_loss = self._run_epoch(
                 model=model,
@@ -99,7 +100,14 @@ class LobTrainer:
                 best_path = Path(self.config.best_model_path)
                 best_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(model.state_dict(), best_path)
+                print(f"Saved new best model to {best_path} with val_loss={best_val_loss:.6f}.")
 
+            print(
+                f"Epoch {epoch + 1}/{self.config.epochs} completed: "
+                f"train_loss={train_loss:.6f}, val_loss={val_loss:.6f}."
+            )
+
+        print("Training finished.")
         return model, history
 
     def _run_epoch(

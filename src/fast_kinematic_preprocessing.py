@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy.interpolate import BSpline
+from tqdm import tqdm
 
 KINEMATIC_SUFFIXES = ("pos", "vel", "acc", "jrk")
 
@@ -209,7 +210,7 @@ class PenalizedBSplineKinematicTokenizer:
             eval_at=self.eval_at,
         ).astype(self.dtype)
 
-    def transform_values(self, values: np.ndarray) -> np.ndarray:
+    def transform_values(self, values: np.ndarray, progress_desc: str | None = None) -> np.ndarray:
         """
         values: [N, F]
         returns: [N - window + 1, F, 4]
@@ -225,17 +226,25 @@ class PenalizedBSplineKinematicTokenizer:
             raise ValueError(f"Need at least {self.window} rows, got {n_rows}.")
 
         output = np.empty((n_windows, n_features, 4), dtype=self.dtype)
+        progress = tqdm(total=n_windows, desc=progress_desc, unit="rows", mininterval=5) if progress_desc else None
 
-        for start in range(0, n_windows, self.chunk_size):
-            stop = min(start + self.chunk_size, n_windows)
-            block = values[start : stop + self.window - 1]
-            windows = sliding_windows_2d(block, self.window)
+        try:
+            for start in range(0, n_windows, self.chunk_size):
+                stop = min(start + self.chunk_size, n_windows)
+                block = values[start : stop + self.window - 1]
+                windows = sliding_windows_2d(block, self.window)
 
-            output[start:stop] = np.einsum(
-                "dw,mwf->mfd",
-                self.H,
-                windows,
-                optimize=True,
-            )
+                output[start:stop] = np.einsum(
+                    "dw,mwf->mfd",
+                    self.H,
+                    windows,
+                    optimize=True,
+                )
+
+                if progress is not None:
+                    progress.update(stop - start)
+        finally:
+            if progress is not None:
+                progress.close()
 
         return output

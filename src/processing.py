@@ -160,18 +160,25 @@ class LobProcessingPipeline:
         """this function: delete 'ghost' level if placeholder values are recognized;
         joins orderbook/message data for a particular day;
         filters out the first/last 15 minutes."""
+        print(f"Loading raw data for date {pair.date}.")
         message_df = pd.read_csv(pair.message_path)
         orderbook_df = pd.read_csv(pair.orderbook_path)
         handle_abnormal_prices([message_df, orderbook_df])
         joined = self.joiner.transform(message_df, orderbook_df)
-        return self.session_filter.transform(joined) #session_filter.transform gets rid of first/last 15 mins
+        trimmed = self.session_filter.transform(joined) #session_filter.transform gets rid of first/last 15 mins
+        print(f"Loaded and trimmed date {pair.date}: {len(trimmed)} rows.")
+        return trimmed
 
     def preprocess_pair(self, pair: LobFilePair, split: str) -> ProcessedDay:
         """"""
+        print(f"Starting preprocessing for date {pair.date} ({split}).")
         trimmed = self.load_and_trim_pair(pair)
+        print(f"Starting label generation for date {pair.date}.")
         labeled = self.labeler.transform(trimmed)
+        print(f"Starting message feature processing for date {pair.date}.")
         message_features = self.message_processor.transform(labeled)
-        processed = self.snapshot_processor.transform(message_features)
+        processed = self.snapshot_processor.transform(message_features, source_label=f"date {pair.date}")
+        print(f"Finished preprocessing for date {pair.date}: {processed.shape[0]} rows, {processed.shape[1]} columns.")
         return ProcessedDay(
             split=split,
             pair=pair,
@@ -185,21 +192,28 @@ class LobProcessingPipeline:
     def preprocess_splits(self, split_pairs: dict[str, list[LobFilePair]]) -> dict[str, list[ProcessedDay]]:
         processed = {name: [] for name in SPLIT_NAMES}
         for split, pairs in split_pairs.items():
+            print(f"Starting preprocessing split '{split}' with {len(pairs)} day(s).")
             for pair in pairs:
                 processed[split].append(self.preprocess_pair(pair, split))
+            print(f"Finished preprocessing split '{split}'.")
         return processed
 
     def fit_train_normalizer(self, train_days: list[ProcessedDay]) -> DerivativeNormalizer:
+        print(f"Fitting derivative normalizer on {len(train_days)} training day(s).")
         normalizer = DerivativeNormalizer(self.derivatives_stats_path)
         normalizer.fit([day.processed for day in train_days])
+        print("Derivative normalizer fitted.")
         return normalizer
 
     def apply_normalization(self, processed_splits: dict[str, list[ProcessedDay]], normalizer: DerivativeNormalizer) -> None:
+        print("Starting normalization for all splits.")
         for split_days in processed_splits.values():
             for day in split_days:
                 day.normalized = normalizer.transform(day.processed)
+        print("Finished normalization for all splits.")
 
     def save_split_outputs(self, processed_splits: dict[str, list[ProcessedDay]]) -> None:
+        print("Saving processed CSV and sequence outputs.")
         self.processed_dir.mkdir(parents=True, exist_ok=True)
         self.sequence_dir.mkdir(parents=True, exist_ok=True)
 
@@ -219,14 +233,18 @@ class LobProcessingPipeline:
 
                 prefix = sequence_split_dir / day.pair.date
                 day.sequence_paths = self.sequence_builder.save(day.normalized, prefix)
+                print(f"Saved outputs for date {day.pair.date} ({split}).")
 
     def run(self) -> dict[str, dict[str, tuple[int, int]]]:
+        print("Starting LOB processing pipeline.")
         pairs = self.discover_pairs()
+        print(f"Discovered {len(pairs)} message/orderbook file pair(s).")
         split_pairs = self.split_pairs(pairs)
         processed_splits = self.preprocess_splits(split_pairs)
         normalizer = self.fit_train_normalizer(processed_splits["train"])
         self.apply_normalization(processed_splits, normalizer)
         self.save_split_outputs(processed_splits)
+        print("LOB processing pipeline finished.")
 
         return {
             split: {
