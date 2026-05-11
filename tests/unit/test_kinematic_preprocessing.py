@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
+
 import numpy as np
 import pandas as pd
 
@@ -21,6 +24,7 @@ from configuration import (
     VolumeStaticConfig,
 )
 from kinematic_preprocessing import (
+    DerivativeNormalizer,
     MessageFeatureProcessor,
     MessageOrderbookJoiner,
     PriceStaticProcessor,
@@ -61,6 +65,29 @@ def test_min_max_norm_returns_zeros_for_constant_values() -> None:
     result = min_max_norm(pd.Series([5.0, 5.0, 5.0]))
 
     np.testing.assert_allclose(result, [0.0, 0.0, 0.0])
+
+
+def test_derivative_normalizer_fit_overwrites_stale_stats() -> None:
+    artifact_dir = Path(__file__).resolve().parent / ".test_artifacts" / "derivative_normalizer_overwrite"
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True)
+    stats_path = artifact_dir / "derivatives_stats.yaml"
+    first_train = pd.DataFrame(
+        {
+            "price_kin_vel": [1.0, 2.0, 3.0],
+            "price_kin_acc": [0.1, 0.2, 0.3],
+        }
+    )
+    second_train = pd.DataFrame({"price_kin_vel": [10.0, 20.0, 30.0]})
+
+    DerivativeNormalizer(stats_path).fit([first_train])
+    DerivativeNormalizer(stats_path).fit([second_train])
+
+    loaded_stats = DerivativeNormalizer.load_stats(stats_path)
+
+    assert set(loaded_stats) == {"price_kin_vel"}
+    assert loaded_stats["price_kin_vel"]["mean"] == 20.0
 
 
 def test_static_centering_removes_touch_tick_symmetrically() -> None:

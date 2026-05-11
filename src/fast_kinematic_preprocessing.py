@@ -161,11 +161,12 @@ def penalized_bspline_filter_matrix(
         n_basis,
         derivative_order=0,
     )
+    roughness_derivative_order = 2
     P = integrated_roughness_penalty(
         knots,
         degree,
         n_basis,
-        derivative_order=2,
+        derivative_order=roughness_derivative_order,
     )
     R = endpoint_derivative_matrix(
         knots,

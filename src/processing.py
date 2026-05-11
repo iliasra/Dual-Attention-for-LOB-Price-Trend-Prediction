@@ -200,6 +200,9 @@ class LobProcessingPipeline:
 
     def fit_train_normalizer(self, train_days: list[ProcessedDay]) -> DerivativeNormalizer:
         print(f"Fitting derivative normalizer on {len(train_days)} training day(s).")
+        if self.derivatives_stats_path.exists():
+            self.derivatives_stats_path.unlink()
+            print(f"Removed previous derivative statistics: {self.derivatives_stats_path}")
         normalizer = DerivativeNormalizer(self.derivatives_stats_path)
         normalizer.fit([day.processed for day in train_days])
         print("Derivative normalizer fitted.")

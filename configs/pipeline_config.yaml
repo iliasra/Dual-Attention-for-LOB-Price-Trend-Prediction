@@ -71,6 +71,7 @@ preprocessing:
     fast:
       n_basis: 20
       smoothing_lambda: 1.0
+      # recommended value: 1.0, or 0.95, 0.9 to increase stability
       eval_at: 1.0
   price_static:
     enabled: true
@@ -88,6 +89,7 @@ preprocessing:
     fast:
       n_basis: 20
       smoothing_lambda: 1.0
+      # recommended value: 1.0, or 0.95, 0.9 to increase stability
       eval_at: 1.0
   volume_static:
     enabled: true

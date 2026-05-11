@@ -13,11 +13,11 @@ from tqdm import tqdm
 try:
     from configuration import DataConfig, FastKinematicConfig, PreprocessingConfig, load_config
     from fast_kinematic_preprocessing import KINEMATIC_SUFFIXES, PenalizedBSplineKinematicTokenizer
-    from utils import append_to_yaml
+    from utils import save_yaml
 except ImportError:  # pragma: no cover
     from .configuration import DataConfig, FastKinematicConfig, PreprocessingConfig, load_config
     from .fast_kinematic_preprocessing import KINEMATIC_SUFFIXES, PenalizedBSplineKinematicTokenizer
-    from .utils import append_to_yaml
+    from .utils import save_yaml
 
 ArrayLike = Union[float, int, np.ndarray, pd.Series]
 
@@ -942,7 +942,7 @@ class DerivativeNormalizer:
                 "n_inf": stats.n_inf,
             }
 
-        append_to_yaml(self.output_path, self.stats_)
+        save_yaml(self.output_path, self.stats_)
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
