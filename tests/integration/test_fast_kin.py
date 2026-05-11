@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from configuration import load_config
-from fast_kinematic_preprocessing import PenalizedBSplineKinematicTokenizer
+from fast_kinematic_preprocessing import PenalizedBSplineKinematicTokenizer, lambda_for_effective_degrees_of_freedom
 
 
 FAST_CONFIG_PATHS = ("price_kinematic", "volume_kinematic")
@@ -19,7 +19,11 @@ def _configured_tokenizer(fast_config_path: str) -> tuple[PenalizedBSplineKinema
     tokenizer = PenalizedBSplineKinematicTokenizer(
         window=window,
         n_basis=fast_config.n_basis,
-        smoothing_lambda=fast_config.smoothing_lambda,
+        smoothing_lambda=lambda_for_effective_degrees_of_freedom(
+            target_df=fast_config.df,
+            window=window,
+            n_basis=fast_config.n_basis,
+        ),
         eval_at=fast_config.eval_at,
         chunk_size=preprocessing.kinematic_tokenization.chunk_size,
         dtype=np.float64,

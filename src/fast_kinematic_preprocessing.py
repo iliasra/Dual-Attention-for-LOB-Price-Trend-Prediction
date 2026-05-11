@@ -9,6 +9,7 @@ a simple matrix multiplication H @ y, y being the data points.
 from __future__ import annotations
 import math
 from dataclasses import dataclass, field
+from typing import NamedTuple
 import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
@@ -16,6 +17,12 @@ from scipy.interpolate import BSpline
 from tqdm import tqdm
 
 KINEMATIC_SUFFIXES = ("pos", "vel", "acc", "jrk")
+
+
+class GCVOptimizationResult(NamedTuple):
+    smoothing_lambda: float
+    effective_df: float
+    gcv_score: float
 
 def make_clamped_uniform_knots(n_basis: int, degree: int) -> np.ndarray:
     """
@@ -96,6 +103,287 @@ grid_size: int = 512,
     return basis_derivative.T @ (basis_derivative * weights[:, None])
 
 
+def _bspline_fit_system(window: int, n_basis: int, degree: int) -> tuple[np.ndarray, np.ndarray]:
+    if window < 2:
+        raise ValueError("window must be >= 2.")
+    tau = np.linspace(0.0, 1.0, window)
+    knots = make_clamped_uniform_knots(n_basis=n_basis, degree=degree)
+    B = bspline_design_matrix(
+        tau,
+        knots,
+        degree,
+        n_basis,
+        derivative_order=0,
+    )
+    omega = integrated_roughness_penalty(
+        knots,
+        degree,
+        n_basis,
+        derivative_order=2,
+    )
+    dt = float(window - 1)
+    # Express Omega in per-tick curvature units, matching derivative outputs.
+    omega = omega * dt**(-4)
+    return B, omega
+
+
+def _regularized_lhs(
+    design_matrix: np.ndarray,
+    roughness_penalty: np.ndarray,
+    smoothing_lambda: float,
+    ridge: float,
+) -> np.ndarray:
+    return (
+        design_matrix.T @ design_matrix
+        + smoothing_lambda * roughness_penalty
+        + ridge * np.eye(design_matrix.shape[1])
+    )
+
+
+def bspline_smoother_matrix(
+    window: int,
+    n_basis: int,
+    smoothing_lambda: float,
+    degree: int = 3,
+    ridge: float = 1e-8,
+) -> np.ndarray:
+    """
+    Returns S = B (B.T B + lambda Omega)^-1 B.T.
+
+    S maps an observed window y to fitted spline values at the original
+    window coordinates.
+    """
+    if smoothing_lambda < 0:
+        raise ValueError("smoothing_lambda must be >= 0.")
+
+    design_matrix, roughness_penalty = _bspline_fit_system(window, n_basis, degree)
+    lhs = _regularized_lhs(design_matrix, roughness_penalty, smoothing_lambda, ridge)
+    return design_matrix @ np.linalg.solve(lhs, design_matrix.T)
+
+
+def _effective_degrees_of_freedom_from_system(
+    design_matrix: np.ndarray,
+    roughness_penalty: np.ndarray,
+    smoothing_lambda: float,
+    ridge: float,
+) -> float:
+    lhs = _regularized_lhs(design_matrix, roughness_penalty, smoothing_lambda, ridge)
+    hat_basis = np.linalg.solve(lhs, design_matrix.T @ design_matrix)
+    return float(np.trace(hat_basis))
+
+
+def effective_degrees_of_freedom(
+    window: int,
+    n_basis: int,
+    smoothing_lambda: float,
+    degree: int = 3,
+    ridge: float = 1e-8,
+) -> float:
+    """
+    Computes trace(S_lambda), where S_lambda is the spline smoother matrix.
+    """
+    if smoothing_lambda < 0:
+        raise ValueError("smoothing_lambda must be >= 0.")
+
+    design_matrix, roughness_penalty = _bspline_fit_system(window, n_basis, degree)
+    return _effective_degrees_of_freedom_from_system(
+        design_matrix,
+        roughness_penalty,
+        smoothing_lambda,
+        ridge,
+    )
+
+
+def lambda_for_effective_degrees_of_freedom(
+    target_df: float,
+    window: int,
+    n_basis: int,
+    degree: int = 3,
+    ridge: float = 1e-8,
+    tolerance: float = 1e-6,
+    max_iterations: int = 80,
+) -> float:
+    """
+    Finds lambda by bisection so trace(S_lambda) is close to target_df.
+    """
+    if target_df <= 0:
+        raise ValueError("target_df must be > 0.")
+
+    design_matrix, roughness_penalty = _bspline_fit_system(window, n_basis, degree)
+
+    df_at_zero = _effective_degrees_of_freedom_from_system(design_matrix, roughness_penalty, 0.0, ridge)
+    if target_df >= df_at_zero:
+        return 0.0
+
+    low = 0.0
+    high = 1.0
+    df_high = _effective_degrees_of_freedom_from_system(design_matrix, roughness_penalty, high, ridge)
+    while df_high > target_df and high < 1e16:
+        high *= 2.0
+        df_high = _effective_degrees_of_freedom_from_system(design_matrix, roughness_penalty, high, ridge)
+
+    if df_high > target_df:
+        return high
+
+    for _ in range(max_iterations):
+        mid = 0.5 * (low + high)
+        df_mid = _effective_degrees_of_freedom_from_system(design_matrix, roughness_penalty, mid, ridge)
+        if abs(df_mid - target_df) <= tolerance:
+            return float(mid)
+        if df_mid > target_df:
+            low = mid
+        else:
+            high = mid
+
+    return float(0.5 * (low + high))
+
+
+def mean_gcv_score(
+    values_by_day: list[np.ndarray],
+    window: int,
+    n_basis: int,
+    smoothing_lambda: float,
+    degree: int = 3,
+    ridge: float = 1e-8,
+    chunk_size: int = 4096,
+) -> tuple[float, float]:
+    """
+    Computes the mean per-window GCV score over all train windows.
+
+    GCV(window) = (||y - Sy||^2 / W) / (1 - df / W)^2.
+    Multiple features are averaged as independent spline windows.
+    """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be > 0.")
+
+    smoother = bspline_smoother_matrix(
+        window=window,
+        n_basis=n_basis,
+        smoothing_lambda=smoothing_lambda,
+        degree=degree,
+        ridge=ridge,
+    )
+    df = float(np.trace(smoother))
+    denominator = (1.0 - df / float(window)) ** 2
+    if denominator <= 0:
+        raise ValueError(
+            f"GCV denominator must be positive; got df={df:.6g} for window={window}."
+        )
+
+    total_score = 0.0
+    total_count = 0
+    for values in values_by_day:
+        values = np.asarray(values, dtype=np.float64)
+        if values.ndim != 2:
+            raise ValueError(f"Expected train values with shape [N, F], got {values.shape}.")
+        n_rows, n_features = values.shape
+        n_windows = n_rows - window + 1
+        if n_windows <= 0 or n_features == 0:
+            continue
+
+        for start in range(0, n_windows, chunk_size):
+            stop = min(start + chunk_size, n_windows)
+            block = values[start : stop + window - 1]
+            windows = sliding_windows_2d(block, window)
+            fitted = np.einsum("ij,mjf->mif", smoother, windows, optimize=True)
+            rss = np.sum((windows - fitted) ** 2, axis=1)
+            scores = (rss / float(window)) / denominator
+            total_score += float(np.sum(scores))
+            total_count += scores.size
+
+    if total_count == 0:
+        raise ValueError("No train windows available for GCV smoothing-lambda optimization.")
+
+    return total_score / total_count, df
+
+
+def optimize_smoothing_lambda_gcv(
+    values_by_day: list[np.ndarray],
+    window: int,
+    n_basis: int,
+    max_df: float,
+    degree: int = 3,
+    ridge: float = 1e-8,
+    chunk_size: int = 4096,
+    n_df_candidates: int = 25,
+) -> GCVOptimizationResult:
+    """
+    Selects lambda by minimizing mean train GCV under an effective-df budget.
+
+    The configured max_df is an upper bound on trace(S_lambda). Candidate df
+    values are converted to lambda by bisection because df(lambda) decreases
+    monotonically with lambda.
+    """
+    if n_df_candidates <= 0:
+        raise ValueError("n_df_candidates must be > 0.")
+    if max_df <= 0:
+        raise ValueError("max_df must be > 0.")
+
+    df_at_zero = effective_degrees_of_freedom(
+        window=window,
+        n_basis=n_basis,
+        smoothing_lambda=0.0,
+        degree=degree,
+        ridge=ridge,
+    )
+    df_cap = min(float(max_df), df_at_zero)
+
+    df_floor = effective_degrees_of_freedom(
+        window=window,
+        n_basis=n_basis,
+        smoothing_lambda=1e12,
+        degree=degree,
+        ridge=ridge,
+    )
+    if df_cap <= df_floor:
+        candidate_dfs = np.array([df_cap], dtype=np.float64)
+    else:
+        candidate_dfs = np.linspace(df_floor, df_cap, n_df_candidates, dtype=np.float64)
+
+    best: GCVOptimizationResult | None = None
+    progress = tqdm(
+        candidate_dfs,
+        desc="Optimizing smoothing lambda by train GCV",
+        unit="df",
+        mininterval=5,
+    )
+    for candidate_df in progress:
+        smoothing_lambda = lambda_for_effective_degrees_of_freedom(
+            target_df=float(candidate_df),
+            window=window,
+            n_basis=n_basis,
+            degree=degree,
+            ridge=ridge,
+        )
+        gcv_score, effective_df = mean_gcv_score(
+            values_by_day=values_by_day,
+            window=window,
+            n_basis=n_basis,
+            smoothing_lambda=smoothing_lambda,
+            degree=degree,
+            ridge=ridge,
+            chunk_size=chunk_size,
+        )
+        result = GCVOptimizationResult(
+            smoothing_lambda=float(smoothing_lambda),
+            effective_df=float(effective_df),
+            gcv_score=float(gcv_score),
+        )
+        if best is None or result.gcv_score < best.gcv_score:
+            best = result
+            progress.set_postfix(
+                {
+                    "best_lambda": f"{best.smoothing_lambda:.3g}",
+                    "best_df": f"{best.effective_df:.3g}",
+                    "best_gcv": f"{best.gcv_score:.3g}",
+                }
+            )
+
+    if best is None:
+        raise ValueError("Unable to select a smoothing lambda from GCV candidates.")
+    return best
+
+
 def endpoint_derivative_matrix(
     knots: np.ndarray,
     degree: int,
@@ -151,23 +439,9 @@ def penalized_bspline_filter_matrix(
     if not 0.0 <= eval_at <= 1.0:
         raise ValueError("eval_at must be in [0, 1]")
 
-    tau = np.linspace(0.0, 1.0, window)
     knots = make_clamped_uniform_knots(n_basis=n_basis, degree=degree)
 
-    B = bspline_design_matrix(
-        tau,
-        knots,
-        degree,
-        n_basis,
-        derivative_order=0,
-    )
-    roughness_derivative_order = 2
-    P = integrated_roughness_penalty(
-        knots,
-        degree,
-        n_basis,
-        derivative_order=roughness_derivative_order,
-    )
+    B, P = _bspline_fit_system(window, n_basis, degree)
     R = endpoint_derivative_matrix(
         knots,
         degree,

@@ -64,7 +64,7 @@ preprocessing:
       alpha: 2.0
     fast:
       n_basis: 6
-      smoothing_lambda: 1.0
+      df: 6.0
       eval_at: 1.0
   price_static:
     enabled: true
@@ -80,7 +80,7 @@ preprocessing:
       alpha: 2.0
     fast:
       n_basis: 6
-      smoothing_lambda: 1.0
+      df: 6.0
       eval_at: 1.0
   volume_static:
     enabled: true

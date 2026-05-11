@@ -80,7 +80,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             },
             "fast": {
                 "n_basis": None,
-                "smoothing_lambda": None,
+                "df": None,
                 "eval_at": None,
             },
         },
@@ -100,7 +100,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             },
             "fast": {
                 "n_basis": None,
-                "smoothing_lambda": None,
+                "df": None,
                 "eval_at": None,
             },
         },
@@ -293,24 +293,25 @@ class KinematicTokenizationConfig:
 @dataclass(slots=True)
 class FastKinematicConfig:
     n_basis: int
-    smoothing_lambda: float
+    df: float
     eval_at: float
+    selected_smoothing_lambda: float | None = None
 
     def __post_init__(self) -> None:
         if self.n_basis <= 3:
             raise ValueError("Fast kinematic n_basis must be > 3 for cubic B-splines.")
-        if self.smoothing_lambda < 0:
-            raise ValueError("Fast kinematic smoothing_lambda must be >= 0.")
+        if not 0.0 < self.df <= self.n_basis:
+            raise ValueError("Fast kinematic df must be in (0, n_basis].")
         if not 0.0 <= self.eval_at <= 1.0:
             raise ValueError("Fast kinematic eval_at must be in [0, 1].")
+        if self.selected_smoothing_lambda is not None and self.selected_smoothing_lambda < 0:
+            raise ValueError("Fast kinematic selected_smoothing_lambda must be >= 0.")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], prefix: str) -> "FastKinematicConfig":
         return cls(
             n_basis=int(_require_explicit_value(payload["n_basis"], f"{prefix}.n_basis")),
-            smoothing_lambda=float(
-                _require_explicit_value(payload["smoothing_lambda"], f"{prefix}.smoothing_lambda")
-            ),
+            df=float(_require_explicit_value(payload["df"], f"{prefix}.df")),
             eval_at=float(_require_explicit_value(payload["eval_at"], f"{prefix}.eval_at")),
         )
 

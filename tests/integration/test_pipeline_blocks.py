@@ -148,7 +148,7 @@ def make_test_configs(tokenization_method: str = "basis") -> tuple[DataConfig, P
             ),
             fast=FastKinematicConfig(
                 n_basis=6,
-                smoothing_lambda=1.0,
+                df=5.0,
                 eval_at=1.0,
             ),
         ),
@@ -169,7 +169,7 @@ def make_test_configs(tokenization_method: str = "basis") -> tuple[DataConfig, P
             ),
             fast=FastKinematicConfig(
                 n_basis=6,
-                smoothing_lambda=1.0,
+                df=5.0,
                 eval_at=1.0,
             ),
         ),

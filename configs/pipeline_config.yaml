@@ -70,7 +70,8 @@ preprocessing:
       alpha: 5.0
     fast:
       n_basis: 20
-      smoothing_lambda: 1.0
+      # maximum effective degrees of freedom explored by train GCV optimization
+      df: 20.0
       # recommended value: 1.0, or 0.95, 0.9 to increase stability
       eval_at: 1.0
   price_static:
@@ -88,7 +89,8 @@ preprocessing:
       alpha: 5.0
     fast:
       n_basis: 20
-      smoothing_lambda: 1.0
+      # maximum effective degrees of freedom explored by train GCV optimization
+      df: 20.0
       # recommended value: 1.0, or 0.95, 0.9 to increase stability
       eval_at: 1.0
   volume_static:

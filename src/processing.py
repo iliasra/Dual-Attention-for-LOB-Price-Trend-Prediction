@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 try:
     from configuration import ExperimentConfig, load_config
     from datasets import DailySequenceBuilder
+    from fast_kinematic_preprocessing import optimize_smoothing_lambda_gcv
     from horizon import TargetLabelPipeline
     from kinematic_preprocessing import (
         DerivativeNormalizer,
@@ -20,6 +22,7 @@ try:
 except ImportError:  # pragma: no cover
     from .configuration import ExperimentConfig, load_config
     from .datasets import DailySequenceBuilder
+    from .fast_kinematic_preprocessing import optimize_smoothing_lambda_gcv
     from .horizon import TargetLabelPipeline
     from .kinematic_preprocessing import (
         DerivativeNormalizer,
@@ -58,7 +61,7 @@ class ProcessedDay:
     joined: pd.DataFrame
     labeled: pd.DataFrame
     message_features: pd.DataFrame
-    processed: pd.DataFrame
+    processed: pd.DataFrame | None = None
     normalized: pd.DataFrame | None = None
     processed_csv_path: Path | None = None
     sequence_paths: tuple[Path, Path, Path] | None = None
@@ -180,16 +183,14 @@ class LobProcessingPipeline:
         print(f"Loaded and trimmed {pair.label}: {len(trimmed)} rows.")
         return trimmed
 
-    def preprocess_pair(self, pair: LobFilePair, split: str) -> ProcessedDay:
-        """"""
-        print(f"Starting preprocessing for {pair.label} ({split}).")
+    def prepare_pair(self, pair: LobFilePair, split: str) -> ProcessedDay:
+        print(f"Starting raw feature preparation for {pair.label} ({split}).")
         trimmed = self.load_and_trim_pair(pair)
         print(f"Starting label generation for {pair.label}.")
         labeled = self.labeler.transform(trimmed)
         print(f"Starting message feature processing for {pair.label}.")
         message_features = self.message_processor.transform(labeled)
-        processed = self.snapshot_processor.transform(message_features, source_label=pair.label)
-        print(f"Finished preprocessing for {pair.label}: {processed.shape[0]} rows, {processed.shape[1]} columns.")
+        print(f"Finished raw feature preparation for {pair.label}: {message_features.shape[0]} rows.")
         return ProcessedDay(
             split=split,
             pair=pair,
@@ -197,25 +198,128 @@ class LobProcessingPipeline:
             joined=trimmed,
             labeled=labeled,
             message_features=message_features,
-            processed=processed,
         )
+
+    def preprocess_pair(self, pair: LobFilePair, split: str) -> ProcessedDay:
+        day = self.prepare_pair(pair, split)
+        day.processed = self.snapshot_processor.transform(day.message_features, source_label=pair.label)
+        print(
+            f"Finished preprocessing for {pair.label}: "
+            f"{day.processed.shape[0]} rows, {day.processed.shape[1]} columns."
+        )
+        return day
 
     def preprocess_splits(self, split_pairs: dict[str, list[LobFilePair]]) -> dict[str, list[ProcessedDay]]:
         processed = {name: [] for name in SPLIT_NAMES}
         for split, pairs in split_pairs.items():
             print(f"Starting preprocessing split '{split}' with {len(pairs)} day(s).")
             for pair in pairs:
-                processed[split].append(self.preprocess_pair(pair, split))
+                processed[split].append(self.prepare_pair(pair, split))
             print(f"Finished preprocessing split '{split}'.")
         return processed
+
+    def _stream_values_for_lambda_optimization(
+        self,
+        train_days: list[ProcessedDay],
+        *,
+        kind: str,
+    ) -> list[np.ndarray]:
+        if kind not in {"price", "volume"}:
+            raise ValueError("kind must be 'price' or 'volume'.")
+
+        stream_config = (
+            self.config.preprocessing.price_kinematic
+            if kind == "price"
+            else self.config.preprocessing.volume_kinematic
+        )
+        values_by_day: list[np.ndarray] = []
+        for day in train_days:
+            columns = self.snapshot_processor.window_processor._resolve_stream_columns(
+                day.message_features,
+                stream_config,
+                kind,
+            )
+            if not columns:
+                continue
+            values = day.message_features[columns].to_numpy(dtype=float)
+            if kind == "volume":
+                values = np.log1p(values)
+            values_by_day.append(values)
+        return values_by_day
+
+    def _optimize_fast_stream_lambda(
+        self,
+        train_days: list[ProcessedDay],
+        *,
+        kind: str,
+    ) -> None:
+        preprocessing = self.config.preprocessing
+        stream_config = (
+            preprocessing.price_kinematic
+            if kind == "price"
+            else preprocessing.volume_kinematic
+        )
+        if not stream_config.enabled:
+            return
+
+        window = preprocessing.snapshot_window
+        values_by_day = [
+            values
+            for values in self._stream_values_for_lambda_optimization(train_days, kind=kind)
+            if len(values) >= window
+        ]
+        if not values_by_day:
+            return
+
+        fast_config = stream_config.fast
+        gcv_chunk_size = min(preprocessing.kinematic_tokenization.chunk_size, 4096)
+        print(
+            f"Starting fast {kind} smoothing-lambda optimization "
+            f"on train windows with max df={fast_config.df}."
+        )
+        result = optimize_smoothing_lambda_gcv(
+            values_by_day=values_by_day,
+            window=window,
+            n_basis=fast_config.n_basis,
+            max_df=fast_config.df,
+            chunk_size=gcv_chunk_size,
+        )
+        fast_config.selected_smoothing_lambda = result.smoothing_lambda
+        print(
+            f"Selected fast {kind} smoothing_lambda={result.smoothing_lambda:.8g} "
+            f"(effective_df={result.effective_df:.4f}, mean_gcv={result.gcv_score:.8g})."
+        )
+
+    def optimize_fast_smoothing_lambdas(self, train_days: list[ProcessedDay]) -> None:
+        if self.config.preprocessing.kinematic_tokenization.method != "fast":
+            return
+        self._optimize_fast_stream_lambda(train_days, kind="price")
+        self._optimize_fast_stream_lambda(train_days, kind="volume")
+        self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
+
+    def build_snapshot_features(self, processed_splits: dict[str, list[ProcessedDay]]) -> None:
+        print("Starting snapshot feature construction for all splits.")
+        for split_days in processed_splits.values():
+            for day in split_days:
+                day.processed = self.snapshot_processor.transform(day.message_features, source_label=day.pair.label)
+                print(
+                    f"Finished preprocessing for {day.pair.label}: "
+                    f"{day.processed.shape[0]} rows, {day.processed.shape[1]} columns."
+                )
+        print("Finished snapshot feature construction for all splits.")
 
     def fit_train_normalizer(self, train_days: list[ProcessedDay]) -> DerivativeNormalizer:
         print(f"Fitting derivative normalizer on {len(train_days)} training day(s).")
         if self.derivatives_stats_path.exists():
             self.derivatives_stats_path.unlink()
             print(f"Removed previous derivative statistics: {self.derivatives_stats_path}")
+        processed_train_days = []
+        for day in train_days:
+            if day.processed is None:
+                raise ValueError(f"{day.pair.label} has not been snapshot-processed yet.")
+            processed_train_days.append(day.processed)
         normalizer = DerivativeNormalizer(self.derivatives_stats_path)
-        normalizer.fit([day.processed for day in train_days])
+        normalizer.fit(processed_train_days)
         print("Derivative normalizer fitted.")
         return normalizer
 
@@ -223,6 +327,8 @@ class LobProcessingPipeline:
         print("Starting normalization for all splits.")
         for split_days in processed_splits.values():
             for day in split_days:
+                if day.processed is None:
+                    raise ValueError(f"{day.pair.label} has not been snapshot-processed yet.")
                 day.normalized = normalizer.transform(day.processed)
         print("Finished normalization for all splits.")
 
@@ -255,6 +361,8 @@ class LobProcessingPipeline:
         print(f"Discovered {len(pairs)} message/orderbook file pair(s).")
         split_pairs = self.split_pairs(pairs)
         processed_splits = self.preprocess_splits(split_pairs)
+        self.optimize_fast_smoothing_lambdas(processed_splits["train"])
+        self.build_snapshot_features(processed_splits)
         normalizer = self.fit_train_normalizer(processed_splits["train"])
         self.apply_normalization(processed_splits, normalizer)
         self.save_split_outputs(processed_splits)

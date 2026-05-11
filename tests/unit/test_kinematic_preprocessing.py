@@ -265,7 +265,7 @@ def _make_static_refactor_config(method: str) -> tuple[DataConfig, Preprocessing
             tick_size=1.0,
             reference="tick",
             basis=BasisKinematicConfig(alpha=2.0),
-            fast=FastKinematicConfig(n_basis=6, smoothing_lambda=1.0, eval_at=1.0),
+            fast=FastKinematicConfig(n_basis=6, df=5.0, eval_at=1.0),
         ),
         price_static=PriceStaticConfig(
             enabled=True,
@@ -280,7 +280,7 @@ def _make_static_refactor_config(method: str) -> tuple[DataConfig, Preprocessing
             columns=None,
             reference="tick",
             basis=BasisKinematicConfig(alpha=2.0),
-            fast=FastKinematicConfig(n_basis=6, smoothing_lambda=1.0, eval_at=1.0),
+            fast=FastKinematicConfig(n_basis=6, df=5.0, eval_at=1.0),
         ),
         volume_static=VolumeStaticConfig(
             enabled=True,

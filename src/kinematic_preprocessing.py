@@ -12,11 +12,19 @@ from tqdm import tqdm
 
 try:
     from configuration import DataConfig, FastKinematicConfig, PreprocessingConfig, load_config
-    from fast_kinematic_preprocessing import KINEMATIC_SUFFIXES, PenalizedBSplineKinematicTokenizer
+    from fast_kinematic_preprocessing import (
+        KINEMATIC_SUFFIXES,
+        PenalizedBSplineKinematicTokenizer,
+        lambda_for_effective_degrees_of_freedom,
+    )
     from utils import save_yaml
 except ImportError:  # pragma: no cover
     from .configuration import DataConfig, FastKinematicConfig, PreprocessingConfig, load_config
-    from .fast_kinematic_preprocessing import KINEMATIC_SUFFIXES, PenalizedBSplineKinematicTokenizer
+    from .fast_kinematic_preprocessing import (
+        KINEMATIC_SUFFIXES,
+        PenalizedBSplineKinematicTokenizer,
+        lambda_for_effective_degrees_of_freedom,
+    )
     from .utils import save_yaml
 
 ArrayLike = Union[float, int, np.ndarray, pd.Series]
@@ -310,10 +318,17 @@ def _make_fast_tokenizer(
     fast_config: FastKinematicConfig,
     chunk_size: int,
 ) -> PenalizedBSplineKinematicTokenizer:
+    smoothing_lambda = fast_config.selected_smoothing_lambda
+    if smoothing_lambda is None:
+        smoothing_lambda = lambda_for_effective_degrees_of_freedom(
+            target_df=fast_config.df,
+            window=window,
+            n_basis=fast_config.n_basis,
+        )
     return PenalizedBSplineKinematicTokenizer(
         window=window,
         n_basis=fast_config.n_basis,
-        smoothing_lambda=fast_config.smoothing_lambda,
+        smoothing_lambda=smoothing_lambda,
         eval_at=fast_config.eval_at,
         chunk_size=chunk_size,
         dtype=np.float64,
