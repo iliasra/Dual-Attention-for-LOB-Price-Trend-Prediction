@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from numpy.lib.stride_tricks import sliding_window_view
 from torch.utils.data import Dataset
 
 try:
@@ -38,21 +37,16 @@ class DailySequenceBuilder:
         labels = labels.astype(np.int64)
         features = df[feature_columns].to_numpy(dtype=np.float32)
 
-        feature_windows = sliding_window_view(features, window_shape=sequence_length, axis=0)
-        feature_windows = np.swapaxes(feature_windows, 1, 2).copy()
-        time_windows = sliding_window_view(times, window_shape=sequence_length, axis=0).copy()
-        label_windows = labels[sequence_length - 1 :].copy()
-
-        return feature_windows, time_windows, label_windows
+        return features, times, labels
 
     def save(self, df: pd.DataFrame, save_prefix: str | Path) -> tuple[Path, Path, Path]:
         prefix = Path(save_prefix)
         prefix.parent.mkdir(parents=True, exist_ok=True)
         features, times, labels = self.build(df)
 
-        x_path = prefix.with_name(f"{prefix.name}_X.npy")
-        t_path = prefix.with_name(f"{prefix.name}_T.npy")
-        y_path = prefix.with_name(f"{prefix.name}_y.npy")
+        x_path = prefix.with_name(f"{prefix.name}_features.npy")
+        t_path = prefix.with_name(f"{prefix.name}_times.npy")
+        y_path = prefix.with_name(f"{prefix.name}_labels.npy")
 
         np.save(x_path, features)
         np.save(t_path, times)
@@ -91,13 +85,18 @@ class LOBDataset(Dataset):
         y_paths: list[str],
         sequence_window: int | None = None,
     ):
+        if sequence_window is None:
+            raise ValueError("sequence_window is required to reconstruct compact feature arrays.")
+        if sequence_window <= 0:
+            raise ValueError("sequence_window must be > 0.")
+
         self.X_data = [np.load(path, mmap_mode="r") for path in x_paths]
         self.T_data = [np.load(path, mmap_mode="r") for path in t_paths]
         self.y_data = [np.load(path, mmap_mode="r") for path in y_paths]
-        self.sequence_window = sequence_window
+        self.sequence_window = int(sequence_window)
         self._validate_arrays()
 
-        self.lengths = [len(labels) for labels in self.y_data]
+        self.lengths = [len(labels) - self.sequence_window + 1 for labels in self.y_data]
         self.cumulative_lengths = np.cumsum(self.lengths)
 
     def _validate_arrays(self) -> None:
@@ -105,38 +104,36 @@ class LOBDataset(Dataset):
             raise ValueError("x_paths, t_paths, and y_paths must contain the same number of files.")
 
         for day_idx, (features, times, labels) in enumerate(zip(self.X_data, self.T_data, self.y_data)):
-            if features.ndim != 3:
+            if features.ndim != 2:
                 raise ValueError(
-                    f"X file at index {day_idx} must contain pre-built windows with shape "
-                    "[num_windows, sequence_window, num_features]."
+                    f"Feature file at index {day_idx} must contain compact features with shape "
+                    "[num_rows, num_features]."
                 )
-            if times.ndim != 2:
+            if times.ndim != 1:
                 raise ValueError(
-                    f"T file at index {day_idx} must contain time windows with shape "
-                    "[num_windows, sequence_window]."
+                    f"Time file at index {day_idx} must contain compact times with shape [num_rows]."
                 )
             if len(features) != len(times) or len(features) != len(labels):
-                raise ValueError(f"X, T, and y files at index {day_idx} must contain the same number of windows.")
-            if self.sequence_window is not None and features.shape[1] != self.sequence_window:
+                raise ValueError(f"Feature, time, and label files at index {day_idx} must contain the same rows.")
+            if len(labels) < self.sequence_window:
                 raise ValueError(
-                    f"X file at index {day_idx} has sequence length {features.shape[1]}, "
-                    f"expected {self.sequence_window}."
-                )
-            if self.sequence_window is not None and times.shape[1] != self.sequence_window:
-                raise ValueError(
-                    f"T file at index {day_idx} has sequence length {times.shape[1]}, "
-                    f"expected {self.sequence_window}."
+                    f"Files at index {day_idx} contain {len(labels)} rows, "
+                    f"but sequence_window is {self.sequence_window}."
                 )
 
     def __len__(self) -> int:
         return int(self.cumulative_lengths[-1]) if len(self.cumulative_lengths) else 0
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index {idx} is out of bounds for dataset of length {len(self)}.")
+
         day_idx = int(np.searchsorted(self.cumulative_lengths, idx, side="right"))
         local_idx = idx if day_idx == 0 else idx - int(self.cumulative_lengths[day_idx - 1])
+        end_idx = local_idx + self.sequence_window
 
-        x_seq = torch.from_numpy(np.array(self.X_data[day_idx][local_idx], dtype=np.float32, copy=True))
-        t_seq = torch.from_numpy(np.array(self.T_data[day_idx][local_idx], dtype=np.float32, copy=True))
-        y_label = torch.tensor(int(self.y_data[day_idx][local_idx]), dtype=torch.long)
+        x_seq = torch.from_numpy(np.array(self.X_data[day_idx][local_idx:end_idx], dtype=np.float32, copy=True))
+        t_seq = torch.from_numpy(np.array(self.T_data[day_idx][local_idx:end_idx], dtype=np.float32, copy=True))
+        y_label = torch.tensor(int(self.y_data[day_idx][end_idx - 1]), dtype=torch.long)
 
         return x_seq, t_seq, y_label

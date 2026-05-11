@@ -36,9 +36,18 @@ SPLIT_NAMES = ("train", "validation", "test")
 
 @dataclass(slots=True)
 class LobFilePair:
+    symbol: str
     date: str
     message_path: Path
     orderbook_path: Path
+
+    @property
+    def output_stem(self) -> str:
+        return f"{self.symbol}_{self.date}"
+
+    @property
+    def label(self) -> str:
+        return f"{self.symbol} {self.date}"
 
 
 @dataclass(slots=True)
@@ -90,30 +99,32 @@ class LobProcessingPipeline:
         return path if path.is_absolute() else (self.config_dir / path).resolve()
 
     def discover_pairs(self) -> list[LobFilePair]:
-        """gathers message/orderbook data by day"""
+        """gathers message/orderbook data by asset and day"""
         if not self.data_dir.exists():
             raise FileNotFoundError(f"LOBSTER directory not found: {self.data_dir}")
 
         files = list(self.data_dir.iterdir())
-        grouped: dict[str, dict[str, Path]] = {}
+        grouped: dict[tuple[str, str], dict[str, Path]] = {}
 
         for file_path in files:
             parts = file_path.name.split("_")
             if len(parts) < 2:
                 continue
+            symbol = parts[0]
             date = parts[1]
-            grouped.setdefault(date, {})
+            key = (symbol, date)
+            grouped.setdefault(key, {})
             if "message" in file_path.name:
-                grouped[date]["message"] = file_path
+                grouped[key]["message"] = file_path
             elif "orderbook" in file_path.name:
-                grouped[date]["orderbook"] = file_path
+                grouped[key]["orderbook"] = file_path
 
         pairs = [
-            LobFilePair(date=date, message_path=paths["message"], orderbook_path=paths["orderbook"])
-            for date, paths in grouped.items()
+            LobFilePair(symbol=symbol, date=date, message_path=paths["message"], orderbook_path=paths["orderbook"])
+            for (symbol, date), paths in grouped.items()
             if {"message", "orderbook"} <= set(paths)
         ]
-        return sorted(pairs, key=lambda pair: pair.date)
+        return sorted(pairs, key=lambda pair: (pair.symbol, pair.date))
 
     def split_pairs(self, pairs: list[LobFilePair]) -> dict[str, list[LobFilePair]]:
         split_dates = {
@@ -160,25 +171,25 @@ class LobProcessingPipeline:
         """this function: delete 'ghost' level if placeholder values are recognized;
         joins orderbook/message data for a particular day;
         filters out the first/last 15 minutes."""
-        print(f"Loading raw data for date {pair.date}.")
+        print(f"Loading raw data for {pair.label}.")
         message_df = pd.read_csv(pair.message_path)
         orderbook_df = pd.read_csv(pair.orderbook_path)
         handle_abnormal_prices([message_df, orderbook_df])
         joined = self.joiner.transform(message_df, orderbook_df)
         trimmed = self.session_filter.transform(joined) #session_filter.transform gets rid of first/last 15 mins
-        print(f"Loaded and trimmed date {pair.date}: {len(trimmed)} rows.")
+        print(f"Loaded and trimmed {pair.label}: {len(trimmed)} rows.")
         return trimmed
 
     def preprocess_pair(self, pair: LobFilePair, split: str) -> ProcessedDay:
         """"""
-        print(f"Starting preprocessing for date {pair.date} ({split}).")
+        print(f"Starting preprocessing for {pair.label} ({split}).")
         trimmed = self.load_and_trim_pair(pair)
-        print(f"Starting label generation for date {pair.date}.")
+        print(f"Starting label generation for {pair.label}.")
         labeled = self.labeler.transform(trimmed)
-        print(f"Starting message feature processing for date {pair.date}.")
+        print(f"Starting message feature processing for {pair.label}.")
         message_features = self.message_processor.transform(labeled)
-        processed = self.snapshot_processor.transform(message_features, source_label=f"date {pair.date}")
-        print(f"Finished preprocessing for date {pair.date}: {processed.shape[0]} rows, {processed.shape[1]} columns.")
+        processed = self.snapshot_processor.transform(message_features, source_label=pair.label)
+        print(f"Finished preprocessing for {pair.label}: {processed.shape[0]} rows, {processed.shape[1]} columns.")
         return ProcessedDay(
             split=split,
             pair=pair,
@@ -228,15 +239,15 @@ class LobProcessingPipeline:
 
             for day in days:
                 if day.normalized is None:
-                    raise ValueError(f"Day {day.pair.date} in split {split} has not been normalized yet.")
+                    raise ValueError(f"{day.pair.label} in split {split} has not been normalized yet.")
 
-                csv_path = processed_split_dir / f"{day.pair.date}_processed.csv"
+                csv_path = processed_split_dir / f"{day.pair.output_stem}_processed.csv"
                 day.normalized.to_csv(csv_path, index=False)
                 day.processed_csv_path = csv_path
 
-                prefix = sequence_split_dir / day.pair.date
+                prefix = sequence_split_dir / day.pair.output_stem
                 day.sequence_paths = self.sequence_builder.save(day.normalized, prefix)
-                print(f"Saved outputs for date {day.pair.date} ({split}).")
+                print(f"Saved outputs for {day.pair.label} ({split}).")
 
     def run(self) -> dict[str, dict[str, tuple[int, int]]]:
         print("Starting LOB processing pipeline.")
@@ -251,7 +262,7 @@ class LobProcessingPipeline:
 
         return {
             split: {
-                day.pair.date: day.normalized.shape if day.normalized is not None else day.processed.shape
+                day.pair.output_stem: day.normalized.shape if day.normalized is not None else day.processed.shape
                 for day in days
             }
             for split, days in processed_splits.items()

@@ -27,12 +27,12 @@ def sequence_paths(sequence_dir: Path, split: str) -> tuple[list[str], list[str]
     t_paths: list[str] = []
     y_paths: list[str] = []
 
-    for x_path in sorted(split_dir.glob("*_X.npy")):
-        prefix = x_path.name.removesuffix("_X.npy")
-        t_path = x_path.with_name(f"{prefix}_T.npy")
-        y_path = x_path.with_name(f"{prefix}_y.npy")
+    for x_path in sorted(split_dir.glob("*_features.npy")):
+        prefix = x_path.name.removesuffix("_features.npy")
+        t_path = x_path.with_name(f"{prefix}_times.npy")
+        y_path = x_path.with_name(f"{prefix}_labels.npy")
         if not t_path.exists() or not y_path.exists():
-            raise FileNotFoundError(f"Missing matching T/y files for {x_path}")
+            raise FileNotFoundError(f"Missing matching times/labels files for {x_path}")
         x_paths.append(str(x_path))
         t_paths.append(str(t_path))
         y_paths.append(str(y_path))

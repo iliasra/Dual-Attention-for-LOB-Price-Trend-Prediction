@@ -103,18 +103,18 @@ in `configs/pipeline_config.yaml`.
 The preprocessing stage writes normalized processed dataframes to:
 
 ```text
-data/processed_dataframes/<split>/<date>_processed.csv
+data/processed_dataframes/<split>/<symbol>_<date>_processed.csv
 ```
 
 It writes model-ready sequence tensors to:
 
 ```text
-data/sequences/<split>/<date>_X.npy
-data/sequences/<split>/<date>_T.npy
-data/sequences/<split>/<date>_y.npy
+data/sequences/<split>/<symbol>_<date>_features.npy
+data/sequences/<split>/<symbol>_<date>_times.npy
+data/sequences/<split>/<symbol>_<date>_labels.npy
 ```
 
-These tensors are consumed directly by `LOBDataset` during training.
+`LOBDataset` reconstructs sliding windows from these compact arrays during training.
 
 ## Testing
 

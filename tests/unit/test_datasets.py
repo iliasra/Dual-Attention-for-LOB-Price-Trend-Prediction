@@ -54,7 +54,7 @@ def test_feature_columns_excludes_time_label_and_configured_columns() -> None:
     assert DailySequenceBuilder(config).feature_columns(df) == ["keep_a", "keep_b"]
 
 
-def test_build_creates_sliding_feature_time_and_label_windows() -> None:
+def test_build_creates_compact_feature_time_and_label_arrays() -> None:
     df = pd.DataFrame(
         {
             "time": [1.0, 2.0, 3.0, 4.0, 5.0],
@@ -67,11 +67,11 @@ def test_build_creates_sliding_feature_time_and_label_windows() -> None:
 
     features, times, labels = DailySequenceBuilder(config).build(df)
 
-    assert features.shape == (3, 3, 2) # (3 sliding windows, 3 timesteps per window, 2 feature columns (feature_a, feature_b))
-    assert times.shape == (3, 3) #(3 sliding windows, 3 timesteps per window)
-    assert labels.tolist() == [2, 0, 1] #(1 label per window)
-    np.testing.assert_allclose(features[0], [[10, 1], [20, 2], [30, 3]])
-    np.testing.assert_allclose(times[0], [1.0, 2.0, 3.0])
+    assert features.shape == (5, 2)
+    assert times.shape == (5,)
+    assert labels.tolist() == [0, 1, 2, 0, 1]
+    np.testing.assert_allclose(features, [[10, 1], [20, 2], [30, 3], [40, 4], [50, 5]])
+    np.testing.assert_allclose(times, [1.0, 2.0, 3.0, 4.0, 5.0])
 
 
 def test_lob_dataset_getitem_returns_sequence_window_starting_at_idx(artifact_dir: Path) -> None:
@@ -86,6 +86,11 @@ def test_lob_dataset_getitem_returns_sequence_window_starting_at_idx(artifact_di
     config = make_data_config(sequence_window=3)
     x_path, t_path, y_path = DailySequenceBuilder(config).save(df, artifact_dir / "toy_day")
     dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=config.sequence_window)
+
+    assert x_path.name == "toy_day_features.npy"
+    assert t_path.name == "toy_day_times.npy"
+    assert y_path.name == "toy_day_labels.npy"
+    assert len(dataset) == 3
 
     x_seq, t_seq, y_label = dataset[1]
 
