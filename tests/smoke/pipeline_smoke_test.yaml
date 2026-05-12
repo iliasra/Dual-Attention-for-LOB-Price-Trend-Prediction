@@ -58,7 +58,7 @@ preprocessing:
     start_offset_minutes: 15
     end_offset_minutes: 15
   normalization:
-    derivatives_stats_path: .smoke/derivatives_stats.yaml
+    derivatives_stats_dir: .smoke
     scope: train_only
   kinematic_tokenization:
     method: basis
@@ -126,5 +126,5 @@ training:
   focal_gamma: 2.0
   class_weights: [2.0, 10.0, 1.0]
   grad_clip_norm: 1.0
-  best_model_path: .smoke/best_lob_transformer.pth
+  model_dir: .smoke
   use_amp: false

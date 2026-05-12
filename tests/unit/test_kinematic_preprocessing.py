@@ -256,7 +256,7 @@ def _make_static_refactor_config(method: str) -> tuple[DataConfig, Preprocessing
             end_offset_minutes=15,
         ),
         normalization=NormalizationConfig(
-            derivatives_stats_path="derivatives_stats.yaml",
+            derivatives_stats_dir=".",
             scope="train_only",
         ),
         kinematic_tokenization=KinematicTokenizationConfig(method=method, chunk_size=3),

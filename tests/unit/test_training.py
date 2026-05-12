@@ -27,7 +27,7 @@ def test_lob_trainer_stops_after_patience_without_val_improvement(
     config = load_config().training
     config.epochs = 10
     config.early_stopping_patience = 2
-    config.best_model_path = str(artifact_dir / "best.pth")
+    config.model_dir = str(artifact_dir)
     trainer = LobTrainer(config)
     metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
     validation_losses = iter([1.0, 1.1, 1.2, 0.5])
@@ -45,4 +45,4 @@ def test_lob_trainer_stops_after_patience_without_val_improvement(
 
     assert len(history) == 3
     assert [result.val_loss for result in history] == [1.0, 1.1, 1.2]
-    assert Path(config.best_model_path).exists()
+    assert config.best_model_path.exists()

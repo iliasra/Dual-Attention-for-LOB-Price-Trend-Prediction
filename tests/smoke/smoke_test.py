@@ -93,8 +93,8 @@ def main() -> None:
     smoke_test_dir = Path(__file__).resolve().parent
     config = load_config(smoke_test_dir / "pipeline_smoke_test.yaml")
     smoke_dir = smoke_test_dir / ".smoke"
-    config.preprocessing.normalization.derivatives_stats_path = str(smoke_dir / "derivatives_stats.yaml")
-    config.training.best_model_path = str(smoke_dir / "best_lob_transformer.pth")
+    config.preprocessing.normalization.derivatives_stats_dir = str(smoke_dir)
+    config.training.model_dir = str(smoke_dir)
     smoke_dir.mkdir(parents=True, exist_ok=True)
     cleanup_smoke_dir(smoke_dir)
 
@@ -169,7 +169,7 @@ def main() -> None:
 
     trainer = LobTrainer(config.training)
     trained_model, history = trainer.fit(model, train_loader, val_loader)
-    best_model_path = Path(config.training.best_model_path)
+    best_model_path = config.training.best_model_path
     assert best_model_path.exists(), "Trainer did not save the best model."
 
     trained_model.eval()

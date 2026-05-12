@@ -144,7 +144,7 @@ def make_test_configs(tokenization_method: str = "basis") -> tuple[DataConfig, P
             end_offset_minutes=15,
         ),
         normalization=NormalizationConfig(
-            derivatives_stats_path="derivatives_stats.yaml",
+            derivatives_stats_dir=".",
             scope="train_only",
         ),
         kinematic_tokenization=KinematicTokenizationConfig(
@@ -327,7 +327,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path) -> N
     payload["preprocessing"]["temporal_features"]["market_close_seconds"] = 100000
     payload["preprocessing"]["temporal_features"]["start_offset_minutes"] = 0
     payload["preprocessing"]["temporal_features"]["end_offset_minutes"] = 0
-    payload["preprocessing"]["normalization"]["derivatives_stats_path"] = "derivatives/derivatives_stats.yaml"
+    payload["preprocessing"]["normalization"]["derivatives_stats_dir"] = "derivatives"
     payload["preprocessing"]["kinematic_tokenization"]["method"] = "basis"
 
     config_path = artifact_dir / "fold_pipeline.yaml"

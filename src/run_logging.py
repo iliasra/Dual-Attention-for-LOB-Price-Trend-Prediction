@@ -196,6 +196,7 @@ def save_run_config_snapshot(
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "config_path": str(config.path),
             "fold_id": fold_id,
+            "resolved_model_dir": str(config.training.model_dir),
             "resolved_best_model_path": str(config.training.best_model_path),
             "model_parameters": model_parameters or {},
             "fast_smoothing_lambdas": fast_smoothing_lambda_summary(config, preprocessing_metadata),
@@ -376,6 +377,7 @@ def save_run_log(
         handle.write(f"Config snapshot: {config_snapshot_path}\n")
         handle.write(f"Loss and metrics CSV: {losses_path}\n")
         handle.write(f"Confusion matrices: {confusion_matrices_path}\n")
+        handle.write(f"Model directory: {config.training.model_dir}\n")
         handle.write(f"Best model path: {config.training.best_model_path}\n")
         handle.write("\nModel parameters\n")
         for key, value in model_parameters.items():

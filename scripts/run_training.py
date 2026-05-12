@@ -74,8 +74,11 @@ def train_fold(
     fold_log_dir: Path,
     fold_result_dir: Path,
     run_stem: str,
-    best_model_name: str,
 ) -> dict:
+    print(f"Starting training fold '{fold_id}'.")
+    print(f"Fold '{fold_id}' sequence directory: {fold_sequence_dir}")
+    print(f"Fold '{fold_id}' log directory: {fold_log_dir}")
+    print(f"Fold '{fold_id}' result directory: {fold_result_dir}")
     fold_log_dir.mkdir(parents=True, exist_ok=True)
     fold_result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -83,7 +86,7 @@ def train_fold(
     run_config_path = fold_log_dir / "config.yaml"
     run_losses_path = fold_log_dir / "metrics.csv"
     run_confusion_matrices_path = fold_log_dir / "confusion_matrices.yaml"
-    config.training.best_model_path = str(fold_result_dir / best_model_name)
+    config.training.model_dir = str(fold_result_dir)
     preprocessing_metadata = load_preprocessing_metadata(fold_sequence_dir)
 
     train_dataset = build_dataset(fold_sequence_dir, "train", config.data.sequence_window)
@@ -139,6 +142,13 @@ def train_fold(
         "validation_evaluation": len(validation_dataset),
         "test": len(test_dataset),
     }
+    print(
+        f"Fold '{fold_id}' dataset sizes: "
+        f"train={dataset_sizes['train']}, "
+        f"validation={dataset_sizes['validation']}, "
+        f"validation_evaluation={dataset_sizes['validation_evaluation']}, "
+        f"test={dataset_sizes['test']}."
+    )
     save_run_config_snapshot(
         config,
         run_config_path,
@@ -183,7 +193,7 @@ def train_fold(
         "sequence_dir": str(fold_sequence_dir),
         "log_dir": str(fold_log_dir),
         "result_dir": str(fold_result_dir),
-        "best_model_path": config.training.best_model_path,
+        "best_model_path": str(config.training.best_model_path),
         "dataset_sizes": dataset_sizes,
         "logs": {
             "run_log": str(run_log_path),
@@ -200,9 +210,8 @@ def main() -> None:
     logs_dir = resolve_config_path(config, config.data.logs_dir)
     run_stem = next_run_stem(logs_dir)
     run_log_dir = logs_dir / run_stem
-    resolved_best_model_path = resolve_config_path(config, config.training.best_model_path)
-    run_result_dir = resolved_best_model_path.parent / run_stem
-    best_model_name = resolved_best_model_path.name
+    resolved_model_dir = resolve_config_path(config, config.training.model_dir)
+    run_result_dir = resolved_model_dir / run_stem
 
     summary = {
         "run": run_stem,
@@ -211,7 +220,9 @@ def main() -> None:
         "result_dir": str(run_result_dir),
         "folds": {},
     }
-    for fold in config.folds:
+    total_folds = len(config.folds)
+    for fold_index, fold in enumerate(config.folds, start=1):
+        print(f"Starting fold {fold_index}/{total_folds}: {fold.id}")
         paths = fold_artifact_paths(
             sequence_dir=sequence_dir,
             run_log_dir=run_log_dir,
@@ -225,7 +236,6 @@ def main() -> None:
             fold_log_dir=paths["log_dir"],
             fold_result_dir=paths["result_dir"],
             run_stem=run_stem,
-            best_model_name=best_model_name,
         )
         summary["folds"][fold.id] = fold_summary
 

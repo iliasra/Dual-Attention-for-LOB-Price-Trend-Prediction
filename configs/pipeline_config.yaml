@@ -14,7 +14,7 @@ data:
   # NB: time/label col are automatically excluded as they are used
   # to generate specific .npy files for the model to use. 
   feature_exclude_columns: []
-  sequence_window: 16
+  sequence_window: 64
 
 # fallback only used when folds is empty
 dataset_splits:
@@ -48,6 +48,7 @@ preprocessing:
       lower_barrier_ticks: 3.0
       bid_column: bid_price_1
       ask_column: ask_price_1
+      # if null, computes the midprice based on level 1 bid/ask prices
       price_column:
   message:
     size_column: size
@@ -61,12 +62,14 @@ preprocessing:
     add_day_sincos: true
     day_frequency: 86400
     keep_timestamp: true
+    # 34200 = 9.30 am
     market_open_seconds: 34200
+    # 57600 = 4 pm
     market_close_seconds: 57600
     start_offset_minutes: 15
     end_offset_minutes: 15
   normalization:
-    derivatives_stats_path: ../data/derivatives_z_scores/derivatives_stats.yaml
+    derivatives_stats_dir: ../data/derivatives_z_scores
     # allowed: train_only
     scope: train_only
   kinematic_tokenization:
@@ -148,5 +151,5 @@ training:
   focal_gamma: 2.0
   class_weights: [2.0, 10.0, 1.0]
   grad_clip_norm: 1.0
-  best_model_path: ../results/best_lob_transformer.pth
+  model_dir: ../results
   use_amp: false

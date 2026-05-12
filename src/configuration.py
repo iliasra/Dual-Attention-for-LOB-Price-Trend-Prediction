@@ -7,6 +7,9 @@ from typing import Any
 import yaml
 
 
+BEST_MODEL_FILENAME = "best_lob_transformer.pth"
+
+
 REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
     "data": {
         "raw_data_dir": None,
@@ -65,7 +68,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "end_offset_minutes": None,
         },
         "normalization": {
-            "derivatives_stats_path": None,
+            "derivatives_stats_dir": None,
             "scope": None,
         },
         "kinematic_tokenization": {
@@ -143,7 +146,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "focal_gamma": None,
         "class_weights": None,
         "grad_clip_norm": None,
-        "best_model_path": None,
+        "model_dir": None,
         "use_amp": None,
     },
 }
@@ -528,13 +531,13 @@ class TemporalFeaturesConfig:
 
 @dataclass(slots=True)
 class NormalizationConfig:
-    derivatives_stats_path: str
+    derivatives_stats_dir: str
     scope: str
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "NormalizationConfig":
         return cls(
-            derivatives_stats_path=str(payload["derivatives_stats_path"]),
+            derivatives_stats_dir=str(payload["derivatives_stats_dir"]),
             scope=str(payload["scope"]),
         )
 
@@ -739,7 +742,7 @@ class TrainingConfig:
     focal_gamma: float
     class_weights: list[float] | None
     grad_clip_norm: float
-    best_model_path: str
+    model_dir: str
     use_amp: bool
 
     def __post_init__(self) -> None:
@@ -753,6 +756,10 @@ class TrainingConfig:
     @property
     def pin_memory(self) -> bool:
         return self.device.lower() == "cuda"
+
+    @property
+    def best_model_path(self) -> Path:
+        return Path(self.model_dir) / BEST_MODEL_FILENAME
 
     def data_loader_kwargs(self) -> dict[str, bool | int]:
         return {
@@ -776,7 +783,7 @@ class TrainingConfig:
             focal_gamma=float(payload["focal_gamma"]),
             class_weights=None if raw_weights is None else [float(weight) for weight in raw_weights],
             grad_clip_norm=float(payload["grad_clip_norm"]),
-            best_model_path=str(payload["best_model_path"]),
+            model_dir=str(payload["model_dir"]),
             use_amp=bool(payload["use_amp"]),
         )
 

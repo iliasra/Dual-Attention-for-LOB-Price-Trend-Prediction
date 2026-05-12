@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover
 
 
 SPLIT_NAMES = ("train", "validation", "test")
+DERIVATIVES_STATS_FILENAME = "derivatives_stats.yaml"
 
 
 @dataclass(slots=True)
@@ -78,8 +79,8 @@ class LobProcessingPipeline:
         self.data_dir = Path(data_dir) if data_dir is not None else self._resolve_path(configured_data_dir)
         self.processed_dir = self._resolve_path(Path(self.config.data.processed_data_dir))
         self.sequence_dir = self._resolve_path(Path(self.config.data.sequence_data_dir))
-        self.derivatives_stats_path = self._resolve_path(
-            Path(self.config.preprocessing.normalization.derivatives_stats_path)
+        self.derivatives_stats_dir = self._resolve_path(
+            Path(self.config.preprocessing.normalization.derivatives_stats_dir)
         )
 
         self.joiner = MessageOrderbookJoiner(
@@ -385,11 +386,11 @@ class LobProcessingPipeline:
         print("Finished snapshot feature construction for all splits.")
 
     def fold_derivatives_stats_path(self, fold_id: str) -> Path:
-        return self.derivatives_stats_path.parent / fold_id / self.derivatives_stats_path.name
+        return self.derivatives_stats_dir / fold_id / DERIVATIVES_STATS_FILENAME
 
     def fit_train_normalizer(self, train_days: list[ProcessedDay], stats_path: Path | None = None) -> DerivativeNormalizer:
         print(f"Fitting derivative normalizer on {len(train_days)} training day(s).")
-        target_stats_path = stats_path or self.derivatives_stats_path
+        target_stats_path = stats_path or (self.derivatives_stats_dir / DERIVATIVES_STATS_FILENAME)
         if target_stats_path.exists():
             target_stats_path.unlink()
             print(f"Removed previous derivative statistics: {target_stats_path}")

@@ -260,6 +260,7 @@ class LobTrainer:
 
         print(f"Starting training for {self.config.epochs} epoch(s) on {self.device}.")
         for epoch in range(self.config.epochs):
+            print(f"Starting epoch {epoch + 1}/{self.config.epochs}.")
             train_result = self._run_epoch(
                 model=model,
                 data_loader=train_loader,
