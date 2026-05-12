@@ -10,28 +10,42 @@ try:
     from configuration import ExperimentConfig, FoldConfig, load_config
     from datasets import DailySequenceBuilder
     from fast_kinematic_preprocessing import optimize_smoothing_lambda_gcv
-    from horizon import TargetLabelPipeline
+    from horizon import (
+        SmoothingMethodC,
+        TargetLabelPipeline,
+        calculate_adaptive_method_c_threshold_components,
+        calculate_midprice,
+    )
     from kinematic_preprocessing import (
         DerivativeNormalizer,
         MessageFeatureProcessor,
         MessageOrderbookJoiner,
         SnapshotBatchProcessor,
         TradingSessionFilter,
+        fit_plgs_parameters,
         handle_abnormal_prices,
+        price_static_distance_frame,
     )
     from run_logging import save_preprocessing_metadata
 except ImportError:  # pragma: no cover
     from .configuration import ExperimentConfig, FoldConfig, load_config
     from .datasets import DailySequenceBuilder
     from .fast_kinematic_preprocessing import optimize_smoothing_lambda_gcv
-    from .horizon import TargetLabelPipeline
+    from .horizon import (
+        SmoothingMethodC,
+        TargetLabelPipeline,
+        calculate_adaptive_method_c_threshold_components,
+        calculate_midprice,
+    )
     from .kinematic_preprocessing import (
         DerivativeNormalizer,
         MessageFeatureProcessor,
         MessageOrderbookJoiner,
         SnapshotBatchProcessor,
         TradingSessionFilter,
+        fit_plgs_parameters,
         handle_abnormal_prices,
+        price_static_distance_frame,
     )
     from .run_logging import save_preprocessing_metadata
 
@@ -101,6 +115,7 @@ class LobProcessingPipeline:
         self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
         self.sequence_builder = DailySequenceBuilder(self.config.data)
         self.fast_smoothing_lambda_results: dict[str, dict[str, float]] = {}
+        self.price_static_plgs_results: dict[str, float] = {}
 
     def _resolve_path(self, path: Path) -> Path:
         return path if path.is_absolute() else (self.config_dir / path).resolve()
@@ -372,7 +387,58 @@ class LobProcessingPipeline:
         self.config.preprocessing.price_kinematic.fast.selected_smoothing_lambda = None
         self.config.preprocessing.volume_kinematic.fast.selected_smoothing_lambda = None
         self.fast_smoothing_lambda_results = {}
+        self.config.preprocessing.price_static.tau_clip = None
+        self.config.preprocessing.price_static.tau_max = None
+        self.price_static_plgs_results = {}
         self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
+
+    def fit_price_static_plgs_parameters(self, train_days: list[ProcessedDay]) -> dict[str, float] | None:
+        price_static_config = self.config.preprocessing.price_static
+        if not price_static_config.enabled:
+            return None
+
+        window = self.config.preprocessing.snapshot_window
+        train_values: list[pd.Series] = []
+        for day in train_days:
+            df = day.message_features
+            if len(df) < window:
+                continue
+            columns = self.snapshot_processor.window_processor._resolve_stream_columns(
+                df,
+                price_static_config,
+                "price",
+            )
+            if not columns:
+                continue
+            end_positions = np.arange(window - 1, len(df))
+            end_rows = df.iloc[end_positions].reset_index(drop=True)
+            distances = price_static_distance_frame(
+                end_rows,
+                columns,
+                price_static_config.tick_size,
+            )
+            if distances.empty:
+                continue
+            train_values.append(pd.Series(distances.to_numpy(dtype=float).ravel()))
+
+        if not train_values:
+            raise ValueError("Cannot fit price static PLGS parameters: no train price static values found.")
+
+        all_values = pd.concat(train_values, ignore_index=True)
+        result = fit_plgs_parameters(all_values, tau_start=price_static_config.tau_start)
+        price_static_config.tau_clip = float(result["tau_clip"])
+        price_static_config.tau_max = float(result["tau_max"])
+        self.price_static_plgs_results = result
+        self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
+
+        print(
+            "Selected price static PLGS parameters from train: "
+            f"tau_start={result['tau_start']:.6g}, "
+            f"tau_clip(q99)={result['tau_clip']:.6g}, "
+            f"tau_max={result['tau_max']:.6g}, "
+            f"x95={result['x95']:.6g}, n_values={int(result['n_values'])}."
+        )
+        return result
 
     def build_snapshot_features(self, processed_splits: dict[str, list[ProcessedDay]]) -> None:
         print("Starting snapshot feature construction for all splits.")
@@ -423,7 +489,64 @@ class LobProcessingPipeline:
                 "count": count,
                 "percentage": 0.0 if total == 0 else float(100.0 * count / total),
             }
+        floor_comparison = self.adaptive_threshold_floor_comparison(train_days)
+        if floor_comparison is not None:
+            distribution["adaptive_threshold_floor_comparison"] = floor_comparison
         return distribution
+
+    def adaptive_threshold_floor_comparison(self, train_days: list[ProcessedDay]) -> dict[str, object] | None:
+        smoothing_config = self.config.preprocessing.labels.smoothing
+        adaptive_config = smoothing_config.adaptive_threshold
+        if adaptive_config is None or not adaptive_config.enabled:
+            return None
+
+        total_valid = 0
+        cost_greater = 0
+        volatility_greater = 0
+        equal = 0
+        for day in train_days:
+            midprices = calculate_midprice(
+                day.joined,
+                bid_col=smoothing_config.bid_column,
+                ask_col=smoothing_config.ask_column,
+            )
+            pct_changes = SmoothingMethodC(k=smoothing_config.k, h=smoothing_config.h)(midprices)
+            components = calculate_adaptive_method_c_threshold_components(
+                day.joined,
+                midprices,
+                k=smoothing_config.k,
+                h=smoothing_config.h,
+                bid_col=smoothing_config.bid_column,
+                ask_col=smoothing_config.ask_column,
+                config=adaptive_config,
+            )
+            valid_mask = (
+                pct_changes.notna()
+                & np.isfinite(pct_changes)
+                & components["cost_floor"].notna()
+                & np.isfinite(components["cost_floor"])
+                & components["volatility_floor"].notna()
+                & np.isfinite(components["volatility_floor"])
+            )
+            cost_floor = components.loc[valid_mask, "cost_floor"]
+            volatility_floor = components.loc[valid_mask, "volatility_floor"]
+            total_valid += int(valid_mask.sum())
+            cost_greater += int((cost_floor > volatility_floor).sum())
+            volatility_greater += int((volatility_floor > cost_floor).sum())
+            equal += int((cost_floor == volatility_floor).sum())
+
+        def entry(count: int) -> dict[str, float | int]:
+            return {
+                "count": count,
+                "percentage": 0.0 if total_valid == 0 else float(100.0 * count / total_valid),
+            }
+
+        return {
+            "valid_rows": total_valid,
+            "cost_floor_gt_volatility_floor": entry(cost_greater),
+            "volatility_floor_gt_cost_floor": entry(volatility_greater),
+            "equal": entry(equal),
+        }
 
     @staticmethod
     def print_label_distribution(fold_id: str, distribution: dict[str, object] | None) -> None:
@@ -441,6 +564,22 @@ class LobProcessingPipeline:
             count = int(class_distribution.get("count", 0))
             percentage = float(class_distribution.get("percentage", 0.0))
             print(f"- class {int(class_value):>2}: {count} ({percentage:.2f}%)")
+
+        floor_comparison = distribution.get("adaptive_threshold_floor_comparison")
+        if not isinstance(floor_comparison, dict):
+            return
+        valid_rows = int(floor_comparison.get("valid_rows", 0))
+        print(f"{fold_id} adaptive method C threshold floor comparison over {valid_rows} valid row(s):")
+        for key, label in (
+            ("cost_floor_gt_volatility_floor", "cost_floor > volatility_floor"),
+            ("volatility_floor_gt_cost_floor", "volatility_floor > cost_floor"),
+        ):
+            values = floor_comparison.get(key)
+            if not isinstance(values, dict):
+                continue
+            count = int(values.get("count", 0))
+            percentage = float(values.get("percentage", 0.0))
+            print(f"- {label}: {percentage:.2f}% ({count}/{valid_rows})")
 
     def fold_derivatives_stats_path(self, fold_id: str) -> Path:
         return self.derivatives_stats_dir / fold_id / DERIVATIVES_STATS_FILENAME
@@ -512,6 +651,7 @@ class LobProcessingPipeline:
         processed_splits = self.prepared_splits_for_fold(fold, split_pairs, prepared_days)
         label_distribution = self.train_label_distribution(processed_splits["train"])
         self.print_label_distribution(fold.id, label_distribution)
+        plgs_parameters = self.fit_price_static_plgs_parameters(processed_splits["train"])
         self.optimize_fast_smoothing_lambdas(processed_splits["train"])
         self.build_snapshot_features(processed_splits)
         stats_path = self.fold_derivatives_stats_path(fold.id)
@@ -530,6 +670,7 @@ class LobProcessingPipeline:
             fold_sequence_dir,
             lambda_results=self.fast_smoothing_lambda_results,
             label_distribution=label_distribution,
+            price_static_plgs=plgs_parameters,
         )
         print(f"Saved preprocessing metadata for fold {fold.id} to {metadata_path}.")
         print(f"Finished fold {fold.id}.")

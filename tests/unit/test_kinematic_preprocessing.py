@@ -31,8 +31,10 @@ from kinematic_preprocessing import (
     SnapshotBatchProcessor,
     VolumeStaticProcessor,
     _static_centering,
+    fit_plgs_parameters,
     handle_abnormal_prices,
     min_max_norm,
+    plgs_value,
     time_to_sincos,
 )
 
@@ -107,6 +109,21 @@ def test_static_centering_can_encode_directional_message_distance() -> None:
     result = _static_centering(price, opposite_best, tick=1.0, side=direction)
 
     np.testing.assert_allclose(result, [1.0, -1.0, 2.0, -2.0])
+
+
+def test_fit_plgs_parameters_uses_train_quantiles_and_targets_q95() -> None:
+    values = pd.Series(np.arange(1.0, 101.0))
+
+    result = fit_plgs_parameters(values, tau_start=2.0)
+
+    np.testing.assert_allclose(result["tau_clip"], values.quantile(0.99))
+    np.testing.assert_allclose(result["x95"], values.quantile(0.95))
+    np.testing.assert_allclose(
+        plgs_value(result["x95"], tau_start=2.0, tau_max=result["tau_max"]),
+        0.5,
+        atol=1e-8,
+    )
+    assert result["n_values"] == len(values)
 
 
 def test_message_orderbook_joiner_copies_time_and_delta_t() -> None:

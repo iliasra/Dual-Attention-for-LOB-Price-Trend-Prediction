@@ -37,7 +37,8 @@ preprocessing:
     smoothing:
       # allowed: A, B, C
       method: C
-      threshold: 1.0e-5
+      # threshold is ignored if adaptive_threshold.enabled = true
+      threshold: null
       k: 5
       h: 10
       bid_column: bid_price_1
@@ -99,9 +100,7 @@ preprocessing:
   price_static:
     enabled: true
     columns: auto
-    tau_start: 1.0
-    tau_clip: 50.0
-    tau_max: 100.0
+    tau_start: 2.0
   volume_kinematic:
     enabled: true
     columns: auto

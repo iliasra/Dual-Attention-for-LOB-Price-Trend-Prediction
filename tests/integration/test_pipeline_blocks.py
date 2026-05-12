@@ -345,6 +345,9 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
 
     assert "fold_001" in summary
     assert "fold_001 adaptive method C train label distribution:" in output
+    assert "cost_floor > volatility_floor" in output
+    assert "volatility_floor > cost_floor" in output
+    assert "Selected price static PLGS parameters from train:" in output
     assert (artifact_dir / "processed" / "fold_001" / "train" / "TEST_2020-01-01_processed.csv").exists()
     assert (artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-01_features.npy").exists()
     assert (artifact_dir / "sequences" / "fold_001" / "validation" / "TEST_2020-01-02_features.npy").exists()
@@ -357,3 +360,12 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert label_distribution["method"] == "smoothing_C_adaptive"
     assert label_distribution["train"]["total"] > 0
     assert set(label_distribution["train"]) >= {"-1", "0", "1"}
+    floor_comparison = label_distribution["adaptive_threshold_floor_comparison"]
+    assert floor_comparison["valid_rows"] > 0
+    assert floor_comparison["cost_floor_gt_volatility_floor"]["percentage"] > 0.0
+    assert floor_comparison["volatility_floor_gt_cost_floor"]["percentage"] == 0.0
+    plgs_metadata = metadata["price_static_plgs"]
+    assert plgs_metadata["tau_start"] == payload["preprocessing"]["price_static"]["tau_start"]
+    assert plgs_metadata["tau_clip"] == plgs_metadata["x99"]
+    assert plgs_metadata["tau_max"] > plgs_metadata["tau_start"]
+    assert plgs_metadata["n_values"] > 0

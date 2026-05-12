@@ -85,9 +85,34 @@ def calculate_adaptive_method_c_threshold(
     ask_col: str,
     config: AdaptiveThresholdConfig,
 ) -> pd.Series:
+    return calculate_adaptive_method_c_threshold_components(
+        df,
+        midprices,
+        k=k,
+        h=h,
+        bid_col=bid_col,
+        ask_col=ask_col,
+        config=config,
+    )["threshold"]
+
+
+def calculate_adaptive_method_c_threshold_components(
+    df: pd.DataFrame,
+    midprices: pd.Series,
+    *,
+    k: int,
+    h: int,
+    bid_col: str,
+    ask_col: str,
+    config: AdaptiveThresholdConfig,
+) -> pd.DataFrame:
     w_minus = midprices.rolling(window=k + 1).mean()
     spread = calculate_spread(df, bid_col=bid_col, ask_col=ask_col)
-    exit_spread = spread.rolling(window=config.exit_spread_window).median()
+    exit_spread_min_periods = min(config.exit_spread_window, max(10, config.exit_spread_window // 10))
+    exit_spread = spread.rolling(
+        window=config.exit_spread_window,
+        min_periods=exit_spread_min_periods,
+    ).median()
     fee_price = midprices * config.round_trip_fees_bps / 10000.0
     cost_floor = (((spread + exit_spread) / 2.0) + fee_price) / w_minus
 
@@ -95,11 +120,22 @@ def calculate_adaptive_method_c_threshold(
         volatility_floor = pd.Series(0.0, index=midprices.index)
     else:
         realized_c_returns = w_minus.pct_change(periods=h)
-        local_sigma = realized_c_returns.rolling(window=config.volatility_window).std(ddof=0)
+        volatility_min_periods = min(config.volatility_window, max(32, config.volatility_window // 10))
+        local_sigma = realized_c_returns.rolling(
+            window=config.volatility_window,
+            min_periods=volatility_min_periods,
+        ).std(ddof=0)
         volatility_floor = config.volatility_lambda * local_sigma
 
     threshold_values = np.maximum(cost_floor.to_numpy(dtype=float), volatility_floor.to_numpy(dtype=float))
-    return pd.Series(threshold_values, index=midprices.index)
+    return pd.DataFrame(
+        {
+            "cost_floor": cost_floor,
+            "volatility_floor": volatility_floor,
+            "threshold": threshold_values,
+        },
+        index=midprices.index,
+    )
 
 
 @dataclass(slots=True)

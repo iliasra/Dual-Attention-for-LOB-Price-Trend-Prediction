@@ -171,6 +171,89 @@ def PLGS(x: ArrayLike, tau_start: float, tau_clip: float | None, tau_max: float)
 
     return scaled / tau_max
 
+
+def plgs_value(x: float, tau_start: float, tau_max: float) -> float:
+    if tau_max <= tau_start:
+        raise ValueError("tau_max must be > tau_start")
+
+    mu = 1 - (1 / (tau_max - tau_start))
+    if x <= tau_start:
+        scaled = x
+    else:
+        scaled = tau_start + (tau_max - tau_start) * (1 - mu ** (x - tau_start))
+    return float(scaled / tau_max)
+
+
+def choose_plgs_tau_max(x95: float, tau_start: float, target: float = 0.50) -> float:
+    if target <= 0.0 or target >= 1.0:
+        raise ValueError("PLGS target must be in (0, 1).")
+
+    lo = tau_start + 1.0001
+    hi = max(10.0, 100.0 * float(x95))
+    if hi <= lo:
+        hi = lo * 2.0
+
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        y_value = plgs_value(float(x95), tau_start, mid)
+        if y_value > target:
+            lo = mid
+        else:
+            hi = mid
+    return float(hi)
+
+
+def price_static_distance_frame(df: pd.DataFrame, columns: list[str], tick_size: float) -> pd.DataFrame:
+    best_bid, best_ask = _best_prices(df)
+    features: dict[str, np.ndarray] = {}
+
+    for column in columns:
+        if "ask" in column.lower():
+            center = best_bid
+        elif "bid" in column.lower():
+            center = best_ask
+        else:
+            continue
+
+        centered = _static_centering(
+            df[column],
+            center,
+            tick_size,
+            absolute=True,
+            remove_touch_tick=True,
+        )
+        features[column] = centered.to_numpy(dtype=float)
+
+    return pd.DataFrame(features, index=df.index)
+
+
+def fit_plgs_parameters(
+    values: pd.Series | np.ndarray,
+    *,
+    tau_start: float,
+    tau_clip_quantile: float = 0.99,
+    tau_max_quantile: float = 0.95,
+    tau_max_target: float = 0.50,
+) -> dict[str, float]:
+    numeric = pd.to_numeric(pd.Series(values).astype(float), errors="coerce")
+    finite_values = numeric[np.isfinite(numeric)]
+    if finite_values.empty:
+        raise ValueError("Cannot fit PLGS parameters without finite training values.")
+
+    tau_clip = float(finite_values.quantile(tau_clip_quantile))
+    x95 = float(finite_values.quantile(tau_max_quantile))
+    tau_max = choose_plgs_tau_max(x95, tau_start=tau_start, target=tau_max_target)
+    return {
+        "tau_start": float(tau_start),
+        "tau_clip": tau_clip,
+        "tau_max": tau_max,
+        "x95": x95,
+        "x99": tau_clip,
+        "tau_max_target": float(tau_max_target),
+        "n_values": int(len(finite_values)),
+    }
+
+
 def time_to_sincos(timestamp: np.ndarray, freq: int = 86400) -> np.ndarray:
     angle = 2 * np.pi * (timestamp % freq) / freq
     return np.stack((np.sin(angle), np.cos(angle)), axis=-1)
@@ -264,29 +347,18 @@ class PriceStaticProcessor:
     tick_size: float
     tau_start: float
     tau_clip: float | None
-    tau_max: float
+    tau_max: float | None
 
     def transform_rows(self, df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-        best_bid, best_ask = _best_prices(df)
+        if self.tau_max is None:
+            raise ValueError("Price static PLGS tau_max has not been fitted.")
+
+        distances = price_static_distance_frame(df, columns, self.tick_size)
         features: dict[str, np.ndarray] = {}
 
-        for column in columns:
-            if "ask" in column.lower():
-                center = best_bid
-            elif "bid" in column.lower():
-                center = best_ask
-            else:
-                continue
-
-            centered = _static_centering(
-                df[column],
-                center,
-                self.tick_size,
-                absolute=True,
-                remove_touch_tick=True,
-            )
+        for column in distances.columns:
             transformed = PLGS(
-                centered,
+                distances[column],
                 tau_start=self.tau_start,
                 tau_clip=self.tau_clip,
                 tau_max=self.tau_max,

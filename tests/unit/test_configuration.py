@@ -66,16 +66,41 @@ def test_fast_kinematic_config_values_are_loaded() -> None:
     assert config.preprocessing.volume_kinematic.fast.df == 20.0
 
 
+def test_price_static_plgs_train_fitted_config_values_are_loaded() -> None:
+    config = load_config()
+
+    assert config.preprocessing.price_static.tau_start == 2.0
+    assert config.preprocessing.price_static.tau_clip is None
+    assert config.preprocessing.price_static.tau_max is None
+
+
 def test_adaptive_threshold_config_values_are_loaded() -> None:
     config = load_config()
     adaptive = config.preprocessing.labels.smoothing.adaptive_threshold
 
+    assert config.preprocessing.labels.smoothing.threshold is None
     assert adaptive is not None
     assert adaptive.enabled is True
     assert adaptive.exit_spread_window == 100
-    assert adaptive.volatility_window == 100
-    assert adaptive.round_trip_fees_bps == 0.0
+    assert adaptive.volatility_window == 256
+    assert adaptive.round_trip_fees_bps == 0.8
     assert adaptive.volatility_lambda == 1.0
+
+
+def test_smoothing_threshold_string_none_is_loaded_as_none_with_adaptive_threshold_enabled(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["threshold"] = "None"
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = True
+
+    config_path = artifact_dir / "string_none_threshold.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.preprocessing.labels.smoothing.threshold is None
+    assert loaded.preprocessing.labels.smoothing.adaptive_threshold is not None
+    assert loaded.preprocessing.labels.smoothing.adaptive_threshold.enabled is True
 
 
 def test_adaptive_threshold_config_is_optional_for_legacy_configs(artifact_dir: Path) -> None:

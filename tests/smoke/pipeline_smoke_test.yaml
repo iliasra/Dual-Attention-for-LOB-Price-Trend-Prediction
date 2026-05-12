@@ -82,9 +82,7 @@ preprocessing:
   price_static:
     enabled: true
     columns: auto
-    tau_start: 1.0
-    tau_clip: 50.0
-    tau_max: 100.0
+    tau_start: 2.0
   volume_kinematic:
     enabled: true
     columns: auto

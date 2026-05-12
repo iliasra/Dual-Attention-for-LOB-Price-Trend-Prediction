@@ -159,7 +159,11 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
 }
 
 OPTIONAL_TOP_LEVEL_KEYS = {"folds"}
-OPTIONAL_CONFIG_KEYS = {"preprocessing.labels.smoothing.adaptive_threshold"}
+OPTIONAL_CONFIG_KEYS = {
+    "preprocessing.labels.smoothing.adaptive_threshold",
+    "preprocessing.price_static.tau_clip",
+    "preprocessing.price_static.tau_max",
+}
 
 
 ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
@@ -235,6 +239,14 @@ def _require_explicit_value(value: Any, dotted_path: str) -> Any:
     if value is None:
         raise ValueError(f"Invalid experiment config; {dotted_path} must be set explicitly.")
     return value
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
+        return None
+    return float(value)
 
 
 def _validate_allowed_values(payload: dict[str, Any]) -> None:
@@ -382,7 +394,7 @@ class PriceStaticConfig:
     tick_size: float
     tau_start: float
     tau_clip: float | None
-    tau_max: float
+    tau_max: float | None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], tick_size: float) -> "PriceStaticConfig":
@@ -391,8 +403,8 @@ class PriceStaticConfig:
             columns=_ensure_list(payload["columns"]),
             tick_size=float(tick_size),
             tau_start=float(payload["tau_start"]),
-            tau_clip=None if payload["tau_clip"] is None else float(payload["tau_clip"]),
-            tau_max=float(payload["tau_max"]),
+            tau_clip=_optional_float(payload.get("tau_clip")),
+            tau_max=_optional_float(payload.get("tau_max")),
         )
 
 
@@ -479,7 +491,7 @@ class SmoothingLabelConfig:
         adaptive_payload = payload.get("adaptive_threshold")
         return cls(
             method=str(payload["method"]),
-            threshold=None if payload["threshold"] is None else float(payload["threshold"]),
+            threshold=_optional_float(payload["threshold"]),
             k=int(payload["k"]),
             h=int(payload["h"]),
             bid_column=str(payload["bid_column"]),

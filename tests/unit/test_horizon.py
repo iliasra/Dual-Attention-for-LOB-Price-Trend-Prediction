@@ -10,6 +10,7 @@ from horizon import (
     TrendThresholdClassifier,
     TripleBarrierLabeler,
     calculate_adaptive_method_c_threshold,
+    calculate_adaptive_method_c_threshold_components,
     calculate_midprice,
     calculate_spread,
 )
@@ -200,6 +201,42 @@ def test_calculate_adaptive_method_c_threshold_uses_cost_floor() -> None:
     expected_fee = midprices.iloc[expected_index] * 10.0 / 10000.0
     expected = (2.0 + expected_fee) / w_minus
     np.testing.assert_allclose(threshold.iloc[expected_index], expected)
+
+
+def test_calculate_adaptive_method_c_threshold_components_expose_floor_dominance() -> None:
+    midprices = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0])
+    df = pd.DataFrame(
+        {
+            "bid_price_1": midprices - 1.0,
+            "ask_price_1": midprices + 1.0,
+        }
+    )
+    config = AdaptiveThresholdConfig(
+        enabled=True,
+        exit_spread_window=2,
+        volatility_window=2,
+        round_trip_fees_bps=0.0,
+        volatility_lambda=0.0,
+    )
+
+    components = calculate_adaptive_method_c_threshold_components(
+        df,
+        midprices,
+        k=1,
+        h=1,
+        bid_col="bid_price_1",
+        ask_col="ask_price_1",
+        config=config,
+    )
+
+    valid = components.dropna()
+    assert {"cost_floor", "volatility_floor", "threshold"} <= set(components.columns)
+    assert (valid["cost_floor"] > valid["volatility_floor"]).all()
+    pd.testing.assert_series_equal(
+        valid["threshold"],
+        valid["cost_floor"],
+        check_names=False,
+    )
 
 
 def test_adaptive_method_c_threshold_does_not_use_future_values() -> None:
