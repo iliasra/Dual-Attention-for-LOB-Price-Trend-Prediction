@@ -19,6 +19,7 @@ try:
         TradingSessionFilter,
         handle_abnormal_prices,
     )
+    from run_logging import save_preprocessing_metadata
 except ImportError:  # pragma: no cover
     from .configuration import ExperimentConfig, load_config
     from .datasets import DailySequenceBuilder
@@ -32,6 +33,7 @@ except ImportError:  # pragma: no cover
         TradingSessionFilter,
         handle_abnormal_prices,
     )
+    from .run_logging import save_preprocessing_metadata
 
 
 SPLIT_NAMES = ("train", "validation", "test")
@@ -97,6 +99,7 @@ class LobProcessingPipeline:
         )
         self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
         self.sequence_builder = DailySequenceBuilder(self.config.data)
+        self.fast_smoothing_lambda_results: dict[str, dict[str, float]] = {}
 
     def _resolve_path(self, path: Path) -> Path:
         return path if path.is_absolute() else (self.config_dir / path).resolve()
@@ -285,6 +288,11 @@ class LobProcessingPipeline:
             chunk_size=gcv_chunk_size,
         )
         fast_config.selected_smoothing_lambda = result.smoothing_lambda
+        self.fast_smoothing_lambda_results[kind] = {
+            "selected_smoothing_lambda": float(result.smoothing_lambda),
+            "effective_df": float(result.effective_df),
+            "mean_gcv": float(result.gcv_score),
+        }
         print(
             f"Selected fast {kind} smoothing_lambda={result.smoothing_lambda:.8g} "
             f"(effective_df={result.effective_df:.4f}, mean_gcv={result.gcv_score:.8g})."
@@ -366,6 +374,12 @@ class LobProcessingPipeline:
         normalizer = self.fit_train_normalizer(processed_splits["train"])
         self.apply_normalization(processed_splits, normalizer)
         self.save_split_outputs(processed_splits)
+        metadata_path = save_preprocessing_metadata(
+            self.config,
+            self.sequence_dir,
+            lambda_results=self.fast_smoothing_lambda_results,
+        )
+        print(f"Saved preprocessing metadata to {metadata_path}.")
         print("LOB processing pipeline finished.")
 
         return {

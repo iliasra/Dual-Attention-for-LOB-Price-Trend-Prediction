@@ -46,6 +46,7 @@ def test_tick_size_is_inherited_from_data_config() -> None:
     config = load_config()
 
     assert config.data.tick_size == 100.0
+    assert config.data.logs_dir == "../logs"
     assert config.preprocessing.message.tick_size == config.data.tick_size
     assert config.preprocessing.price_kinematic.tick_size == config.data.tick_size
     assert config.preprocessing.price_static.tick_size == config.data.tick_size
@@ -108,6 +109,7 @@ def test_training_data_loader_settings_are_loaded() -> None:
     assert config.training.num_workers == 0
     assert config.training.persistent_workers is False
     assert config.training.pin_memory is False
+    assert config.training.last_model_path == "../results/last_lob_transformer.pth"
     assert config.training.data_loader_kwargs() == {
         "num_workers": 0,
         "persistent_workers": False,

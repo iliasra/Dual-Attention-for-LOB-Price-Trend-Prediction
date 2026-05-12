@@ -39,9 +39,188 @@ class FocalLoss(nn.Module):
 
 
 @dataclass(slots=True)
+class ClassificationMetrics:
+    accuracy: float
+    macro_precision: float
+    macro_recall: float
+    macro_f1: float
+    weighted_f1: float
+    balanced_accuracy: float
+    expected_calibration_error: float
+    per_class_precision: list[float]
+    per_class_recall: list[float]
+    per_class_f1: list[float]
+    confusion_matrix: list[list[int]]
+    normalized_confusion_matrix: list[list[float]]
+
+
+@dataclass(slots=True)
+class EvaluationResult:
+    loss: float
+    metrics: ClassificationMetrics
+
+
+class ClassificationMetricAccumulator:
+    def __init__(self, device: torch.device, num_calibration_bins: int = 15) -> None:
+        self.device = device
+        self.num_calibration_bins = num_calibration_bins
+        self.num_classes: int | None = None
+        self.confusion_matrix: torch.Tensor | None = None
+        self.calibration_bin_counts: torch.Tensor | None = None
+        self.calibration_confidence_sums: torch.Tensor | None = None
+        self.calibration_correct_sums: torch.Tensor | None = None
+
+    @staticmethod
+    def _zero_metrics(num_classes: int = 0) -> ClassificationMetrics:
+        return ClassificationMetrics(
+            accuracy=0.0,
+            macro_precision=0.0,
+            macro_recall=0.0,
+            macro_f1=0.0,
+            weighted_f1=0.0,
+            balanced_accuracy=0.0,
+            expected_calibration_error=0.0,
+            per_class_precision=[0.0] * num_classes,
+            per_class_recall=[0.0] * num_classes,
+            per_class_f1=[0.0] * num_classes,
+            confusion_matrix=[[0] * num_classes for _ in range(num_classes)],
+            normalized_confusion_matrix=[[0.0] * num_classes for _ in range(num_classes)],
+        )
+
+    def update(self, logits: torch.Tensor, targets: torch.Tensor) -> None:
+        if self.num_classes is None:
+            self.num_classes = int(logits.shape[-1])
+            self.confusion_matrix = torch.zeros(
+                (self.num_classes, self.num_classes),
+                dtype=torch.long,
+                device=self.device,
+            )
+            self.calibration_bin_counts = torch.zeros(
+                self.num_calibration_bins,
+                dtype=torch.float64,
+                device=self.device,
+            )
+            self.calibration_confidence_sums = torch.zeros_like(self.calibration_bin_counts)
+            self.calibration_correct_sums = torch.zeros_like(self.calibration_bin_counts)
+        if self.confusion_matrix is None:
+            raise RuntimeError("Classification metric accumulator was not initialized.")
+        if (
+            self.calibration_bin_counts is None
+            or self.calibration_confidence_sums is None
+            or self.calibration_correct_sums is None
+        ):
+            raise RuntimeError("Calibration metric accumulator was not initialized.")
+
+        probabilities = torch.softmax(logits.detach().float(), dim=-1)
+        confidences, predictions = torch.max(probabilities, dim=-1)
+        targets = targets.detach()
+        valid_mask = (
+            (targets >= 0)
+            & (targets < self.num_classes)
+            & (predictions >= 0)
+            & (predictions < self.num_classes)
+        )
+        if not bool(valid_mask.any()):
+            return
+
+        flat_indices = targets[valid_mask] * self.num_classes + predictions[valid_mask]
+        counts = torch.bincount(flat_indices, minlength=self.num_classes * self.num_classes)
+        self.confusion_matrix += counts.reshape(self.num_classes, self.num_classes)
+
+        valid_confidences = confidences[valid_mask].to(torch.float64)
+        correctness = (predictions[valid_mask] == targets[valid_mask]).to(torch.float64)
+        bin_indices = torch.clamp(
+            (valid_confidences * self.num_calibration_bins).long(),
+            max=self.num_calibration_bins - 1,
+        )
+        self.calibration_bin_counts += torch.bincount(
+            bin_indices,
+            minlength=self.num_calibration_bins,
+        ).to(torch.float64)
+        self.calibration_confidence_sums += torch.bincount(
+            bin_indices,
+            weights=valid_confidences,
+            minlength=self.num_calibration_bins,
+        )
+        self.calibration_correct_sums += torch.bincount(
+            bin_indices,
+            weights=correctness,
+            minlength=self.num_calibration_bins,
+        )
+
+    def compute(self) -> ClassificationMetrics:
+        if self.confusion_matrix is None:
+            return self._zero_metrics()
+
+        confusion = self.confusion_matrix.to(torch.float64)
+        total = confusion.sum()
+        if float(total.item()) == 0.0:
+            return self._zero_metrics(int(confusion.shape[0]))
+
+        true_positives = torch.diag(confusion)
+        support = confusion.sum(dim=1)
+        predicted = confusion.sum(dim=0)
+        eps = torch.finfo(confusion.dtype).eps
+
+        precision = true_positives / predicted.clamp_min(1.0)
+        recall = true_positives / support.clamp_min(1.0)
+        f1 = 2.0 * precision * recall / (precision + recall).clamp_min(eps)
+        macro_precision = precision.mean()
+        macro_recall = recall.mean()
+        macro_f1 = f1.mean()
+        weighted_f1 = (f1 * support).sum() / support.sum().clamp_min(1.0)
+        accuracy = true_positives.sum() / total
+        normalized_confusion = confusion / support.clamp_min(1.0).unsqueeze(1)
+        expected_calibration_error = torch.zeros((), dtype=torch.float64, device=self.device)
+        if (
+            self.calibration_bin_counts is not None
+            and self.calibration_confidence_sums is not None
+            and self.calibration_correct_sums is not None
+        ):
+            non_empty_bins = self.calibration_bin_counts > 0
+            bin_accuracy = torch.zeros_like(self.calibration_bin_counts)
+            bin_confidence = torch.zeros_like(self.calibration_bin_counts)
+            bin_accuracy[non_empty_bins] = (
+                self.calibration_correct_sums[non_empty_bins]
+                / self.calibration_bin_counts[non_empty_bins]
+            )
+            bin_confidence[non_empty_bins] = (
+                self.calibration_confidence_sums[non_empty_bins]
+                / self.calibration_bin_counts[non_empty_bins]
+            )
+            bin_weights = self.calibration_bin_counts / self.calibration_bin_counts.sum().clamp_min(1.0)
+            expected_calibration_error = torch.sum(bin_weights * torch.abs(bin_accuracy - bin_confidence))
+
+        return ClassificationMetrics(
+            accuracy=float(accuracy.item()),
+            macro_precision=float(macro_precision.item()),
+            macro_recall=float(macro_recall.item()),
+            macro_f1=float(macro_f1.item()),
+            weighted_f1=float(weighted_f1.item()),
+            balanced_accuracy=float(macro_recall.item()),
+            expected_calibration_error=float(expected_calibration_error.item()),
+            per_class_precision=[float(value) for value in precision.detach().cpu().tolist()],
+            per_class_recall=[float(value) for value in recall.detach().cpu().tolist()],
+            per_class_f1=[float(value) for value in f1.detach().cpu().tolist()],
+            confusion_matrix=[
+                [int(value) for value in row]
+                for row in self.confusion_matrix.detach().cpu().tolist()
+            ],
+            normalized_confusion_matrix=[
+                [float(value) for value in row]
+                for row in normalized_confusion.detach().cpu().tolist()
+            ],
+        )
+
+
+@dataclass(slots=True)
 class EpochResult:
     train_loss: float
     val_loss: float
+    test_loss: float | None = None
+    train_metrics: ClassificationMetrics | None = None
+    val_metrics: ClassificationMetrics | None = None
+    test_metrics: ClassificationMetrics | None = None
 
 
 class LobTrainer:
@@ -65,6 +244,7 @@ class LobTrainer:
         model: nn.Module,
         train_loader: Iterable,
         val_loader: Iterable,
+        test_loader: Iterable | None = None,
     ) -> tuple[nn.Module, list[EpochResult]]:
         model = model.to(self.device)
         criterion = self._criterion()
@@ -79,24 +259,41 @@ class LobTrainer:
 
         print(f"Starting training for {self.config.epochs} epoch(s) on {self.device}.")
         for epoch in range(self.config.epochs):
-            train_loss = self._run_epoch(
+            train_result = self._run_epoch(
                 model=model,
                 data_loader=train_loader,
                 criterion=criterion,
                 optimizer=optimizer,
                 description=f"Epoch {epoch + 1}/{self.config.epochs} [Train]",
             )
-            val_loss = self.evaluate(
+            val_result = self.evaluate(
                 model=model,
                 data_loader=val_loader,
                 criterion=criterion,
                 description=f"Epoch {epoch + 1}/{self.config.epochs} [Val]",
             )
+            test_result = None
+            if test_loader is not None:
+                test_result = self.evaluate(
+                    model=model,
+                    data_loader=test_loader,
+                    criterion=criterion,
+                    description=f"Epoch {epoch + 1}/{self.config.epochs} [Test]",
+                )
             scheduler.step()
-            history.append(EpochResult(train_loss=train_loss, val_loss=val_loss))
+            history.append(
+                EpochResult(
+                    train_loss=train_result.loss,
+                    val_loss=val_result.loss,
+                    test_loss=None if test_result is None else test_result.loss,
+                    train_metrics=train_result.metrics,
+                    val_metrics=val_result.metrics,
+                    test_metrics=None if test_result is None else test_result.metrics,
+                )
+            )
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if val_result.loss < best_val_loss:
+                best_val_loss = val_result.loss
                 best_path = Path(self.config.best_model_path)
                 best_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(model.state_dict(), best_path)
@@ -104,9 +301,25 @@ class LobTrainer:
 
             print(
                 f"Epoch {epoch + 1}/{self.config.epochs} completed: "
-                f"train_loss={train_loss:.6f}, val_loss={val_loss:.6f}."
+                f"train_loss={train_result.loss:.6f}, val_loss={val_result.loss:.6f}, "
+                f"train_acc={train_result.metrics.accuracy:.4f}, "
+                f"val_acc={val_result.metrics.accuracy:.4f}, "
+                f"val_macro_f1={val_result.metrics.macro_f1:.4f}, "
+                f"val_ece={val_result.metrics.expected_calibration_error:.4f}"
+                + (
+                    f", test_loss={test_result.loss:.6f}, "
+                    f"test_acc={test_result.metrics.accuracy:.4f}, "
+                    f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
+                    f"test_ece={test_result.metrics.expected_calibration_error:.4f}."
+                    if test_result is not None
+                    else "."
+                )
             )
 
+        last_path = Path(self.config.last_model_path)
+        last_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), last_path)
+        print(f"Saved last epoch model to {last_path}.")
         print("Training finished.")
         return model, history
 
@@ -117,10 +330,11 @@ class LobTrainer:
         criterion: nn.Module,
         optimizer: torch.optim.Optimizer,
         description: str,
-    ) -> float:
+    ) -> EvaluationResult:
         model.train()
         total_loss = 0.0
         batch_count = 0
+        metrics = ClassificationMetricAccumulator(device=self.device)
 
         for x_batch, t_batch, y_batch in tqdm(data_loader, desc=description):
             x_batch = x_batch.to(self.device, non_blocking=True)
@@ -141,10 +355,11 @@ class LobTrainer:
             self.scaler.step(optimizer)
             self.scaler.update()
 
+            metrics.update(logits, y_batch)
             total_loss += float(loss.item())
             batch_count += 1
 
-        return total_loss / max(batch_count, 1)
+        return EvaluationResult(loss=total_loss / max(batch_count, 1), metrics=metrics.compute())
 
     def evaluate(
         self,
@@ -152,11 +367,12 @@ class LobTrainer:
         data_loader: Iterable,
         criterion: nn.Module | None = None,
         description: str = "Validation",
-    ) -> float:
+    ) -> EvaluationResult:
         model.eval()
         criterion = criterion or self._criterion()
         total_loss = 0.0
         batch_count = 0
+        metrics = ClassificationMetricAccumulator(device=self.device)
 
         with torch.no_grad():
             for x_batch, t_batch, y_batch in tqdm(data_loader, desc=description):
@@ -166,9 +382,10 @@ class LobTrainer:
 
                 logits = model(x_batch, t_batch)
                 total_loss += float(criterion(logits, y_batch).item())
+                metrics.update(logits, y_batch)
                 batch_count += 1
 
-        return total_loss / max(batch_count, 1)
+        return EvaluationResult(loss=total_loss / max(batch_count, 1), metrics=metrics.compute())
 
 
 def train_lob_transformer(

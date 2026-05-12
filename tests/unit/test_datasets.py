@@ -19,6 +19,7 @@ def make_data_config(
         raw_data_dir="",
         processed_data_dir="",
         sequence_data_dir="",
+        logs_dir="",
         tick_size=1.0,
         time_column="time",
         label_column="trend_label",

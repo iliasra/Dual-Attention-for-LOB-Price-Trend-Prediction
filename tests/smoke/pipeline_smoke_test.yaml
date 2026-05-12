@@ -2,6 +2,7 @@ data:
   raw_data_dir: ../data/LOBSTER
   processed_data_dir: ../data/processed_dataframes
   sequence_data_dir: ../data/sequences
+  logs_dir: ../logs
   tick_size: 100.0
   time_column: time
   label_column: trend_label
@@ -119,4 +120,5 @@ training:
   class_weights: [2.0, 10.0, 1.0]
   grad_clip_norm: 1.0
   best_model_path: .smoke/best_lob_transformer.pth
+  last_model_path: .smoke/last_lob_transformer.pth
   use_amp: false

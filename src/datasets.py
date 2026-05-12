@@ -65,6 +65,7 @@ def process_daily_dataframe(
         raw_data_dir="",
         processed_data_dir="",
         sequence_data_dir="",
+        logs_dir="",
         tick_size=0.0,
         time_column=time_col,
         label_column=label_col,

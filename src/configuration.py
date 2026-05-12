@@ -12,6 +12,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "raw_data_dir": None,
         "processed_data_dir": None,
         "sequence_data_dir": None,
+        "logs_dir": None,
         "tick_size": None,
         "time_column": None,
         "label_column": None,
@@ -142,6 +143,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "class_weights": None,
         "grad_clip_norm": None,
         "best_model_path": None,
+        "last_model_path": None,
         "use_amp": None,
     },
 }
@@ -242,6 +244,7 @@ class DataConfig:
     raw_data_dir: str
     processed_data_dir: str
     sequence_data_dir: str
+    logs_dir: str
     tick_size: float
     time_column: str
     label_column: str
@@ -257,6 +260,7 @@ class DataConfig:
             raw_data_dir=str(payload["raw_data_dir"]),
             processed_data_dir=str(payload["processed_data_dir"]),
             sequence_data_dir=str(payload["sequence_data_dir"]),
+            logs_dir=str(payload["logs_dir"]),
             tick_size=float(payload["tick_size"]),
             time_column=str(payload["time_column"]),
             label_column=str(payload["label_column"]),
@@ -656,6 +660,7 @@ class TrainingConfig:
     class_weights: list[float] | None
     grad_clip_norm: float
     best_model_path: str
+    last_model_path: str
     use_amp: bool
 
     def __post_init__(self) -> None:
@@ -690,6 +695,7 @@ class TrainingConfig:
             class_weights=None if raw_weights is None else [float(weight) for weight in raw_weights],
             grad_clip_norm=float(payload["grad_clip_norm"]),
             best_model_path=str(payload["best_model_path"]),
+            last_model_path=str(payload["last_model_path"]),
             use_amp=bool(payload["use_amp"]),
         )
 
