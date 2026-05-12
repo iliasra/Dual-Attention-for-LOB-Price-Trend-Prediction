@@ -17,6 +17,12 @@ dataset_splits:
   validation_dates: []
   test_dates: []
 
+folds:
+  - id: fold_001
+    train_dates: ["2012-06-21"]
+    validation_dates: []
+    test_dates: []
+
 preprocessing:
   snapshot_window: 4
   labels:
@@ -113,6 +119,7 @@ training:
   epochs: 1
   batch_size: 4
   num_workers: 0
+  early_stopping_patience: 8
   persistent_workers: false
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
@@ -120,5 +127,4 @@ training:
   class_weights: [2.0, 10.0, 1.0]
   grad_clip_norm: 1.0
   best_model_path: .smoke/best_lob_transformer.pth
-  last_model_path: .smoke/last_lob_transformer.pth
   use_amp: false

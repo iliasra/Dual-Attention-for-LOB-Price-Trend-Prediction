@@ -255,6 +255,7 @@ class LobTrainer:
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config.epochs)
         best_val_loss = float("inf")
+        epochs_without_improvement = 0
         history: list[EpochResult] = []
 
         print(f"Starting training for {self.config.epochs} epoch(s) on {self.device}.")
@@ -294,10 +295,13 @@ class LobTrainer:
 
             if val_result.loss < best_val_loss:
                 best_val_loss = val_result.loss
+                epochs_without_improvement = 0
                 best_path = Path(self.config.best_model_path)
                 best_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(model.state_dict(), best_path)
                 print(f"Saved new best model to {best_path} with val_loss={best_val_loss:.6f}.")
+            else:
+                epochs_without_improvement += 1
 
             print(
                 f"Epoch {epoch + 1}/{self.config.epochs} completed: "
@@ -315,11 +319,17 @@ class LobTrainer:
                     else "."
                 )
             )
+            if (
+                self.config.early_stopping_patience > 0
+                and epochs_without_improvement >= self.config.early_stopping_patience
+            ):
+                print(
+                    "Early stopping triggered after "
+                    f"{epochs_without_improvement} epoch(s) without validation loss improvement. "
+                    f"Best val_loss={best_val_loss:.6f}."
+                )
+                break
 
-        last_path = Path(self.config.last_model_path)
-        last_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(model.state_dict(), last_path)
-        print(f"Saved last epoch model to {last_path}.")
         print("Training finished.")
         return model, history
 

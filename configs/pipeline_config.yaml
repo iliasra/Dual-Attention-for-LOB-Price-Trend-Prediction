@@ -9,13 +9,25 @@ data:
   label_mapping: {-1: 0, 0: 1, 1: 2}
   price_columns: auto
   volume_columns: auto
+  # used to exclude specific columns when features.npy is created
+  # to be used to exclude columns to be passed to the model
+  # NB: time/label col are automatically excluded as they are used
+  # to generate specific .npy files for the model to use. 
   feature_exclude_columns: []
   sequence_window: 16
 
+# fallback only used when folds is empty
 dataset_splits:
   train_dates: ["2012-06-21"]
   validation_dates: []
   test_dates: []
+
+# default behavior: uses folds
+folds:
+  - id: fold_001
+    train_dates: ["2012-06-21"]
+    validation_dates: []
+    test_dates: []
 
 preprocessing:
   snapshot_window: 100
@@ -129,6 +141,7 @@ training:
   epochs: 2
   batch_size: 8
   num_workers: 0
+  early_stopping_patience: 8
   persistent_workers: false
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
@@ -136,5 +149,4 @@ training:
   class_weights: [2.0, 10.0, 1.0]
   grad_clip_norm: 1.0
   best_model_path: ../results/best_lob_transformer.pth
-  last_model_path: ../results/last_lob_transformer.pth
   use_amp: false

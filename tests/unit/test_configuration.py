@@ -66,6 +66,66 @@ def test_fast_kinematic_config_values_are_loaded() -> None:
     assert config.preprocessing.volume_kinematic.fast.df == 20.0
 
 
+def test_explicit_folds_are_loaded() -> None:
+    config = load_config()
+
+    assert [fold.id for fold in config.folds] == ["fold_001"]
+    assert config.folds[0].train_dates == ["2012-06-21"]
+
+
+def test_folds_fallback_to_dataset_splits_when_missing(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload.pop("folds", None)
+
+    config_path = artifact_dir / "single_fold_fallback.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert len(loaded.folds) == 1
+    assert loaded.folds[0].id == "single"
+    assert loaded.folds[0].train_dates == loaded.dataset_splits.train_dates
+
+
+def test_fold_config_rejects_overlapping_split_dates(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["folds"] = [
+        {
+            "id": "bad_fold",
+            "train_dates": ["2012-06-21"],
+            "validation_dates": ["2012-06-21"],
+            "test_dates": [],
+        }
+    ]
+
+    config_path = artifact_dir / "overlapping_fold.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="multiple splits"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_fold_config_requires_chronological_order(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["folds"] = [
+        {
+            "id": "bad_fold",
+            "train_dates": ["2012-06-22"],
+            "validation_dates": ["2012-06-21"],
+            "test_dates": [],
+        }
+    ]
+
+    config_path = artifact_dir / "bad_fold_order.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="strictly before validation"):
+        ExperimentConfig.from_yaml(config_path)
+
+
 def test_basis_kinematic_config_requires_explicit_values(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
@@ -107,9 +167,9 @@ def test_training_data_loader_settings_are_loaded() -> None:
     config = load_config()
 
     assert config.training.num_workers == 0
+    assert config.training.early_stopping_patience == 8
     assert config.training.persistent_workers is False
     assert config.training.pin_memory is False
-    assert config.training.last_model_path == "../results/last_lob_transformer.pth"
     assert config.training.data_loader_kwargs() == {
         "num_workers": 0,
         "persistent_workers": False,

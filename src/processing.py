@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 try:
-    from configuration import ExperimentConfig, load_config
+    from configuration import ExperimentConfig, FoldConfig, load_config
     from datasets import DailySequenceBuilder
     from fast_kinematic_preprocessing import optimize_smoothing_lambda_gcv
     from horizon import TargetLabelPipeline
@@ -21,7 +21,7 @@ try:
     )
     from run_logging import save_preprocessing_metadata
 except ImportError:  # pragma: no cover
-    from .configuration import ExperimentConfig, load_config
+    from .configuration import ExperimentConfig, FoldConfig, load_config
     from .datasets import DailySequenceBuilder
     from .fast_kinematic_preprocessing import optimize_smoothing_lambda_gcv
     from .horizon import TargetLabelPipeline
@@ -173,8 +173,70 @@ class LobProcessingPipeline:
 
         return split_pairs
 
+    def split_pairs_for_fold(self, pairs: list[LobFilePair], fold: FoldConfig) -> dict[str, list[LobFilePair]]:
+        split_dates = {
+            "train": set(fold.train_dates),
+            "validation": set(fold.validation_dates),
+            "test": set(fold.test_dates),
+        }
+        available_dates = {pair.date for pair in pairs}
+        requested_dates = set().union(*split_dates.values())
+        missing_dates = sorted(requested_dates - available_dates)
+        if missing_dates:
+            raise ValueError(f"Fold {fold.id} references dates with no discovered LOBSTER pair: {missing_dates}")
+
+        split_pairs = {name: [] for name in SPLIT_NAMES}
+        for pair in pairs:
+            for split, dates in split_dates.items():
+                if pair.date in dates:
+                    split_pairs[split].append(pair)
+
+        if not split_pairs["train"]:
+            raise ValueError(f"Fold {fold.id} has no training file pairs.")
+        return split_pairs
+
+    def _required_fold_dates(self) -> set[str]:
+        requested_dates: set[str] = set()
+        for fold in self.config.folds:
+            requested_dates.update(fold.train_dates)
+            requested_dates.update(fold.validation_dates)
+            requested_dates.update(fold.test_dates)
+        return requested_dates
+
+    def prepare_required_days(self, pairs: list[LobFilePair]) -> dict[str, ProcessedDay]:
+        required_dates = self._required_fold_dates()
+        prepared: dict[str, ProcessedDay] = {}
+        for pair in pairs:
+            if pair.date not in required_dates:
+                continue
+            prepared[pair.output_stem] = self.prepare_pair(pair, split="prepared")
+        return prepared
+
+    @staticmethod
+    def _clone_prepared_day(prepared_day: ProcessedDay, split: str) -> ProcessedDay:
+        return ProcessedDay(
+            split=split,
+            pair=prepared_day.pair,
+            raw=prepared_day.raw,
+            joined=prepared_day.joined,
+            labeled=prepared_day.labeled,
+            message_features=prepared_day.message_features,
+        )
+
+    def prepared_splits_for_fold(
+        self,
+        fold: FoldConfig,
+        split_pairs: dict[str, list[LobFilePair]],
+        prepared_days: dict[str, ProcessedDay],
+    ) -> dict[str, list[ProcessedDay]]:
+        processed = {name: [] for name in SPLIT_NAMES}
+        for split, pairs in split_pairs.items():
+            for pair in pairs:
+                processed[split].append(self._clone_prepared_day(prepared_days[pair.output_stem], split))
+        return processed
+
     def load_and_trim_pair(self, pair: LobFilePair) -> pd.DataFrame:
-        """this function: delete 'ghost' level if placeholder values are recognized;
+        """this function: delete 'ghost' levels if placeholder values are recognized;
         joins orderbook/message data for a particular day;
         filters out the first/last 15 minutes."""
         print(f"Loading raw data for {pair.label}.")
@@ -305,6 +367,12 @@ class LobProcessingPipeline:
         self._optimize_fast_stream_lambda(train_days, kind="volume")
         self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
 
+    def reset_fold_state(self) -> None:
+        self.config.preprocessing.price_kinematic.fast.selected_smoothing_lambda = None
+        self.config.preprocessing.volume_kinematic.fast.selected_smoothing_lambda = None
+        self.fast_smoothing_lambda_results = {}
+        self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
+
     def build_snapshot_features(self, processed_splits: dict[str, list[ProcessedDay]]) -> None:
         print("Starting snapshot feature construction for all splits.")
         for split_days in processed_splits.values():
@@ -316,17 +384,21 @@ class LobProcessingPipeline:
                 )
         print("Finished snapshot feature construction for all splits.")
 
-    def fit_train_normalizer(self, train_days: list[ProcessedDay]) -> DerivativeNormalizer:
+    def fold_derivatives_stats_path(self, fold_id: str) -> Path:
+        return self.derivatives_stats_path.parent / fold_id / self.derivatives_stats_path.name
+
+    def fit_train_normalizer(self, train_days: list[ProcessedDay], stats_path: Path | None = None) -> DerivativeNormalizer:
         print(f"Fitting derivative normalizer on {len(train_days)} training day(s).")
-        if self.derivatives_stats_path.exists():
-            self.derivatives_stats_path.unlink()
-            print(f"Removed previous derivative statistics: {self.derivatives_stats_path}")
+        target_stats_path = stats_path or self.derivatives_stats_path
+        if target_stats_path.exists():
+            target_stats_path.unlink()
+            print(f"Removed previous derivative statistics: {target_stats_path}")
         processed_train_days = []
         for day in train_days:
             if day.processed is None:
                 raise ValueError(f"{day.pair.label} has not been snapshot-processed yet.")
             processed_train_days.append(day.processed)
-        normalizer = DerivativeNormalizer(self.derivatives_stats_path)
+        normalizer = DerivativeNormalizer(target_stats_path)
         normalizer.fit(processed_train_days)
         print("Derivative normalizer fitted.")
         return normalizer
@@ -340,14 +412,22 @@ class LobProcessingPipeline:
                 day.normalized = normalizer.transform(day.processed)
         print("Finished normalization for all splits.")
 
-    def save_split_outputs(self, processed_splits: dict[str, list[ProcessedDay]]) -> None:
+    def save_split_outputs(
+        self,
+        processed_splits: dict[str, list[ProcessedDay]],
+        *,
+        processed_dir: Path | None = None,
+        sequence_dir: Path | None = None,
+    ) -> None:
         print("Saving processed CSV and sequence outputs.")
-        self.processed_dir.mkdir(parents=True, exist_ok=True)
-        self.sequence_dir.mkdir(parents=True, exist_ok=True)
+        target_processed_dir = processed_dir or self.processed_dir
+        target_sequence_dir = sequence_dir or self.sequence_dir
+        target_processed_dir.mkdir(parents=True, exist_ok=True)
+        target_sequence_dir.mkdir(parents=True, exist_ok=True)
 
         for split, days in processed_splits.items():
-            processed_split_dir = self.processed_dir / split
-            sequence_split_dir = self.sequence_dir / split
+            processed_split_dir = target_processed_dir / split
+            sequence_split_dir = target_sequence_dir / split
             processed_split_dir.mkdir(parents=True, exist_ok=True)
             sequence_split_dir.mkdir(parents=True, exist_ok=True)
 
@@ -363,25 +443,35 @@ class LobProcessingPipeline:
                 day.sequence_paths = self.sequence_builder.save(day.normalized, prefix)
                 print(f"Saved outputs for {day.pair.label} ({split}).")
 
-    def run(self) -> dict[str, dict[str, tuple[int, int]]]:
-        print("Starting LOB processing pipeline.")
-        pairs = self.discover_pairs()
-        print(f"Discovered {len(pairs)} message/orderbook file pair(s).")
-        split_pairs = self.split_pairs(pairs)
-        processed_splits = self.preprocess_splits(split_pairs)
+    def run_fold(
+        self,
+        fold: FoldConfig,
+        split_pairs: dict[str, list[LobFilePair]],
+        prepared_days: dict[str, ProcessedDay],
+    ) -> dict[str, dict[str, tuple[int, int]]]:
+        print(f"Starting fold {fold.id}.")
+        self.reset_fold_state()
+        processed_splits = self.prepared_splits_for_fold(fold, split_pairs, prepared_days)
         self.optimize_fast_smoothing_lambdas(processed_splits["train"])
         self.build_snapshot_features(processed_splits)
-        normalizer = self.fit_train_normalizer(processed_splits["train"])
+        stats_path = self.fold_derivatives_stats_path(fold.id)
+        normalizer = self.fit_train_normalizer(processed_splits["train"], stats_path=stats_path)
         self.apply_normalization(processed_splits, normalizer)
-        self.save_split_outputs(processed_splits)
+
+        fold_processed_dir = self.processed_dir / fold.id
+        fold_sequence_dir = self.sequence_dir / fold.id
+        self.save_split_outputs(
+            processed_splits,
+            processed_dir=fold_processed_dir,
+            sequence_dir=fold_sequence_dir,
+        )
         metadata_path = save_preprocessing_metadata(
             self.config,
-            self.sequence_dir,
+            fold_sequence_dir,
             lambda_results=self.fast_smoothing_lambda_results,
         )
-        print(f"Saved preprocessing metadata to {metadata_path}.")
-        print("LOB processing pipeline finished.")
-
+        print(f"Saved preprocessing metadata for fold {fold.id} to {metadata_path}.")
+        print(f"Finished fold {fold.id}.")
         return {
             split: {
                 day.pair.output_stem: day.normalized.shape if day.normalized is not None else day.processed.shape
@@ -389,3 +479,15 @@ class LobProcessingPipeline:
             }
             for split, days in processed_splits.items()
         }
+
+    def run(self) -> dict[str, dict[str, dict[str, tuple[int, int]]]]:
+        print("Starting LOB processing pipeline.")
+        pairs = self.discover_pairs()
+        print(f"Discovered {len(pairs)} message/orderbook file pair(s).")
+        prepared_days = self.prepare_required_days(pairs)
+        summary: dict[str, dict[str, dict[str, tuple[int, int]]]] = {}
+        for fold in self.config.folds:
+            split_pairs = self.split_pairs_for_fold(pairs, fold)
+            summary[fold.id] = self.run_fold(fold, split_pairs, prepared_days)
+        print("LOB processing pipeline finished.")
+        return summary

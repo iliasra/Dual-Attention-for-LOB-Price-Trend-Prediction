@@ -136,6 +136,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "epochs": None,
         "batch_size": None,
         "num_workers": None,
+        "early_stopping_patience": None,
         "persistent_workers": None,
         "learning_rate": None,
         "weight_decay": None,
@@ -143,10 +144,11 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "class_weights": None,
         "grad_clip_norm": None,
         "best_model_path": None,
-        "last_model_path": None,
         "use_amp": None,
     },
 }
+
+OPTIONAL_TOP_LEVEL_KEYS = {"folds"}
 
 
 ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
@@ -191,6 +193,8 @@ def _validate_required_config(payload: Any, schema: dict[str, Any]) -> None:
                 walk(node[key], child_schema, key_path)
 
         allowed_keys = set(subtree)
+        if prefix == "":
+            allowed_keys |= OPTIONAL_TOP_LEVEL_KEYS
         for key in node:
             if key not in allowed_keys:
                 unexpected.append(f"{prefix}.{key}" if prefix else str(key))
@@ -551,6 +555,81 @@ class DatasetSplitConfig:
 
 
 @dataclass(slots=True)
+class FoldConfig:
+    id: str
+    train_dates: list[str]
+    validation_dates: list[str]
+    test_dates: list[str]
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise ValueError("folds[].id must be a non-empty string.")
+        if not self.train_dates:
+            raise ValueError(f"Fold {self.id} must provide at least one train date.")
+
+        split_dates = {
+            "train": set(self.train_dates),
+            "validation": set(self.validation_dates),
+            "test": set(self.test_dates),
+        }
+        overlap_messages: list[str] = []
+        for left, right in (
+            ("train", "validation"),
+            ("train", "test"),
+            ("validation", "test"),
+        ):
+            overlap = split_dates[left] & split_dates[right]
+            if overlap:
+                overlap_messages.append(f"{left}/{right}: {sorted(overlap)}")
+        if overlap_messages:
+            raise ValueError(f"Fold {self.id} assigns dates to multiple splits: " + "; ".join(overlap_messages))
+
+        if self.validation_dates and max(self.train_dates) >= min(self.validation_dates):
+            raise ValueError(f"Fold {self.id} must have train dates strictly before validation dates.")
+        if self.test_dates:
+            preceding_dates = self.validation_dates or self.train_dates
+            if max(preceding_dates) >= min(self.test_dates):
+                raise ValueError(f"Fold {self.id} must have validation/train dates strictly before test dates.")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "FoldConfig":
+        return cls(
+            id=str(_require_explicit_value(payload.get("id"), "folds[].id")),
+            train_dates=[str(value) for value in payload.get("train_dates", [])],
+            validation_dates=[str(value) for value in payload.get("validation_dates", [])],
+            test_dates=[str(value) for value in payload.get("test_dates", [])],
+        )
+
+    @classmethod
+    def from_dataset_splits(cls, payload: DatasetSplitConfig) -> "FoldConfig":
+        return cls(
+            id="single",
+            train_dates=payload.train_dates,
+            validation_dates=payload.validation_dates,
+            test_dates=payload.test_dates,
+        )
+
+
+def _folds_from_payload(payload: dict[str, Any], dataset_splits: DatasetSplitConfig) -> list[FoldConfig]:
+    raw_folds = payload.get("folds")
+    if raw_folds in (None, []):
+        return [FoldConfig.from_dataset_splits(dataset_splits)]
+    if not isinstance(raw_folds, list):
+        raise ValueError("Invalid experiment config; folds must be a list when provided.")
+
+    folds = [FoldConfig.from_dict(raw_fold) for raw_fold in raw_folds]
+    seen_ids: set[str] = set()
+    duplicates: list[str] = []
+    for fold in folds:
+        if fold.id in seen_ids:
+            duplicates.append(fold.id)
+        seen_ids.add(fold.id)
+    if duplicates:
+        raise ValueError(f"Invalid experiment config; duplicate fold ids: {sorted(set(duplicates))}")
+    return folds
+
+
+@dataclass(slots=True)
 class PreprocessingConfig:
     snapshot_window: int
     labels: LabelConfig
@@ -653,6 +732,7 @@ class TrainingConfig:
     epochs: int
     batch_size: int
     num_workers: int
+    early_stopping_patience: int
     persistent_workers: bool
     learning_rate: float
     weight_decay: float
@@ -660,12 +740,13 @@ class TrainingConfig:
     class_weights: list[float] | None
     grad_clip_norm: float
     best_model_path: str
-    last_model_path: str
     use_amp: bool
 
     def __post_init__(self) -> None:
         if self.num_workers < 0:
             raise ValueError("training.num_workers must be >= 0.")
+        if self.early_stopping_patience < 0:
+            raise ValueError("training.early_stopping_patience must be >= 0.")
         if self.persistent_workers and self.num_workers == 0:
             raise ValueError("training.persistent_workers requires training.num_workers > 0.")
 
@@ -688,6 +769,7 @@ class TrainingConfig:
             epochs=int(payload["epochs"]),
             batch_size=int(payload["batch_size"]),
             num_workers=int(payload["num_workers"]),
+            early_stopping_patience=int(payload["early_stopping_patience"]),
             persistent_workers=bool(payload["persistent_workers"]),
             learning_rate=float(payload["learning_rate"]),
             weight_decay=float(payload["weight_decay"]),
@@ -695,7 +777,6 @@ class TrainingConfig:
             class_weights=None if raw_weights is None else [float(weight) for weight in raw_weights],
             grad_clip_norm=float(payload["grad_clip_norm"]),
             best_model_path=str(payload["best_model_path"]),
-            last_model_path=str(payload["last_model_path"]),
             use_amp=bool(payload["use_amp"]),
         )
 
@@ -705,6 +786,7 @@ class ExperimentConfig:
     path: Path
     data: DataConfig
     dataset_splits: DatasetSplitConfig
+    folds: list[FoldConfig]
     preprocessing: PreprocessingConfig
     model: ModelConfig
     training: TrainingConfig
@@ -719,11 +801,13 @@ class ExperimentConfig:
         _validate_allowed_values(payload)
 
         data_config = DataConfig.from_dict(payload["data"])
+        dataset_splits = DatasetSplitConfig.from_dict(payload["dataset_splits"])
 
         return cls(
             path=config_path.resolve(),
             data=data_config,
-            dataset_splits=DatasetSplitConfig.from_dict(payload["dataset_splits"]),
+            dataset_splits=dataset_splits,
+            folds=_folds_from_payload(payload, dataset_splits),
             preprocessing=PreprocessingConfig.from_dict(payload["preprocessing"], tick_size=data_config.tick_size),
             model=ModelConfig.from_dict(payload["model"]),
             training=TrainingConfig.from_dict(payload["training"]),

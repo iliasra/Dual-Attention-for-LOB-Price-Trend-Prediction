@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+import yaml
 from torch.utils.data import DataLoader
 
 from configuration import (
@@ -26,6 +27,8 @@ from configuration import (
     TripleBarrierLabelConfig,
     VolumeKinematicConfig,
     VolumeStaticConfig,
+    ExperimentConfig,
+    load_config,
 )
 from datasets import DailySequenceBuilder, LOBDataset
 from horizon import TargetLabelPipeline
@@ -36,6 +39,7 @@ from kinematic_preprocessing import (
     SnapshotBatchProcessor,
 )
 from model import build_model
+from processing import LobProcessingPipeline
 
 
 @pytest.fixture()
@@ -76,6 +80,14 @@ def make_synthetic_lob_frames(rows: int = 14) -> tuple[pd.DataFrame, pd.DataFram
         }
     )
     return message_df, orderbook_df
+
+
+def write_lobster_day(raw_dir: Path, symbol: str, date: str, rows: int = 14) -> None:
+    message_df, orderbook_df = make_synthetic_lob_frames(rows=rows)
+    message_df["time"] = 34200.0 + message_df["time"]
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    message_df.to_csv(raw_dir / f"{symbol}_{date}_message.csv", index=False)
+    orderbook_df.to_csv(raw_dir / f"{symbol}_{date}_orderbook.csv", index=False)
 
 
 def make_test_configs(tokenization_method: str = "basis") -> tuple[DataConfig, PreprocessingConfig]:
@@ -280,3 +292,52 @@ def test_sequence_dataset_and_model_forward_use_matching_tensor_shapes(artifact_
 
     assert logits.shape == (x_batch.shape[0], model_config.num_classes)
     assert torch.isfinite(logits).all()
+
+
+def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path) -> None:
+    raw_dir = artifact_dir / "raw"
+    write_lobster_day(raw_dir, "TEST", "2020-01-01")
+    write_lobster_day(raw_dir, "TEST", "2020-01-02")
+
+    base_config = load_config()
+    payload = yaml.safe_load(base_config.path.read_text(encoding="utf-8"))
+    payload["data"]["raw_data_dir"] = "raw"
+    payload["data"]["processed_data_dir"] = "processed"
+    payload["data"]["sequence_data_dir"] = "sequences"
+    payload["data"]["logs_dir"] = "logs"
+    payload["data"]["tick_size"] = 1.0
+    payload["data"]["sequence_window"] = 3
+    payload["dataset_splits"] = {
+        "train_dates": ["2020-01-01"],
+        "validation_dates": ["2020-01-02"],
+        "test_dates": [],
+    }
+    payload["folds"] = [
+        {
+            "id": "fold_001",
+            "train_dates": ["2020-01-01"],
+            "validation_dates": ["2020-01-02"],
+            "test_dates": [],
+        }
+    ]
+    payload["preprocessing"]["snapshot_window"] = 4
+    payload["preprocessing"]["labels"]["smoothing"]["k"] = 1
+    payload["preprocessing"]["labels"]["smoothing"]["h"] = 1
+    payload["preprocessing"]["temporal_features"]["market_open_seconds"] = 0
+    payload["preprocessing"]["temporal_features"]["market_close_seconds"] = 100000
+    payload["preprocessing"]["temporal_features"]["start_offset_minutes"] = 0
+    payload["preprocessing"]["temporal_features"]["end_offset_minutes"] = 0
+    payload["preprocessing"]["normalization"]["derivatives_stats_path"] = "derivatives/derivatives_stats.yaml"
+    payload["preprocessing"]["kinematic_tokenization"]["method"] = "basis"
+
+    config_path = artifact_dir / "fold_pipeline.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    summary = LobProcessingPipeline(ExperimentConfig.from_yaml(config_path)).run()
+
+    assert "fold_001" in summary
+    assert (artifact_dir / "processed" / "fold_001" / "train" / "TEST_2020-01-01_processed.csv").exists()
+    assert (artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-01_features.npy").exists()
+    assert (artifact_dir / "sequences" / "fold_001" / "validation" / "TEST_2020-01-02_features.npy").exists()
+    assert (artifact_dir / "sequences" / "fold_001" / "preprocessing_metadata.yaml").exists()
+    assert (artifact_dir / "derivatives" / "fold_001" / "derivatives_stats.yaml").exists()

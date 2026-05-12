@@ -23,6 +23,7 @@ from run_logging import (
     save_epoch_history,
     save_run_config_snapshot,
     save_run_log,
+    save_run_summary,
 )
 from training import LobTrainer
 
@@ -51,33 +52,54 @@ def build_dataset(sequence_dir: Path, split: str, sequence_window: int) -> LOBDa
     return LOBDataset(x_paths, t_paths, y_paths, sequence_window=sequence_window)
 
 
-def main() -> None:
-    config = load_config()
-    sequence_dir = resolve_config_path(config, config.data.sequence_data_dir)
-    logs_dir = resolve_config_path(config, config.data.logs_dir)
-    run_stem = next_run_stem(logs_dir)
-    run_log_path = logs_dir / f"{run_stem}.log"
-    run_config_path = logs_dir / f"{run_stem}_config.yaml"
-    run_losses_path = logs_dir / f"{run_stem}_metrics.csv"
-    run_confusion_matrices_path = logs_dir / f"{run_stem}_confusion_matrices.yaml"
-    config.training.best_model_path = str(resolve_config_path(config, config.training.best_model_path))
-    config.training.last_model_path = str(resolve_config_path(config, config.training.last_model_path))
-    preprocessing_metadata = load_preprocessing_metadata(sequence_dir)
+def fold_artifact_paths(
+    *,
+    sequence_dir: Path,
+    run_log_dir: Path,
+    run_result_dir: Path,
+    fold_id: str,
+) -> dict[str, Path]:
+    return {
+        "sequence_dir": sequence_dir / fold_id,
+        "log_dir": run_log_dir / fold_id,
+        "result_dir": run_result_dir / fold_id,
+    }
 
-    train_dataset = build_dataset(sequence_dir, "train", config.data.sequence_window)
+
+def train_fold(
+    *,
+    config: ExperimentConfig,
+    fold_id: str,
+    fold_sequence_dir: Path,
+    fold_log_dir: Path,
+    fold_result_dir: Path,
+    run_stem: str,
+    best_model_name: str,
+) -> dict:
+    fold_log_dir.mkdir(parents=True, exist_ok=True)
+    fold_result_dir.mkdir(parents=True, exist_ok=True)
+
+    run_log_path = fold_log_dir / "run.log"
+    run_config_path = fold_log_dir / "config.yaml"
+    run_losses_path = fold_log_dir / "metrics.csv"
+    run_confusion_matrices_path = fold_log_dir / "confusion_matrices.yaml"
+    config.training.best_model_path = str(fold_result_dir / best_model_name)
+    preprocessing_metadata = load_preprocessing_metadata(fold_sequence_dir)
+
+    train_dataset = build_dataset(fold_sequence_dir, "train", config.data.sequence_window)
     if len(train_dataset) == 0:
         raise ValueError(
-            f"No training sequences found in {sequence_dir / 'train'}. "
+            f"No training sequences found in {fold_sequence_dir / 'train'}. "
             "Run scripts/process_data.py first."
         )
 
-    validation_dataset = build_dataset(sequence_dir, "validation", config.data.sequence_window)
+    validation_dataset = build_dataset(fold_sequence_dir, "validation", config.data.sequence_window)
     validation_split_dataset = validation_dataset
     if len(validation_dataset) == 0:
         print("No validation sequences found; using the training dataset for validation.")
         validation_dataset = train_dataset
 
-    test_dataset = build_dataset(sequence_dir, "test", config.data.sequence_window)
+    test_dataset = build_dataset(fold_sequence_dir, "test", config.data.sequence_window)
     test_loader = None
     if len(test_dataset) == 0:
         print("No test sequences found; test loss will not be logged.")
@@ -120,14 +142,15 @@ def main() -> None:
     save_run_config_snapshot(
         config,
         run_config_path,
+        fold_id=fold_id,
         model_parameters=model_parameters,
         preprocessing_metadata=preprocessing_metadata,
     )
     trainer = LobTrainer(config.training)
     _, history = trainer.fit(model, train_loader, validation_loader, test_loader=test_loader)
 
-    save_epoch_history(history, run_losses_path, config=config)
-    save_confusion_matrices(history, run_confusion_matrices_path)
+    save_epoch_history(history, run_losses_path, config=config, fold=fold_id)
+    save_confusion_matrices(history, run_confusion_matrices_path, fold=fold_id)
     save_run_log(
         target=run_log_path,
         config=config,
@@ -140,10 +163,10 @@ def main() -> None:
         config_snapshot_path=run_config_path,
         model_parameters=model_parameters,
         preprocessing_metadata=preprocessing_metadata,
+        fold=fold_id,
     )
-    print(f"Training complete. Best model saved to: {config.training.best_model_path}")
-    print(f"Last model saved to: {config.training.last_model_path}")
-    print(f"Run log saved to: {run_log_path}")
+    print(f"Fold {fold_id} training complete. Best model saved to: {config.training.best_model_path}")
+    print(f"Fold {fold_id} run log saved to: {run_log_path}")
     for epoch_index, result in enumerate(history, start=1):
         test_suffix = "" if result.test_loss is None else f", test_loss={result.test_loss:.6f}"
         val_metrics = result.val_metrics
@@ -155,6 +178,60 @@ def main() -> None:
             f"epoch {epoch_index}: train_loss={result.train_loss:.6f}, "
             f"val_loss={result.val_loss:.6f}{test_suffix}{metric_suffix}"
         )
+
+    return {
+        "sequence_dir": str(fold_sequence_dir),
+        "log_dir": str(fold_log_dir),
+        "result_dir": str(fold_result_dir),
+        "best_model_path": config.training.best_model_path,
+        "dataset_sizes": dataset_sizes,
+        "logs": {
+            "run_log": str(run_log_path),
+            "config": str(run_config_path),
+            "metrics": str(run_losses_path),
+            "confusion_matrices": str(run_confusion_matrices_path),
+        },
+    }
+
+
+def main() -> None:
+    config = load_config()
+    sequence_dir = resolve_config_path(config, config.data.sequence_data_dir)
+    logs_dir = resolve_config_path(config, config.data.logs_dir)
+    run_stem = next_run_stem(logs_dir)
+    run_log_dir = logs_dir / run_stem
+    resolved_best_model_path = resolve_config_path(config, config.training.best_model_path)
+    run_result_dir = resolved_best_model_path.parent / run_stem
+    best_model_name = resolved_best_model_path.name
+
+    summary = {
+        "run": run_stem,
+        "config": str(config.path),
+        "log_dir": str(run_log_dir),
+        "result_dir": str(run_result_dir),
+        "folds": {},
+    }
+    for fold in config.folds:
+        paths = fold_artifact_paths(
+            sequence_dir=sequence_dir,
+            run_log_dir=run_log_dir,
+            run_result_dir=run_result_dir,
+            fold_id=fold.id,
+        )
+        fold_summary = train_fold(
+            config=config,
+            fold_id=fold.id,
+            fold_sequence_dir=paths["sequence_dir"],
+            fold_log_dir=paths["log_dir"],
+            fold_result_dir=paths["result_dir"],
+            run_stem=run_stem,
+            best_model_name=best_model_name,
+        )
+        summary["folds"][fold.id] = fold_summary
+
+    summary_path = run_log_dir / "summary.yaml"
+    save_run_summary(summary, summary_path)
+    print(f"Run summary saved to: {summary_path}")
 
 
 if __name__ == "__main__":

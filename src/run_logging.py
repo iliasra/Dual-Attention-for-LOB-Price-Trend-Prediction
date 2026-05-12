@@ -185,6 +185,7 @@ def save_run_config_snapshot(
     config: ExperimentConfig,
     target: Path,
     *,
+    fold_id: str | None = None,
     model_parameters: dict[str, int] | None = None,
     preprocessing_metadata: dict[str, Any] | None = None,
 ) -> None:
@@ -194,8 +195,8 @@ def save_run_config_snapshot(
         {
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "config_path": str(config.path),
+            "fold_id": fold_id,
             "resolved_best_model_path": str(config.training.best_model_path),
-            "resolved_last_model_path": str(config.training.last_model_path),
             "model_parameters": model_parameters or {},
             "fast_smoothing_lambdas": fast_smoothing_lambda_summary(config, preprocessing_metadata),
         }
@@ -363,18 +364,19 @@ def save_run_log(
     config_snapshot_path: Path,
     model_parameters: dict[str, int],
     preprocessing_metadata: dict[str, Any] | None = None,
+    fold: str = "single",
 ) -> None:
     lambda_summary = fast_smoothing_lambda_summary(config, preprocessing_metadata)
 
     with target.open("w", encoding="utf-8") as handle:
         handle.write(f"Run: {run_stem}\n")
+        handle.write(f"Fold: {fold}\n")
         handle.write(f"Created at: {datetime.now().isoformat(timespec='seconds')}\n")
         handle.write(f"Config: {config.path}\n")
         handle.write(f"Config snapshot: {config_snapshot_path}\n")
         handle.write(f"Loss and metrics CSV: {losses_path}\n")
         handle.write(f"Confusion matrices: {confusion_matrices_path}\n")
         handle.write(f"Best model path: {config.training.best_model_path}\n")
-        handle.write(f"Last model path: {config.training.last_model_path}\n")
         handle.write("\nModel parameters\n")
         for key, value in model_parameters.items():
             handle.write(f"{key}: {value}\n")
@@ -392,5 +394,11 @@ def save_run_log(
         handle.write("\nEpoch history\n")
         handle.write(",".join(_epoch_fieldnames(config)) + "\n" if history else "")
         for epoch_index, result in enumerate(history, start=1):
-            row = _epoch_row(epoch_index, result, "single", config)
+            row = _epoch_row(epoch_index, result, fold, config)
             handle.write(",".join(str(value) for value in row.values()) + "\n")
+
+
+def save_run_summary(summary: dict[str, Any], target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(summary, handle, sort_keys=False, allow_unicode=True)

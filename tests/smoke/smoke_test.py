@@ -55,7 +55,6 @@ def cleanup_smoke_dir(smoke_dir: Path) -> None:
         "training_summary.yaml",
         "derivatives_stats.yaml",
         "best_lob_transformer.pth",
-        "last_lob_transformer.pth",
     ]
     for pattern in patterns:
         for path in smoke_dir.glob(pattern):
@@ -96,7 +95,6 @@ def main() -> None:
     smoke_dir = smoke_test_dir / ".smoke"
     config.preprocessing.normalization.derivatives_stats_path = str(smoke_dir / "derivatives_stats.yaml")
     config.training.best_model_path = str(smoke_dir / "best_lob_transformer.pth")
-    config.training.last_model_path = str(smoke_dir / "last_lob_transformer.pth")
     smoke_dir.mkdir(parents=True, exist_ok=True)
     cleanup_smoke_dir(smoke_dir)
 
@@ -172,9 +170,7 @@ def main() -> None:
     trainer = LobTrainer(config.training)
     trained_model, history = trainer.fit(model, train_loader, val_loader)
     best_model_path = Path(config.training.best_model_path)
-    last_model_path = Path(config.training.last_model_path)
     assert best_model_path.exists(), "Trainer did not save the best model."
-    assert last_model_path.exists(), "Trainer did not save the last model."
 
     trained_model.eval()
     with torch.no_grad():

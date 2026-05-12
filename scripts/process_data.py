@@ -13,10 +13,12 @@ from processing import LobProcessingPipeline
 
 def main() -> None:
     summary = LobProcessingPipeline().run()
-    for split, shapes in summary.items():
-        print(split)
-        for date, shape in shapes.items():
-            print(f"  {date}: {shape}")
+    for fold_id, split_summary in summary.items():
+        print(fold_id)
+        for split, shapes in split_summary.items():
+            print(f"  {split}")
+            for date, shape in shapes.items():
+                print(f"    {date}: {shape}")
 
 
 if __name__ == "__main__":

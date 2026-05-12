@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+from pathlib import Path
+import shutil
+
+import pytest
+import torch.nn as nn
+
+from configuration import load_config
+from training import ClassificationMetricAccumulator, EvaluationResult, LobTrainer
+
+
+@pytest.fixture()
+def artifact_dir(request: pytest.FixtureRequest) -> Path:
+    path = Path(__file__).resolve().parent / ".test_artifacts" / request.node.name
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_stops_after_patience_without_val_improvement(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config().training
+    config.epochs = 10
+    config.early_stopping_patience = 2
+    config.best_model_path = str(artifact_dir / "best.pth")
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_losses = iter([1.0, 1.1, 1.2, 0.5])
+
+    def fake_train_epoch(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=0.25, metrics=metrics)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=next(validation_losses), metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_run_epoch", fake_train_epoch)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    _, history = trainer.fit(nn.Linear(1, 3), train_loader=[], val_loader=[])
+
+    assert len(history) == 3
+    assert [result.val_loss for result in history] == [1.0, 1.1, 1.2]
+    assert Path(config.best_model_path).exists()
