@@ -87,7 +87,7 @@ def calculate_adaptive_method_c_threshold(
 ) -> pd.Series:
     w_minus = midprices.rolling(window=k + 1).mean()
     spread = calculate_spread(df, bid_col=bid_col, ask_col=ask_col)
-    exit_spread = spread.rolling(window=config.exit_spread_window).mean()
+    exit_spread = spread.rolling(window=config.exit_spread_window).median()
     fee_price = midprices * config.round_trip_fees_bps / 10000.0
     cost_floor = (((spread + exit_spread) / 2.0) + fee_price) / w_minus
 
