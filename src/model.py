@@ -130,7 +130,12 @@ class ContinuousTimeAttention(nn.Module):
         self.num_heads = config.num_heads  #same nb of heads for spatial/timewise
         self.head_dim = config.d_model // config.num_heads
         self.dropout = config.attention_dropout
-        self.max_dt = config.max_dt
+        if config.max_dt is None:
+            raise ValueError(
+                "model.max_dt must be resolved before model construction. "
+                "scripts/run_training.py derives it from train sequence time spans."
+            )
+        self.max_dt = float(config.max_dt)
 
         self.qkv = nn.Linear(config.d_model, 3 * config.d_model)
         self.out = nn.Linear(config.d_model, config.d_model)

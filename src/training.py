@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -36,6 +37,26 @@ class FocalLoss(nn.Module):
         if self.reduction == "sum":
             return focal_loss.sum()
         return focal_loss
+
+
+def class_weights_from_sequence_labels(
+    y: np.ndarray,
+    num_classes: int = 3,
+    gamma_mode: bool = True,
+) -> tuple[list[float], list[int]]:
+    """Compute clipped balanced class weights from sequence-level train labels."""
+    labels = np.asarray(y, dtype=np.int64)
+    counts = np.bincount(labels, minlength=num_classes)[:num_classes]
+    total = int(counts.sum())
+    if total <= 0:
+        raise ValueError("Cannot compute class weights from an empty label array.")
+
+    weights = total / (num_classes * np.maximum(counts, 1))
+    if gamma_mode:
+        weights = np.sqrt(weights) # the sqrt allows the weights to be "less agressive" when focal loss already deals with imbalanced classes
+    weights = weights / weights.mean()
+    weights = np.clip(weights, 0.5, 3.0)
+    return weights.astype(float).tolist(), counts.astype(int).tolist()
 
 
 @dataclass(slots=True)
@@ -408,7 +429,6 @@ def train_lob_transformer(
     lr: float = 1e-4,
     weight_decay: float = 1e-4,
     gamma: float = 2.0,
-    class_weights: torch.Tensor | None = None,
 ) -> nn.Module:
     config = load_config().training
     config.device = device
@@ -416,7 +436,6 @@ def train_lob_transformer(
     config.learning_rate = lr
     config.weight_decay = weight_decay
     config.focal_gamma = gamma
-    config.class_weights = None if class_weights is None else class_weights.detach().cpu().tolist()
     trainer = LobTrainer(config)
     trained_model, _ = trainer.fit(model, train_loader, val_loader)
     return trained_model

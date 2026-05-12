@@ -8,6 +8,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+import numpy as np
 import pandas as pd
 import torch
 import yaml
@@ -139,6 +140,12 @@ def main() -> None:
     subset_length = min(TRAIN_WINDOWS_LIMIT, len(dataset))
     if subset_length < 2:
         raise ValueError("Not enough sequence windows were generated for the smoke test.")
+    smoke_times = np.asarray(dataset.T_data[0], dtype=np.float64)
+    smoke_spans = (
+        smoke_times[config.data.sequence_window - 1 :]
+        - smoke_times[: smoke_times.shape[0] - config.data.sequence_window + 1]
+    )
+    config.model.max_dt = float(np.quantile(smoke_spans, config.model.max_dt_quantile / 100.0))
 
     split_index = max(1, subset_length // 2)
     train_subset = Subset(dataset, list(range(split_index)))
@@ -201,6 +208,10 @@ def main() -> None:
         "train_val_sizes": {
             "train_windows": len(train_subset),
             "val_windows": len(val_subset),
+        },
+        "model_max_dt": {
+            "quantile": config.model.max_dt_quantile,
+            "resolved_max_dt": config.model.max_dt,
         },
         "first_batch": {
             "x_shape": list(x_batch.shape),

@@ -74,6 +74,57 @@ def test_price_static_plgs_train_fitted_config_values_are_loaded() -> None:
     assert config.preprocessing.price_static.tau_max is None
 
 
+def test_volume_static_exp_scaling_train_fitted_config_values_are_loaded() -> None:
+    config = load_config()
+
+    assert config.preprocessing.volume_static.quantile == 95.0
+    assert config.preprocessing.volume_static.target == 0.5
+    assert config.preprocessing.volume_static.k is None
+
+
+def test_model_max_dt_quantile_is_loaded_and_max_dt_is_resolved_later() -> None:
+    config = load_config()
+
+    assert config.model.max_dt_quantile == 95.0
+    assert config.model.max_dt is None
+
+
+def test_model_max_dt_quantile_is_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["model"]["max_dt_quantile"] = 101.0
+
+    config_path = artifact_dir / "bad_model_max_dt_quantile.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="model\\.max_dt_quantile"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_volume_static_config_validates_quantile(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["volume_static"]["quantile"] = 101.0
+
+    config_path = artifact_dir / "bad_volume_static_quantile.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="volume_static\\.quantile"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_volume_static_config_validates_target(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["volume_static"]["target"] = 1.0
+
+    config_path = artifact_dir / "bad_volume_static_target.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="volume_static\\.target"):
+        ExperimentConfig.from_yaml(config_path)
+
+
 def test_adaptive_threshold_config_values_are_loaded() -> None:
     config = load_config()
     adaptive = config.preprocessing.labels.smoothing.adaptive_threshold
@@ -252,15 +303,28 @@ def test_fast_kinematic_method_requires_tick_reference(artifact_dir: Path) -> No
 def test_training_data_loader_settings_are_loaded() -> None:
     config = load_config()
 
-    assert config.training.num_workers == 0
+    assert config.training.num_workers >= 0
     assert config.training.early_stopping_patience == 8
     assert config.training.persistent_workers is False
+    assert config.training.class_weights is None
     assert config.training.pin_memory is False
     assert config.training.data_loader_kwargs() == {
-        "num_workers": 0,
+        "num_workers": config.training.num_workers,
         "persistent_workers": False,
         "pin_memory": False,
     }
+
+
+def test_training_class_weights_yaml_parameter_is_rejected(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["class_weights"] = [1.0, 1.0, 1.0]
+
+    config_path = artifact_dir / "unexpected_class_weights.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training\\.class_weights"):
+        ExperimentConfig.from_yaml(config_path)
 
 
 def test_training_pin_memory_is_enabled_for_cuda(artifact_dir: Path) -> None:

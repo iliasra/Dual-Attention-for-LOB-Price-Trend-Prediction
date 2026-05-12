@@ -3,7 +3,7 @@ data:
   processed_data_dir: ../data/processed_dataframes
   sequence_data_dir: ../data/sequences
   logs_dir: ../logs
-  tick_size: 100.0
+  tick_size: 100.0 # LOBSTER multiplies prices by a factor 10_000
   time_column: time
   label_column: trend_label
   label_mapping: {-1: 0, 0: 1, 1: 2}
@@ -90,7 +90,7 @@ preprocessing:
     # allowed: tick, time
     reference: tick
     basis:
-      alpha: 5.0
+      alpha: 5.0 # smoothing parameter
     fast:
       n_basis: 20
       # maximum effective degrees of freedom explored by train GCV optimization
@@ -107,7 +107,7 @@ preprocessing:
     # allowed: tick, time
     reference: tick
     basis:
-      alpha: 5.0
+      alpha: 5.0 # smoothing parameter
     fast:
       n_basis: 20
       # maximum effective degrees of freedom explored by train GCV optimization
@@ -115,21 +115,26 @@ preprocessing:
       # recommended value: 1.0, or 0.95, 0.9 to increase stability
       eval_at: 1.0
   volume_static:
+    # Static volume features use 1 - exp(-x / k); k is fitted from train data per fold.
     enabled: true
     columns: auto
-    k: 2000.0
+    # Quantile (0-100) of train volume values used to fit exponential k.
+    quantile: 95.0
+    # Scaling target at that quantile: 1 - exp(-Qp / k) = target.
+    target: 0.5
 
 model:
   # nb of input features to be passed to spatial attention
   # when not provided (None value), the value used is infered from the size
   # of tensor x which has shape=[batch, sequence, d_input]
   d_input:
-  d_model: 64
+  d_model: 128
   feature_embed_dim: 16
   feature_num_frequencies: 8
   feature_sigma: 1.0
   num_heads: 4
-  max_dt: 3.0
+  # Quantile (0-100) of train sequence time spans used as temporal attention max_dt per fold.
+  max_dt_quantile: 95.0
   num_experts: 4
   top_k: 2
   num_classes: 3
@@ -146,15 +151,14 @@ model:
 training:
   # allowed: cpu, cuda
   device: cpu
-  epochs: 2
-  batch_size: 8
-  num_workers: 0
+  epochs: 50
+  batch_size: 64
+  num_workers: 8
   early_stopping_patience: 8
   persistent_workers: false
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
-  focal_gamma: 2.0
-  class_weights: [2.0, 10.0, 1.0]
+  focal_gamma: 2.0 # to fit accordingly to how imbalanced classes are.
   grad_clip_norm: 1.0
   model_dir: ../results
   use_amp: false

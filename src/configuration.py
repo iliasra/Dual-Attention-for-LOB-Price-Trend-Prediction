@@ -118,7 +118,8 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "volume_static": {
             "enabled": None,
             "columns": None,
-            "k": None,
+            "quantile": None,
+            "target": None,
         },
     },
     "model": {
@@ -128,7 +129,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "feature_num_frequencies": None,
         "feature_sigma": None,
         "num_heads": None,
-        "max_dt": None,
+        "max_dt_quantile": None,
         "num_experts": None,
         "top_k": None,
         "num_classes": None,
@@ -151,7 +152,6 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "learning_rate": None,
         "weight_decay": None,
         "focal_gamma": None,
-        "class_weights": None,
         "grad_clip_norm": None,
         "model_dir": None,
         "use_amp": None,
@@ -437,14 +437,25 @@ class VolumeKinematicConfig:
 class VolumeStaticConfig:
     enabled: bool
     columns: list[str] | None
-    k: float
+    quantile: float
+    target: float
+    k: float | None = None
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.quantile <= 100.0:
+            raise ValueError("preprocessing.volume_static.quantile must be in [0, 100].")
+        if not 0.0 < self.target < 1.0:
+            raise ValueError("preprocessing.volume_static.target must be in (0, 1).")
+        if self.k is not None and self.k <= 0:
+            raise ValueError("preprocessing.volume_static.k must be > 0 when fitted.")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "VolumeStaticConfig":
         return cls(
             enabled=bool(payload["enabled"]),
             columns=_ensure_list(payload["columns"]),
-            k=float(payload["k"]),
+            quantile=float(payload["quantile"]),
+            target=float(payload["target"]),
         )
 
 @dataclass(slots=True)
@@ -741,7 +752,6 @@ class ModelConfig:
     feature_num_frequencies: int
     feature_sigma: float
     num_heads: int
-    max_dt: float
     num_experts: int
     top_k: int
     num_classes: int
@@ -753,6 +763,14 @@ class ModelConfig:
     moe_router_noise: float
     moe_load_balancing_weight: float
     classifier_dropout: float
+    max_dt_quantile: float = 95.0
+    max_dt: float | None = None
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.max_dt_quantile <= 100.0:
+            raise ValueError("model.max_dt_quantile must be in [0, 100].")
+        if self.max_dt is not None and self.max_dt < 0.0:
+            raise ValueError("model.max_dt must be >= 0 when resolved.")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ModelConfig":
@@ -763,7 +781,6 @@ class ModelConfig:
             feature_num_frequencies=int(payload["feature_num_frequencies"]),
             feature_sigma=float(payload["feature_sigma"]),
             num_heads=int(payload["num_heads"]),
-            max_dt=float(payload["max_dt"]),
             num_experts=int(payload["num_experts"]),
             top_k=int(payload["top_k"]),
             num_classes=int(payload["num_classes"]),
@@ -775,6 +792,7 @@ class ModelConfig:
             moe_router_noise=float(payload["moe_router_noise"]),
             moe_load_balancing_weight=float(payload["moe_load_balancing_weight"]),
             classifier_dropout=float(payload["classifier_dropout"]),
+            max_dt_quantile=float(_require_explicit_value(payload["max_dt_quantile"], "model.max_dt_quantile")),
         )
 
     def resolved_d_input(self, inferred_feature_count: int | None = None) -> int:
@@ -796,10 +814,10 @@ class TrainingConfig:
     learning_rate: float
     weight_decay: float
     focal_gamma: float
-    class_weights: list[float] | None
     grad_clip_norm: float
     model_dir: str
     use_amp: bool
+    class_weights: list[float] | None = None
 
     def __post_init__(self) -> None:
         if self.num_workers < 0:
@@ -826,7 +844,6 @@ class TrainingConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TrainingConfig":
-        raw_weights = payload["class_weights"]
         return cls(
             device=str(payload["device"]).lower(),
             epochs=int(payload["epochs"]),
@@ -837,7 +854,6 @@ class TrainingConfig:
             learning_rate=float(payload["learning_rate"]),
             weight_decay=float(payload["weight_decay"]),
             focal_gamma=float(payload["focal_gamma"]),
-            class_weights=None if raw_weights is None else [float(weight) for weight in raw_weights],
             grad_clip_norm=float(payload["grad_clip_norm"]),
             model_dir=str(payload["model_dir"]),
             use_amp=bool(payload["use_amp"]),

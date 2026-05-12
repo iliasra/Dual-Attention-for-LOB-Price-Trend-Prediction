@@ -189,6 +189,8 @@ def make_test_configs(tokenization_method: str = "basis") -> tuple[DataConfig, P
         volume_static=VolumeStaticConfig(
             enabled=True,
             columns=None,
+            quantile=95.0,
+            target=0.5,
             k=2000.0,
         ),
     )
@@ -348,6 +350,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert "cost_floor > volatility_floor" in output
     assert "volatility_floor > cost_floor" in output
     assert "Selected price static PLGS parameters from train:" in output
+    assert "Selected volume static exponential scaling from train:" in output
     assert (artifact_dir / "processed" / "fold_001" / "train" / "TEST_2020-01-01_processed.csv").exists()
     assert (artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-01_features.npy").exists()
     assert (artifact_dir / "sequences" / "fold_001" / "validation" / "TEST_2020-01-02_features.npy").exists()
@@ -369,3 +372,8 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert plgs_metadata["tau_clip"] == plgs_metadata["x99"]
     assert plgs_metadata["tau_max"] > plgs_metadata["tau_start"]
     assert plgs_metadata["n_values"] > 0
+    volume_metadata = metadata["volume_static_exp"]
+    assert volume_metadata["quantile"] == payload["preprocessing"]["volume_static"]["quantile"]
+    assert volume_metadata["target"] == payload["preprocessing"]["volume_static"]["target"]
+    assert volume_metadata["k"] > 0.0
+    assert volume_metadata["n_values"] > 0

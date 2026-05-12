@@ -31,6 +31,7 @@ from kinematic_preprocessing import (
     SnapshotBatchProcessor,
     VolumeStaticProcessor,
     _static_centering,
+    fit_exp_scaling_parameters,
     fit_plgs_parameters,
     handle_abnormal_prices,
     min_max_norm,
@@ -123,6 +124,19 @@ def test_fit_plgs_parameters_uses_train_quantiles_and_targets_q95() -> None:
         0.5,
         atol=1e-8,
     )
+    assert result["n_values"] == len(values)
+
+
+def test_fit_exp_scaling_parameters_uses_quantile_and_target() -> None:
+    values = pd.Series(np.arange(1.0, 101.0))
+
+    result = fit_exp_scaling_parameters(values, quantile=95.0, target=0.5)
+
+    expected_quantile = float(values.quantile(0.95))
+    expected_k = -expected_quantile / np.log(1.0 - 0.5)
+    np.testing.assert_allclose(result["quantile_value"], expected_quantile)
+    np.testing.assert_allclose(result["k"], expected_k)
+    np.testing.assert_allclose(1.0 - np.exp(-expected_quantile / result["k"]), 0.5)
     assert result["n_values"] == len(values)
 
 
@@ -303,6 +317,8 @@ def _make_static_refactor_config(method: str) -> tuple[DataConfig, Preprocessing
         volume_static=VolumeStaticConfig(
             enabled=True,
             columns=None,
+            quantile=95.0,
+            target=0.5,
             k=2000.0,
         ),
     )

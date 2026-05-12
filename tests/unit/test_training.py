@@ -3,11 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 
+import numpy as np
 import pytest
 import torch.nn as nn
 
 from configuration import load_config
-from training import ClassificationMetricAccumulator, EvaluationResult, LobTrainer
+from training import (
+    ClassificationMetricAccumulator,
+    EvaluationResult,
+    LobTrainer,
+    class_weights_from_sequence_labels,
+)
 
 
 @pytest.fixture()
@@ -46,3 +52,19 @@ def test_lob_trainer_stops_after_patience_without_val_improvement(
     assert len(history) == 3
     assert [result.val_loss for result in history] == [1.0, 1.1, 1.2]
     assert config.best_model_path.exists()
+
+
+def test_class_weights_from_sequence_labels_uses_balanced_clipped_weights() -> None:
+    weights, counts = class_weights_from_sequence_labels(
+        np.asarray([0, 0, 0, 0, 1, 1, 2]),
+        num_classes=3,
+        gamma_mode=True,
+    )
+
+    raw = 7 / (3 * np.asarray([4, 2, 1], dtype=float))
+    expected = np.sqrt(raw)
+    expected = expected / expected.mean()
+    expected = np.clip(expected, 0.5, 3.0)
+
+    assert counts == [4, 2, 1]
+    assert weights == pytest.approx(expected.tolist())

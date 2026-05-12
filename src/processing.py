@@ -22,6 +22,7 @@ try:
         MessageOrderbookJoiner,
         SnapshotBatchProcessor,
         TradingSessionFilter,
+        fit_exp_scaling_parameters,
         fit_plgs_parameters,
         handle_abnormal_prices,
         price_static_distance_frame,
@@ -43,6 +44,7 @@ except ImportError:  # pragma: no cover
         MessageOrderbookJoiner,
         SnapshotBatchProcessor,
         TradingSessionFilter,
+        fit_exp_scaling_parameters,
         fit_plgs_parameters,
         handle_abnormal_prices,
         price_static_distance_frame,
@@ -116,6 +118,7 @@ class LobProcessingPipeline:
         self.sequence_builder = DailySequenceBuilder(self.config.data)
         self.fast_smoothing_lambda_results: dict[str, dict[str, float]] = {}
         self.price_static_plgs_results: dict[str, float] = {}
+        self.volume_static_exp_results: dict[str, float] = {}
 
     def _resolve_path(self, path: Path) -> Path:
         return path if path.is_absolute() else (self.config_dir / path).resolve()
@@ -390,6 +393,8 @@ class LobProcessingPipeline:
         self.config.preprocessing.price_static.tau_clip = None
         self.config.preprocessing.price_static.tau_max = None
         self.price_static_plgs_results = {}
+        self.config.preprocessing.volume_static.k = None
+        self.volume_static_exp_results = {}
         self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
 
     def fit_price_static_plgs_parameters(self, train_days: list[ProcessedDay]) -> dict[str, float] | None:
@@ -437,6 +442,50 @@ class LobProcessingPipeline:
             f"tau_clip(q99)={result['tau_clip']:.6g}, "
             f"tau_max={result['tau_max']:.6g}, "
             f"x95={result['x95']:.6g}, n_values={int(result['n_values'])}."
+        )
+        return result
+
+    def fit_volume_static_exp_parameters(self, train_days: list[ProcessedDay]) -> dict[str, float] | None:
+        volume_static_config = self.config.preprocessing.volume_static
+        if not volume_static_config.enabled:
+            return None
+
+        window = self.config.preprocessing.snapshot_window
+        train_values: list[pd.Series] = []
+        for day in train_days:
+            df = day.message_features
+            if len(df) < window:
+                continue
+            columns = self.snapshot_processor.window_processor._resolve_stream_columns(
+                df,
+                volume_static_config,
+                "volume",
+            )
+            if not columns:
+                continue
+            end_positions = np.arange(window - 1, len(df))
+            end_rows = df.iloc[end_positions].reset_index(drop=True)
+            train_values.append(pd.Series(end_rows[columns].to_numpy(dtype=float).ravel()))
+
+        if not train_values:
+            raise ValueError("Cannot fit volume static exponential scaling k: no train volume values found.")
+
+        all_values = pd.concat(train_values, ignore_index=True)
+        result = fit_exp_scaling_parameters(
+            all_values,
+            quantile=volume_static_config.quantile,
+            target=volume_static_config.target,
+        )
+        volume_static_config.k = float(result["k"])
+        self.volume_static_exp_results = result
+        self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
+
+        print(
+            "Selected volume static exponential scaling from train: "
+            f"quantile={result['quantile']:.6g}, "
+            f"target={result['target']:.6g}, "
+            f"quantile_value={result['quantile_value']:.6g}, "
+            f"k={result['k']:.6g}, n_values={int(result['n_values'])}."
         )
         return result
 
@@ -652,6 +701,7 @@ class LobProcessingPipeline:
         label_distribution = self.train_label_distribution(processed_splits["train"])
         self.print_label_distribution(fold.id, label_distribution)
         plgs_parameters = self.fit_price_static_plgs_parameters(processed_splits["train"])
+        volume_static_exp = self.fit_volume_static_exp_parameters(processed_splits["train"])
         self.optimize_fast_smoothing_lambdas(processed_splits["train"])
         self.build_snapshot_features(processed_splits)
         stats_path = self.fold_derivatives_stats_path(fold.id)
@@ -671,6 +721,7 @@ class LobProcessingPipeline:
             lambda_results=self.fast_smoothing_lambda_results,
             label_distribution=label_distribution,
             price_static_plgs=plgs_parameters,
+            volume_static_exp=volume_static_exp,
         )
         print(f"Saved preprocessing metadata for fold {fold.id} to {metadata_path}.")
         print(f"Finished fold {fold.id}.")

@@ -119,7 +119,42 @@ def _log1p(x: ArrayLike) -> pd.Series:
     return np.log1p(x)
 
 def _exp_scaling(x: ArrayLike, k: float) -> pd.Series:
+    if k <= 0:
+        raise ValueError("Exponential scaling k must be > 0.")
     return 1 - np.exp(-x / k)
+
+
+def choose_exp_scaling_k(quantile_value: float, target: float) -> float:
+    if quantile_value <= 0:
+        raise ValueError("Cannot fit exponential scaling k from a non-positive quantile value.")
+    if not 0.0 < target < 1.0:
+        raise ValueError("Exponential scaling target must be in (0, 1).")
+    return float(-quantile_value / np.log(1.0 - target))
+
+
+def fit_exp_scaling_parameters(
+    values: pd.Series | np.ndarray,
+    *,
+    quantile: float,
+    target: float,
+) -> dict[str, float]:
+    if not 0.0 <= quantile <= 100.0:
+        raise ValueError("Exponential scaling quantile must be in [0, 100].")
+
+    numeric = pd.to_numeric(pd.Series(values).astype(float), errors="coerce")
+    finite_values = numeric[np.isfinite(numeric)]
+    if finite_values.empty:
+        raise ValueError("Cannot fit exponential scaling parameters without finite training values.")
+
+    quantile_value = float(finite_values.quantile(quantile / 100.0))
+    k = choose_exp_scaling_k(quantile_value, target)
+    return {
+        "quantile": float(quantile),
+        "target": float(target),
+        "quantile_value": quantile_value,
+        "k": k,
+        "n_values": int(len(finite_values)),
+    }
 
 def _static_centering(
     price: ArrayLike,
@@ -507,9 +542,12 @@ class FastVolumeKinematicProcessor:
 
 @dataclass(slots=True)
 class VolumeStaticProcessor:
-    k: float
+    k: float | None
 
     def transform_rows(self, df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        if self.k is None:
+            raise ValueError("Volume static exponential scaling k has not been fitted.")
+
         features: dict[str, np.ndarray] = {}
         for column in columns:
             transformed = _exp_scaling(df[column], self.k)

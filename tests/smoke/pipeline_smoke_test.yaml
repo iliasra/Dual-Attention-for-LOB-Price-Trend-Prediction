@@ -94,9 +94,13 @@ preprocessing:
       df: 6.0
       eval_at: 1.0
   volume_static:
+    # Static volume features use 1 - exp(-x / k); k is fitted from train data per fold.
     enabled: true
     columns: auto
-    k: 2000.0
+    # Quantile (0-100) of train volume values used to fit exponential k.
+    quantile: 95.0
+    # Scaling target at that quantile: 1 - exp(-Qp / k) = target.
+    target: 0.5
 
 model:
   d_input:
@@ -105,7 +109,8 @@ model:
   feature_num_frequencies: 4
   feature_sigma: 1.0
   num_heads: 4
-  max_dt: 3.0
+  # Quantile (0-100) of train sequence time spans used as temporal attention max_dt per fold.
+  max_dt_quantile: 95.0
   num_experts: 2
   top_k: 1
   num_classes: 3
@@ -128,7 +133,6 @@ training:
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   focal_gamma: 2.0
-  class_weights: [2.0, 10.0, 1.0]
   grad_clip_norm: 1.0
   model_dir: .smoke
   use_amp: false

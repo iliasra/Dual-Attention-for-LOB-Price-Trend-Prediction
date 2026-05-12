@@ -115,6 +115,7 @@ def save_preprocessing_metadata(
     lambda_results: dict[str, dict[str, float]] | None = None,
     label_distribution: dict[str, Any] | None = None,
     price_static_plgs: dict[str, Any] | None = None,
+    volume_static_exp: dict[str, Any] | None = None,
 ) -> Path:
     lambdas = fast_smoothing_lambda_summary(config)
     if lambda_results:
@@ -132,6 +133,8 @@ def save_preprocessing_metadata(
         payload["label_distribution"] = label_distribution
     if price_static_plgs is not None:
         payload["price_static_plgs"] = price_static_plgs
+    if volume_static_exp is not None:
+        payload["volume_static_exp"] = volume_static_exp
     target = preprocessing_metadata_path(sequence_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as handle:
@@ -204,6 +207,11 @@ def save_run_config_snapshot(
             "fold_id": fold_id,
             "resolved_model_dir": str(config.training.model_dir),
             "resolved_best_model_path": str(config.training.best_model_path),
+            "model_max_dt": {
+                "quantile": float(config.model.max_dt_quantile),
+                "resolved_max_dt": config.model.max_dt,
+            },
+            "class_weights": config.training.class_weights,
             "model_parameters": model_parameters or {},
             "fast_smoothing_lambdas": fast_smoothing_lambda_summary(config, preprocessing_metadata),
         }
@@ -385,6 +393,11 @@ def save_run_log(
         handle.write(f"Confusion matrices: {confusion_matrices_path}\n")
         handle.write(f"Model directory: {config.training.model_dir}\n")
         handle.write(f"Best model path: {config.training.best_model_path}\n")
+        handle.write("\nModel temporal window\n")
+        handle.write(f"max_dt_quantile: {config.model.max_dt_quantile}\n")
+        handle.write(f"resolved_max_dt: {config.model.max_dt}\n")
+        handle.write("\nTraining class weights\n")
+        handle.write(f"class_weights: {config.training.class_weights}\n")
         handle.write("\nModel parameters\n")
         for key, value in model_parameters.items():
             handle.write(f"{key}: {value}\n")

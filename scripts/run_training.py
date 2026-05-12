@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +26,7 @@ from run_logging import (
     save_run_log,
     save_run_summary,
 )
-from training import LobTrainer
+from training import LobTrainer, class_weights_from_sequence_labels
 
 
 def sequence_paths(sequence_dir: Path, split: str) -> tuple[list[str], list[str], list[str]]:
@@ -50,6 +51,83 @@ def sequence_paths(sequence_dir: Path, split: str) -> tuple[list[str], list[str]
 def build_dataset(sequence_dir: Path, split: str, sequence_window: int) -> LOBDataset:
     x_paths, t_paths, y_paths = sequence_paths(sequence_dir, split)
     return LOBDataset(x_paths, t_paths, y_paths, sequence_window=sequence_window)
+
+
+def sequence_time_span_quantile(
+    time_arrays: list[np.ndarray],
+    *,
+    sequence_window: int,
+    quantile: float,
+) -> dict[str, float | int]:
+    if sequence_window <= 0:
+        raise ValueError("sequence_window must be > 0 to compute model.max_dt.")
+    if not 0.0 <= quantile <= 100.0:
+        raise ValueError("model.max_dt_quantile must be in [0, 100].")
+
+    spans_by_day: list[np.ndarray] = []
+    for times in time_arrays:
+        values = np.asarray(times, dtype=np.float64)
+        if values.shape[0] < sequence_window:
+            continue
+        if np.any(np.diff(values) < 0.0):
+            raise ValueError("Cannot compute model.max_dt because train timestamps are not non-decreasing.")
+        spans = values[sequence_window - 1 :] - values[: values.shape[0] - sequence_window + 1]
+        spans_by_day.append(spans)
+
+    if not spans_by_day:
+        raise ValueError("Cannot compute model.max_dt because the train split has no full sequence windows.")
+
+    all_spans = np.concatenate(spans_by_day)
+    all_spans = all_spans[np.isfinite(all_spans)]
+    if all_spans.size == 0:
+        raise ValueError("Cannot compute model.max_dt because all train sequence time spans are non-finite.")
+    if np.any(all_spans < 0.0):
+        raise ValueError("Cannot compute model.max_dt because train timestamps are not non-decreasing.")
+
+    max_dt = float(np.quantile(all_spans, quantile / 100.0))
+    return {
+        "quantile": float(quantile),
+        "max_dt": max_dt,
+        "n_windows": int(all_spans.size),
+        "min_span": float(np.min(all_spans)),
+        "max_span": float(np.max(all_spans)),
+    }
+
+
+def resolve_model_max_dt(config: ExperimentConfig, train_dataset: LOBDataset) -> dict[str, float | int]:
+    summary = sequence_time_span_quantile(
+        train_dataset.T_data,
+        sequence_window=config.data.sequence_window,
+        quantile=config.model.max_dt_quantile,
+    )
+    config.model.max_dt = float(summary["max_dt"])
+    return summary
+
+
+def sequence_label_values(dataset: LOBDataset) -> np.ndarray:
+    """Return the label attached to each sequence window in a compact LOBDataset."""
+    labels_by_day = [
+        np.asarray(labels, dtype=np.int64)[dataset.sequence_window - 1 :]
+        for labels in dataset.y_data
+        if len(labels) >= dataset.sequence_window
+    ]
+    return np.concatenate(labels_by_day) if labels_by_day else np.asarray([], dtype=np.int64)
+
+
+def resolve_class_weights(config: ExperimentConfig, train_dataset: LOBDataset) -> dict[str, list[float] | list[int] | bool]:
+    """Fit runtime loss class weights from train sequence labels for one fold."""
+    labels = sequence_label_values(train_dataset)
+    weights, counts = class_weights_from_sequence_labels(
+        labels,
+        num_classes=config.model.num_classes,
+        gamma_mode=config.training.focal_gamma > 0.0,
+    )
+    config.training.class_weights = weights
+    return {
+        "weights": weights,
+        "counts": counts,
+        "gamma_mode": config.training.focal_gamma > 0.0,
+    }
 
 
 def fold_artifact_paths(
@@ -106,6 +184,18 @@ def train_fold(
     test_loader = None
     if len(test_dataset) == 0:
         print("No test sequences found; test loss will not be logged.")
+
+    max_dt_summary = resolve_model_max_dt(config, train_dataset)
+    print(
+        f"Fold '{fold_id}' model max_dt selected from train spans: "
+        f"q{max_dt_summary['quantile']:.4g}={max_dt_summary['max_dt']:.10g} "
+        f"over {max_dt_summary['n_windows']} windows."
+    )
+    class_weight_summary = resolve_class_weights(config, train_dataset)
+    print(
+        f"Fold '{fold_id}' class weights selected from train sequence labels: "
+        f"counts={class_weight_summary['counts']}, weights={class_weight_summary['weights']}."
+    )
 
     loader_kwargs = config.training.data_loader_kwargs()
     train_loader = DataLoader(
@@ -194,6 +284,8 @@ def train_fold(
         "log_dir": str(fold_log_dir),
         "result_dir": str(fold_result_dir),
         "best_model_path": str(config.training.best_model_path),
+        "model_max_dt": max_dt_summary,
+        "class_weights": class_weight_summary,
         "dataset_sizes": dataset_sizes,
         "logs": {
             "run_log": str(run_log_path),
