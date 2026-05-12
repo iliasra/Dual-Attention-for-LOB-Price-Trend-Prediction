@@ -175,15 +175,18 @@ def train_fold(
         )
 
     validation_dataset = build_dataset(fold_sequence_dir, "validation", config.data.sequence_window)
-    validation_split_dataset = validation_dataset
     if len(validation_dataset) == 0:
-        print("No validation sequences found; using the training dataset for validation.")
-        validation_dataset = train_dataset
+        raise ValueError(
+            f"No validation sequences found in {fold_sequence_dir / 'validation'}. "
+            "Validation dates must be configured and preprocessed explicitly."
+        )
 
     test_dataset = build_dataset(fold_sequence_dir, "test", config.data.sequence_window)
-    test_loader = None
     if len(test_dataset) == 0:
-        print("No test sequences found; test loss will not be logged.")
+        raise ValueError(
+            f"No test sequences found in {fold_sequence_dir / 'test'}. "
+            "Test dates must be configured and preprocessed explicitly."
+        )
 
     max_dt_summary = resolve_model_max_dt(config, train_dataset)
     print(
@@ -210,33 +213,30 @@ def train_fold(
         shuffle=False,
         **loader_kwargs,
     )
-    if len(test_dataset) > 0:
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=config.training.batch_size,
-            shuffle=False,
-            **loader_kwargs,
-        )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=False,
+        **loader_kwargs,
+    )
 
     x_sample, _, _ = train_dataset[0]
     model = build_model(config.model, d_input=x_sample.shape[-1])
     model_parameters = model_parameter_summary(model)
     class_distributions = {
         "train": class_distribution(train_dataset, config.model.num_classes),
-        "validation": class_distribution(validation_split_dataset, config.model.num_classes),
+        "validation": class_distribution(validation_dataset, config.model.num_classes),
         "test": class_distribution(test_dataset, config.model.num_classes),
     }
     dataset_sizes = {
         "train": len(train_dataset),
-        "validation": len(validation_split_dataset),
-        "validation_evaluation": len(validation_dataset),
+        "validation": len(validation_dataset),
         "test": len(test_dataset),
     }
     print(
         f"Fold '{fold_id}' dataset sizes: "
         f"train={dataset_sizes['train']}, "
         f"validation={dataset_sizes['validation']}, "
-        f"validation_evaluation={dataset_sizes['validation_evaluation']}, "
         f"test={dataset_sizes['test']}."
     )
     save_run_config_snapshot(

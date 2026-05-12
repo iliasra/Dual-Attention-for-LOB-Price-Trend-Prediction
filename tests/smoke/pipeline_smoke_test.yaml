@@ -14,14 +14,14 @@ data:
 
 dataset_splits:
   train_dates: ["2012-06-21"]
-  validation_dates: []
-  test_dates: []
+  validation_dates: ["2012-06-22"]
+  test_dates: ["2012-06-23"]
 
 folds:
   - id: fold_001
     train_dates: ["2012-06-21"]
-    validation_dates: []
-    test_dates: []
+    validation_dates: ["2012-06-22"]
+    test_dates: ["2012-06-23"]
 
 preprocessing:
   snapshot_window: 4

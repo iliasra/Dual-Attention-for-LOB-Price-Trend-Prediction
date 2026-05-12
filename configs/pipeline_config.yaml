@@ -1,5 +1,5 @@
 data:
-  raw_data_dir: ../data/LOBSTER
+  raw_data_dir: ../data/LOBSTER_artificial_3days
   processed_data_dir: ../data/processed_dataframes
   sequence_data_dir: ../data/sequences
   logs_dir: ../logs
@@ -19,15 +19,15 @@ data:
 # fallback only used when folds is empty
 dataset_splits:
   train_dates: ["2012-06-21"]
-  validation_dates: []
-  test_dates: []
+  validation_dates: ["2012-06-22"]
+  test_dates: ["2012-06-23"]
 
 # default behavior: uses folds
 folds:
   - id: fold_001
     train_dates: ["2012-06-21"]
-    validation_dates: []
-    test_dates: []
+    validation_dates: ["2012-06-22"]
+    test_dates: ["2012-06-23"]
 
 preprocessing:
   snapshot_window: 100

@@ -300,6 +300,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     raw_dir = artifact_dir / "raw"
     write_lobster_day(raw_dir, "TEST", "2020-01-01")
     write_lobster_day(raw_dir, "TEST", "2020-01-02")
+    write_lobster_day(raw_dir, "TEST", "2020-01-03")
 
     base_config = load_config()
     payload = yaml.safe_load(base_config.path.read_text(encoding="utf-8"))
@@ -312,14 +313,14 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     payload["dataset_splits"] = {
         "train_dates": ["2020-01-01"],
         "validation_dates": ["2020-01-02"],
-        "test_dates": [],
+        "test_dates": ["2020-01-03"],
     }
     payload["folds"] = [
         {
             "id": "fold_001",
             "train_dates": ["2020-01-01"],
             "validation_dates": ["2020-01-02"],
-            "test_dates": [],
+            "test_dates": ["2020-01-03"],
         }
     ]
     payload["preprocessing"]["snapshot_window"] = 4
@@ -354,6 +355,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert (artifact_dir / "processed" / "fold_001" / "train" / "TEST_2020-01-01_processed.csv").exists()
     assert (artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-01_features.npy").exists()
     assert (artifact_dir / "sequences" / "fold_001" / "validation" / "TEST_2020-01-02_features.npy").exists()
+    assert (artifact_dir / "sequences" / "fold_001" / "test" / "TEST_2020-01-03_features.npy").exists()
     metadata_path = artifact_dir / "sequences" / "fold_001" / "preprocessing_metadata.yaml"
     assert metadata_path.exists()
     assert (artifact_dir / "derivatives" / "fold_001" / "derivatives_stats.yaml").exists()

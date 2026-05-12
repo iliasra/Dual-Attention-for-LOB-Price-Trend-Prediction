@@ -208,6 +208,8 @@ def test_explicit_folds_are_loaded() -> None:
 
     assert [fold.id for fold in config.folds] == ["fold_001"]
     assert config.folds[0].train_dates == ["2012-06-21"]
+    assert config.folds[0].validation_dates == ["2012-06-22"]
+    assert config.folds[0].test_dates == ["2012-06-23"]
 
 
 def test_folds_fallback_to_dataset_splits_when_missing(artifact_dir: Path) -> None:
@@ -223,6 +225,8 @@ def test_folds_fallback_to_dataset_splits_when_missing(artifact_dir: Path) -> No
     assert len(loaded.folds) == 1
     assert loaded.folds[0].id == "single"
     assert loaded.folds[0].train_dates == loaded.dataset_splits.train_dates
+    assert loaded.folds[0].validation_dates == loaded.dataset_splits.validation_dates
+    assert loaded.folds[0].test_dates == loaded.dataset_splits.test_dates
 
 
 def test_fold_config_rejects_overlapping_split_dates(artifact_dir: Path) -> None:
@@ -233,7 +237,7 @@ def test_fold_config_rejects_overlapping_split_dates(artifact_dir: Path) -> None
             "id": "bad_fold",
             "train_dates": ["2012-06-21"],
             "validation_dates": ["2012-06-21"],
-            "test_dates": [],
+            "test_dates": ["2012-06-23"],
         }
     ]
 
@@ -252,7 +256,7 @@ def test_fold_config_requires_chronological_order(artifact_dir: Path) -> None:
             "id": "bad_fold",
             "train_dates": ["2012-06-22"],
             "validation_dates": ["2012-06-21"],
-            "test_dates": [],
+            "test_dates": ["2012-06-23"],
         }
     ]
 
@@ -260,6 +264,25 @@ def test_fold_config_requires_chronological_order(artifact_dir: Path) -> None:
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="strictly before validation"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_fold_config_requires_validation_and_test_dates(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["folds"] = [
+        {
+            "id": "bad_fold",
+            "train_dates": ["2012-06-21"],
+            "validation_dates": [],
+            "test_dates": [],
+        }
+    ]
+
+    config_path = artifact_dir / "missing_fold_validation_test.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="validation_dates, test_dates"):
         ExperimentConfig.from_yaml(config_path)
 
 

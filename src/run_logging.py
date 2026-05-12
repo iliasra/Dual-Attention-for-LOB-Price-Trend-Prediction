@@ -366,6 +366,29 @@ def _write_lambda_summary(handle: Any, summary: dict[str, Any]) -> None:
         handle.write("\n")
 
 
+def _write_best_epoch_summary(handle: Any, history: list[Any]) -> None:
+    handle.write("\nBest epoch\n")
+    if not history:
+        handle.write("status: unavailable\n")
+        return
+    best_index, best_result = min(enumerate(history, start=1), key=lambda item: item[1].val_loss)
+    handle.write(f"epoch: {best_index}\n")
+    handle.write(f"train_loss: {best_result.train_loss:.10g}\n")
+    handle.write(f"val_loss: {best_result.val_loss:.10g}\n")
+    if best_result.test_loss is not None:
+        handle.write(f"test_loss: {best_result.test_loss:.10g}\n")
+    for split, metrics in (
+        ("train", getattr(best_result, "train_metrics", None)),
+        ("validation", getattr(best_result, "val_metrics", None)),
+        ("test", getattr(best_result, "test_metrics", None)),
+    ):
+        if metrics is None:
+            continue
+        handle.write(f"{split}_accuracy: {metrics.accuracy:.10g}\n")
+        handle.write(f"{split}_macro_f1: {metrics.macro_f1:.10g}\n")
+        handle.write(f"{split}_ece: {metrics.expected_calibration_error:.10g}\n")
+
+
 def save_run_log(
     *,
     target: Path,
@@ -411,6 +434,8 @@ def save_run_log(
         handle.write("\nClass distributions\n")
         for split, distribution in class_distributions.items():
             _write_class_distribution(handle, split, distribution)
+
+        _write_best_epoch_summary(handle, history)
 
         handle.write("\nEpoch history\n")
         handle.write(",".join(_epoch_fieldnames(config)) + "\n" if history else "")

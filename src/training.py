@@ -276,6 +276,8 @@ class LobTrainer:
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config.epochs)
         best_val_loss = float("inf")
+        best_epoch = 0
+        best_test_result: EvaluationResult | None = None
         epochs_without_improvement = 0
         history: list[EpochResult] = []
 
@@ -317,11 +319,24 @@ class LobTrainer:
 
             if val_result.loss < best_val_loss:
                 best_val_loss = val_result.loss
+                best_epoch = epoch + 1
+                best_test_result = test_result
                 epochs_without_improvement = 0
                 best_path = Path(self.config.best_model_path)
                 best_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(model.state_dict(), best_path)
-                print(f"Saved new best model to {best_path} with val_loss={best_val_loss:.6f}.")
+                test_suffix = ""
+                if test_result is not None:
+                    test_suffix = (
+                        f", test_loss={test_result.loss:.6f}, "
+                        f"test_acc={test_result.metrics.accuracy:.4f}, "
+                        f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
+                        f"test_ece={test_result.metrics.expected_calibration_error:.4f}"
+                    )
+                print(
+                    f"Saved new best model to {best_path} from epoch {best_epoch} "
+                    f"with val_loss={best_val_loss:.6f}{test_suffix}."
+                )
             else:
                 epochs_without_improvement += 1
 
@@ -352,6 +367,19 @@ class LobTrainer:
                 )
                 break
 
+        if best_epoch:
+            best_suffix = ""
+            if best_test_result is not None:
+                best_suffix = (
+                    f", test_loss={best_test_result.loss:.6f}, "
+                    f"test_acc={best_test_result.metrics.accuracy:.4f}, "
+                    f"test_macro_f1={best_test_result.metrics.macro_f1:.4f}, "
+                    f"test_ece={best_test_result.metrics.expected_calibration_error:.4f}"
+                )
+            print(
+                f"Best model selected from epoch {best_epoch}: "
+                f"val_loss={best_val_loss:.6f}{best_suffix}."
+            )
         print("Training finished.")
         return model, history
 

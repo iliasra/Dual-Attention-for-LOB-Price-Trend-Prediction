@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pytest
@@ -12,7 +13,17 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from run_training import fold_artifact_paths, sequence_label_values, sequence_time_span_quantile
+from run_training import fold_artifact_paths, sequence_label_values, sequence_time_span_quantile, train_fold
+from configuration import load_config
+
+
+@pytest.fixture()
+def artifact_dir(request: pytest.FixtureRequest) -> Path:
+    path = Path(__file__).resolve().parent / ".test_artifacts" / request.node.name
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
 
 
 def test_fold_artifact_paths_are_scoped_by_fold() -> None:
@@ -61,3 +72,31 @@ def test_sequence_label_values_uses_sequence_end_labels() -> None:
     labels = sequence_label_values(DummyDataset())
 
     assert labels.tolist() == [1, 2, 1]
+
+
+def test_train_fold_rejects_missing_validation_sequences(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeDataset:
+        def __init__(self, length: int) -> None:
+            self.length = length
+
+        def __len__(self) -> int:
+            return self.length
+
+    def fake_build_dataset(_sequence_dir: Path, split: str, _sequence_window: int) -> FakeDataset:
+        return FakeDataset(1 if split == "train" else 0)
+
+    monkeypatch.setattr("run_training.build_dataset", fake_build_dataset)
+    config = load_config()
+
+    with pytest.raises(ValueError, match="No validation sequences"):
+        train_fold(
+            config=config,
+            fold_id="fold_001",
+            fold_sequence_dir=artifact_dir / "sequences" / "fold_001",
+            fold_log_dir=artifact_dir / "logs" / "fold_001",
+            fold_result_dir=artifact_dir / "results" / "fold_001",
+            run_stem="run_1",
+        )

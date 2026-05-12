@@ -609,11 +609,61 @@ class NormalizationConfig:
         )
 
 
+def _validate_split_dates(
+    context: str,
+    *,
+    train_dates: list[str],
+    validation_dates: list[str],
+    test_dates: list[str],
+) -> None:
+    missing = [
+        split_name
+        for split_name, dates in (
+            ("train_dates", train_dates),
+            ("validation_dates", validation_dates),
+            ("test_dates", test_dates),
+        )
+        if not dates
+    ]
+    if missing:
+        raise ValueError(f"{context} must provide non-empty {', '.join(missing)}.")
+
+    split_dates = {
+        "train": set(train_dates),
+        "validation": set(validation_dates),
+        "test": set(test_dates),
+    }
+    overlap_messages: list[str] = []
+    for left, right in (
+        ("train", "validation"),
+        ("train", "test"),
+        ("validation", "test"),
+    ):
+        overlap = split_dates[left] & split_dates[right]
+        if overlap:
+            overlap_messages.append(f"{left}/{right}: {sorted(overlap)}")
+    if overlap_messages:
+        raise ValueError(f"{context} assigns dates to multiple splits: " + "; ".join(overlap_messages))
+
+    if max(train_dates) >= min(validation_dates):
+        raise ValueError(f"{context} must have train dates strictly before validation dates.")
+    if max(validation_dates) >= min(test_dates):
+        raise ValueError(f"{context} must have validation dates strictly before test dates.")
+
+
 @dataclass(slots=True)
 class DatasetSplitConfig:
     train_dates: list[str]
     validation_dates: list[str]
     test_dates: list[str]
+
+    def __post_init__(self) -> None:
+        _validate_split_dates(
+            "dataset_splits",
+            train_dates=self.train_dates,
+            validation_dates=self.validation_dates,
+            test_dates=self.test_dates,
+        )
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "DatasetSplitConfig":
@@ -634,32 +684,12 @@ class FoldConfig:
     def __post_init__(self) -> None:
         if not self.id.strip():
             raise ValueError("folds[].id must be a non-empty string.")
-        if not self.train_dates:
-            raise ValueError(f"Fold {self.id} must provide at least one train date.")
-
-        split_dates = {
-            "train": set(self.train_dates),
-            "validation": set(self.validation_dates),
-            "test": set(self.test_dates),
-        }
-        overlap_messages: list[str] = []
-        for left, right in (
-            ("train", "validation"),
-            ("train", "test"),
-            ("validation", "test"),
-        ):
-            overlap = split_dates[left] & split_dates[right]
-            if overlap:
-                overlap_messages.append(f"{left}/{right}: {sorted(overlap)}")
-        if overlap_messages:
-            raise ValueError(f"Fold {self.id} assigns dates to multiple splits: " + "; ".join(overlap_messages))
-
-        if self.validation_dates and max(self.train_dates) >= min(self.validation_dates):
-            raise ValueError(f"Fold {self.id} must have train dates strictly before validation dates.")
-        if self.test_dates:
-            preceding_dates = self.validation_dates or self.train_dates
-            if max(preceding_dates) >= min(self.test_dates):
-                raise ValueError(f"Fold {self.id} must have validation/train dates strictly before test dates.")
+        _validate_split_dates(
+            f"Fold {self.id}",
+            train_dates=self.train_dates,
+            validation_dates=self.validation_dates,
+            test_dates=self.test_dates,
+        )
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "FoldConfig":
