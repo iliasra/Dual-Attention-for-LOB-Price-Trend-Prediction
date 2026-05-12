@@ -66,6 +66,67 @@ def test_fast_kinematic_config_values_are_loaded() -> None:
     assert config.preprocessing.volume_kinematic.fast.df == 20.0
 
 
+def test_adaptive_threshold_config_values_are_loaded() -> None:
+    config = load_config()
+    adaptive = config.preprocessing.labels.smoothing.adaptive_threshold
+
+    assert adaptive is not None
+    assert adaptive.enabled is True
+    assert adaptive.exit_spread_window == 100
+    assert adaptive.volatility_window == 100
+    assert adaptive.round_trip_fees_bps == 0.0
+    assert adaptive.volatility_lambda == 1.0
+
+
+def test_adaptive_threshold_config_is_optional_for_legacy_configs(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"].pop("adaptive_threshold", None)
+
+    config_path = artifact_dir / "no_adaptive_threshold.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.preprocessing.labels.smoothing.adaptive_threshold is None
+
+
+def test_adaptive_threshold_config_validates_window_lengths(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["exit_spread_window"] = 0
+
+    config_path = artifact_dir / "bad_adaptive_threshold_window.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="adaptive_threshold\\.exit_spread_window"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_adaptive_threshold_config_validates_non_negative_costs(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["round_trip_fees_bps"] = -1.0
+
+    config_path = artifact_dir / "bad_adaptive_threshold_fees.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="adaptive_threshold\\.round_trip_fees_bps"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_adaptive_threshold_config_validates_non_negative_lambda(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["volatility_lambda"] = -1.0
+
+    config_path = artifact_dir / "bad_adaptive_threshold_lambda.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="adaptive_threshold\\.volatility_lambda"):
+        ExperimentConfig.from_yaml(config_path)
+
+
 def test_explicit_folds_are_loaded() -> None:
     config = load_config()
 

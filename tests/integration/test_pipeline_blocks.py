@@ -294,7 +294,7 @@ def test_sequence_dataset_and_model_forward_use_matching_tensor_shapes(artifact_
     assert torch.isfinite(logits).all()
 
 
-def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path) -> None:
+def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
     raw_dir = artifact_dir / "raw"
     write_lobster_day(raw_dir, "TEST", "2020-01-01")
     write_lobster_day(raw_dir, "TEST", "2020-01-02")
@@ -323,6 +323,13 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path) -> N
     payload["preprocessing"]["snapshot_window"] = 4
     payload["preprocessing"]["labels"]["smoothing"]["k"] = 1
     payload["preprocessing"]["labels"]["smoothing"]["h"] = 1
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"] = {
+        "enabled": True,
+        "exit_spread_window": 2,
+        "volatility_window": 2,
+        "round_trip_fees_bps": 0.0,
+        "volatility_lambda": 0.0,
+    }
     payload["preprocessing"]["temporal_features"]["market_open_seconds"] = 0
     payload["preprocessing"]["temporal_features"]["market_close_seconds"] = 100000
     payload["preprocessing"]["temporal_features"]["start_offset_minutes"] = 0
@@ -334,10 +341,19 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path) -> N
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     summary = LobProcessingPipeline(ExperimentConfig.from_yaml(config_path)).run()
+    output = capsys.readouterr().out
 
     assert "fold_001" in summary
+    assert "fold_001 adaptive method C train label distribution:" in output
     assert (artifact_dir / "processed" / "fold_001" / "train" / "TEST_2020-01-01_processed.csv").exists()
     assert (artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-01_features.npy").exists()
     assert (artifact_dir / "sequences" / "fold_001" / "validation" / "TEST_2020-01-02_features.npy").exists()
-    assert (artifact_dir / "sequences" / "fold_001" / "preprocessing_metadata.yaml").exists()
+    metadata_path = artifact_dir / "sequences" / "fold_001" / "preprocessing_metadata.yaml"
+    assert metadata_path.exists()
     assert (artifact_dir / "derivatives" / "fold_001" / "derivatives_stats.yaml").exists()
+
+    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+    label_distribution = metadata["label_distribution"]
+    assert label_distribution["method"] == "smoothing_C_adaptive"
+    assert label_distribution["train"]["total"] > 0
+    assert set(label_distribution["train"]) >= {"-1", "0", "1"}

@@ -41,6 +41,13 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
                 "h": None,
                 "bid_column": None,
                 "ask_column": None,
+                "adaptive_threshold": {
+                    "enabled": None,
+                    "exit_spread_window": None,
+                    "volatility_window": None,
+                    "round_trip_fees_bps": None,
+                    "volatility_lambda": None,
+                },
             },
             "triple_barrier": {
                 "horizon": None,
@@ -152,6 +159,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
 }
 
 OPTIONAL_TOP_LEVEL_KEYS = {"folds"}
+OPTIONAL_CONFIG_KEYS = {"preprocessing.labels.smoothing.adaptive_threshold"}
 
 
 ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
@@ -190,6 +198,8 @@ def _validate_required_config(payload: Any, schema: dict[str, Any]) -> None:
         for key, child_schema in subtree.items():
             key_path = f"{prefix}.{key}" if prefix else key
             if key not in node:
+                if key_path in OPTIONAL_CONFIG_KEYS:
+                    continue
                 missing.append(key_path)
                 continue
             if isinstance(child_schema, dict):
@@ -426,6 +436,35 @@ class VolumeStaticConfig:
         )
 
 @dataclass(slots=True)
+class AdaptiveThresholdConfig:
+    enabled: bool
+    exit_spread_window: int
+    volatility_window: int
+    round_trip_fees_bps: float
+    volatility_lambda: float
+
+    def __post_init__(self) -> None:
+        if self.exit_spread_window <= 0:
+            raise ValueError("preprocessing.labels.smoothing.adaptive_threshold.exit_spread_window must be > 0.")
+        if self.volatility_window <= 0:
+            raise ValueError("preprocessing.labels.smoothing.adaptive_threshold.volatility_window must be > 0.")
+        if self.round_trip_fees_bps < 0:
+            raise ValueError("preprocessing.labels.smoothing.adaptive_threshold.round_trip_fees_bps must be >= 0.")
+        if self.volatility_lambda < 0:
+            raise ValueError("preprocessing.labels.smoothing.adaptive_threshold.volatility_lambda must be >= 0.")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AdaptiveThresholdConfig":
+        return cls(
+            enabled=bool(payload["enabled"]),
+            exit_spread_window=int(payload["exit_spread_window"]),
+            volatility_window=int(payload["volatility_window"]),
+            round_trip_fees_bps=float(payload["round_trip_fees_bps"]),
+            volatility_lambda=float(payload["volatility_lambda"]),
+        )
+
+
+@dataclass(slots=True)
 class SmoothingLabelConfig:
     method: str
     threshold: float | None
@@ -433,9 +472,11 @@ class SmoothingLabelConfig:
     h: int
     bid_column: str
     ask_column: str
+    adaptive_threshold: AdaptiveThresholdConfig | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SmoothingLabelConfig":
+        adaptive_payload = payload.get("adaptive_threshold")
         return cls(
             method=str(payload["method"]),
             threshold=None if payload["threshold"] is None else float(payload["threshold"]),
@@ -443,6 +484,9 @@ class SmoothingLabelConfig:
             h=int(payload["h"]),
             bid_column=str(payload["bid_column"]),
             ask_column=str(payload["ask_column"]),
+            adaptive_threshold=None
+            if adaptive_payload is None
+            else AdaptiveThresholdConfig.from_dict(adaptive_payload),
         )
 
 

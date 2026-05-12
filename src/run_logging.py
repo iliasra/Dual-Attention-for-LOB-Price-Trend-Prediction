@@ -113,6 +113,7 @@ def save_preprocessing_metadata(
     sequence_dir: Path,
     *,
     lambda_results: dict[str, dict[str, float]] | None = None,
+    label_distribution: dict[str, Any] | None = None,
 ) -> Path:
     lambdas = fast_smoothing_lambda_summary(config)
     if lambda_results:
@@ -126,6 +127,8 @@ def save_preprocessing_metadata(
         "sequence_data_dir": str(sequence_dir),
         "fast_smoothing_lambdas": lambdas,
     }
+    if label_distribution is not None:
+        payload["label_distribution"] = label_distribution
     target = preprocessing_metadata_path(sequence_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as handle:

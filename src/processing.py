@@ -385,6 +385,63 @@ class LobProcessingPipeline:
                 )
         print("Finished snapshot feature construction for all splits.")
 
+    def uses_adaptive_method_c_labels(self) -> bool:
+        label_config = self.config.preprocessing.labels
+        smoothing_config = label_config.smoothing
+        return (
+            label_config.strategy.lower() == "smoothing"
+            and smoothing_config.method.upper() == "C"
+            and smoothing_config.adaptive_threshold is not None
+            and smoothing_config.adaptive_threshold.enabled
+        )
+
+    def train_label_distribution(self, train_days: list[ProcessedDay]) -> dict[str, object] | None:
+        if not self.uses_adaptive_method_c_labels():
+            return None
+
+        label_column = self.config.data.label_column
+        label_values = [
+            day.labeled[label_column]
+            for day in train_days
+            if label_column in day.labeled.columns
+        ]
+        labels = pd.concat(label_values, ignore_index=True) if label_values else pd.Series(dtype=int)
+        total = int(len(labels))
+        distribution: dict[str, object] = {
+            "method": "smoothing_C_adaptive",
+            "train": {
+                "total": total,
+            },
+        }
+        train_distribution = distribution["train"]
+        if not isinstance(train_distribution, dict):
+            raise RuntimeError("Invalid label distribution payload.")
+
+        for class_value in (-1, 0, 1):
+            count = int((labels == class_value).sum())
+            train_distribution[str(class_value)] = {
+                "count": count,
+                "percentage": 0.0 if total == 0 else float(100.0 * count / total),
+            }
+        return distribution
+
+    @staticmethod
+    def print_label_distribution(fold_id: str, distribution: dict[str, object] | None) -> None:
+        if distribution is None:
+            return
+        train_distribution = distribution.get("train")
+        if not isinstance(train_distribution, dict):
+            return
+
+        print(f"{fold_id} adaptive method C train label distribution:")
+        for class_value in ("-1", "0", "1"):
+            class_distribution = train_distribution.get(class_value)
+            if not isinstance(class_distribution, dict):
+                continue
+            count = int(class_distribution.get("count", 0))
+            percentage = float(class_distribution.get("percentage", 0.0))
+            print(f"- class {int(class_value):>2}: {count} ({percentage:.2f}%)")
+
     def fold_derivatives_stats_path(self, fold_id: str) -> Path:
         return self.derivatives_stats_dir / fold_id / DERIVATIVES_STATS_FILENAME
 
@@ -453,6 +510,8 @@ class LobProcessingPipeline:
         print(f"Starting fold {fold.id}.")
         self.reset_fold_state()
         processed_splits = self.prepared_splits_for_fold(fold, split_pairs, prepared_days)
+        label_distribution = self.train_label_distribution(processed_splits["train"])
+        self.print_label_distribution(fold.id, label_distribution)
         self.optimize_fast_smoothing_lambdas(processed_splits["train"])
         self.build_snapshot_features(processed_splits)
         stats_path = self.fold_derivatives_stats_path(fold.id)
@@ -470,6 +529,7 @@ class LobProcessingPipeline:
             self.config,
             fold_sequence_dir,
             lambda_results=self.fast_smoothing_lambda_results,
+            label_distribution=label_distribution,
         )
         print(f"Saved preprocessing metadata for fold {fold.id} to {metadata_path}.")
         print(f"Finished fold {fold.id}.")

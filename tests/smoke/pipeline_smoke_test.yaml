@@ -34,6 +34,12 @@ preprocessing:
       h: 2
       bid_column: bid_price_1
       ask_column: ask_price_1
+      adaptive_threshold:
+        enabled: true
+        exit_spread_window: 8
+        volatility_window: 8
+        round_trip_fees_bps: 0.0
+        volatility_lambda: 1.0
     triple_barrier:
       horizon: 10
       upper_barrier_ticks: 2.0

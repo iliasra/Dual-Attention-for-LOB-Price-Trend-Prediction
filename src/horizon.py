@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 
 try:
-    from configuration import LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
+    from configuration import AdaptiveThresholdConfig, LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
 except ImportError:  # pragma: no cover
-    from .configuration import LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
+    from .configuration import AdaptiveThresholdConfig, LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
 
 
 def calculate_midprice(
@@ -75,18 +75,48 @@ def smoothing_method_C(midprices: pd.Series, k: int = 5, h: int = 10) -> pd.Seri
     return SmoothingMethodC(k=k, h=h)(midprices)
 
 
+def calculate_adaptive_method_c_threshold(
+    df: pd.DataFrame,
+    midprices: pd.Series,
+    *,
+    k: int,
+    h: int,
+    bid_col: str,
+    ask_col: str,
+    config: AdaptiveThresholdConfig,
+) -> pd.Series:
+    w_minus = midprices.rolling(window=k + 1).mean()
+    spread = calculate_spread(df, bid_col=bid_col, ask_col=ask_col)
+    exit_spread = spread.rolling(window=config.exit_spread_window).mean()
+    fee_price = midprices * config.round_trip_fees_bps / 10000.0
+    cost_floor = (((spread + exit_spread) / 2.0) + fee_price) / w_minus
+
+    if config.volatility_lambda == 0:
+        volatility_floor = pd.Series(0.0, index=midprices.index)
+    else:
+        realized_c_returns = w_minus.pct_change(periods=h)
+        local_sigma = realized_c_returns.rolling(window=config.volatility_window).std(ddof=0)
+        volatility_floor = config.volatility_lambda * local_sigma
+
+    threshold_values = np.maximum(cost_floor.to_numpy(dtype=float), volatility_floor.to_numpy(dtype=float))
+    return pd.Series(threshold_values, index=midprices.index)
+
+
 @dataclass(slots=True)
 class TrendThresholdClassifier:
-    threshold: float
+    threshold: float | pd.Series
 
     def __call__(self, l_values: pd.Series) -> pd.Series:
+        threshold = self.threshold
+        if isinstance(threshold, pd.Series):
+            threshold = threshold.reindex(l_values.index)
         labels = pd.Series(0, index=l_values.index, dtype=int)
-        labels[l_values > self.threshold] = 1
-        labels[l_values < -self.threshold] = -1
+        labels[l_values > threshold] = 1
+        labels[l_values < -threshold] = -1
         return labels
 
 
-def classify_trend(l_values: pd.Series, threshold: float) -> pd.Series:
+def classify_trend(l_values: pd.Series, threshold: float | pd.Series) -> pd.Series:
     return TrendThresholdClassifier(threshold=threshold)(l_values)
 
 
@@ -169,11 +199,28 @@ class TargetLabelPipeline:
             raise ValueError(f"Unknown smoothing method: {config.method}")
 
         threshold = config.threshold
-        if threshold is None:
+        if (
+            method_name == "C"
+            and config.adaptive_threshold is not None
+            and config.adaptive_threshold.enabled
+        ):
+            threshold = calculate_adaptive_method_c_threshold(
+                result,
+                midprices,
+                k=config.k,
+                h=config.h,
+                bid_col=config.bid_column,
+                ask_col=config.ask_column,
+                config=config.adaptive_threshold,
+            )
+        elif threshold is None:
             spread = calculate_spread(result, bid_col=config.bid_column, ask_col=config.ask_column)
             threshold = float((spread / midprices).mean())
 
-        valid_mask = pct_changes.notna()
+        valid_mask = pct_changes.notna() & np.isfinite(pct_changes)
+        if isinstance(threshold, pd.Series):
+            valid_mask = valid_mask & threshold.notna() & np.isfinite(threshold)
+            threshold = threshold.loc[valid_mask].reset_index(drop=True)
         result = result.loc[valid_mask].copy().reset_index(drop=True)
         pct_changes = pct_changes.loc[valid_mask].reset_index(drop=True)
         result["trend_label"] = TrendThresholdClassifier(threshold)(pct_changes)
@@ -221,6 +268,7 @@ def add_target_labels_smoothing(
             h=h,
             bid_column=bid_col,
             ask_column=ask_col,
+            adaptive_threshold=None,
         ),
         triple_barrier=TripleBarrierLabelConfig(
             horizon=10,
@@ -252,6 +300,7 @@ def add_target_labels_triple_barrier(
             h=10,
             bid_column=bid_col,
             ask_column=ask_col,
+            adaptive_threshold=None,
         ),
         triple_barrier=TripleBarrierLabelConfig(
             horizon=horizon,
