@@ -64,3 +64,38 @@ def test_gcv_optimization_returns_finite_lambda_and_score() -> None:
     assert np.isfinite(result.effective_df)
     np.testing.assert_allclose(result.gcv_score, gcv_score)
     np.testing.assert_allclose(result.effective_df, selected_df)
+
+
+def test_gcv_score_can_center_price_windows_before_smoothing() -> None:
+    ticks = np.arange(24, dtype=np.float64)
+    values = np.column_stack(
+        [
+            10_000.0 + 0.5 * ticks,
+            10_001.0 + 0.25 * ticks,
+        ]
+    )
+    centers = values[:, 0] - 1.0
+    shifted_values = values + 1_000_000.0
+    shifted_centers = centers + 1_000_000.0
+
+    base_score, base_df = mean_gcv_score(
+        values_by_day=[values],
+        centers_by_day=[centers],
+        scale=100.0,
+        window=8,
+        n_basis=6,
+        smoothing_lambda=1.0,
+        chunk_size=4,
+    )
+    shifted_score, shifted_df = mean_gcv_score(
+        values_by_day=[shifted_values],
+        centers_by_day=[shifted_centers],
+        scale=100.0,
+        window=8,
+        n_basis=6,
+        smoothing_lambda=1.0,
+        chunk_size=4,
+    )
+
+    np.testing.assert_allclose(shifted_score, base_score)
+    np.testing.assert_allclose(shifted_df, base_df)

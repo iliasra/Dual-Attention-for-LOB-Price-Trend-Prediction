@@ -366,12 +366,11 @@ def test_training_data_loader_settings_are_loaded() -> None:
 
     assert config.training.num_workers >= 0
     assert config.training.early_stopping_patience == 8
-    assert config.training.persistent_workers is False
     assert config.training.class_weights is None
     assert config.training.pin_memory is (config.training.device == "cuda")
     assert config.training.data_loader_kwargs() == {
         "num_workers": config.training.num_workers,
-        "persistent_workers": False,
+        "persistent_workers": config.training.persistent_workers,
         "pin_memory": config.training.device == "cuda",
     }
 

@@ -307,7 +307,7 @@ class LobProcessingPipeline:
         train_days: list[ProcessedDay],
         *,
         kind: str,
-    ) -> list[np.ndarray]:
+    ) -> tuple[list[np.ndarray], list[np.ndarray] | None, float]:
         if kind not in {"price", "volume"}:
             raise ValueError("kind must be 'price' or 'volume'.")
 
@@ -317,6 +317,12 @@ class LobProcessingPipeline:
             else self.config.preprocessing.volume_kinematic
         )
         values_by_day: list[np.ndarray] = []
+        centers_by_day: list[np.ndarray] | None = [] if kind == "price" else None
+        scale = (
+            self.config.preprocessing.price_kinematic.tick_size
+            if kind == "price"
+            else 1.0
+        )
         for day in train_days:
             columns = self.snapshot_processor.window_processor._resolve_stream_columns(
                 day.message_features,
@@ -329,7 +335,9 @@ class LobProcessingPipeline:
             if kind == "volume":
                 values = np.log1p(values)
             values_by_day.append(values)
-        return values_by_day
+            if centers_by_day is not None:
+                centers_by_day.append(calculate_midprice(day.message_features).to_numpy(dtype=float))
+        return values_by_day, centers_by_day, scale
 
     def _optimize_fast_stream_lambda(
         self,
@@ -347,11 +355,18 @@ class LobProcessingPipeline:
             return
 
         window = preprocessing.snapshot_window
-        values_by_day = [
-            values
-            for values in self._stream_values_for_lambda_optimization(train_days, kind=kind)
-            if len(values) >= window
-        ]
+        raw_values_by_day, raw_centers_by_day, scale = self._stream_values_for_lambda_optimization(
+            train_days,
+            kind=kind,
+        )
+        values_by_day: list[np.ndarray] = []
+        centers_by_day: list[np.ndarray] | None = [] if raw_centers_by_day is not None else None
+        for day_index, values in enumerate(raw_values_by_day):
+            if len(values) < window:
+                continue
+            values_by_day.append(values)
+            if centers_by_day is not None and raw_centers_by_day is not None:
+                centers_by_day.append(raw_centers_by_day[day_index])
         if not values_by_day:
             return
 
@@ -367,6 +382,8 @@ class LobProcessingPipeline:
             n_basis=fast_config.n_basis,
             max_df=fast_config.df,
             chunk_size=gcv_chunk_size,
+            centers_by_day=centers_by_day,
+            scale=scale,
         )
         fast_config.selected_smoothing_lambda = result.smoothing_lambda
         self.fast_smoothing_lambda_results[kind] = {

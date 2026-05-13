@@ -16,6 +16,7 @@ try:
         KINEMATIC_SUFFIXES,
         PenalizedBSplineKinematicTokenizer,
         lambda_for_effective_degrees_of_freedom,
+        sliding_windows_2d,
     )
     from utils import save_yaml
 except ImportError:  # pragma: no cover
@@ -24,6 +25,7 @@ except ImportError:  # pragma: no cover
         KINEMATIC_SUFFIXES,
         PenalizedBSplineKinematicTokenizer,
         lambda_for_effective_degrees_of_freedom,
+        sliding_windows_2d,
     )
     from .utils import save_yaml
 
@@ -459,16 +461,36 @@ def _fast_price_tokens(
     n_windows = len(df) - window + 1
     if not columns:
         return _empty_kinematic_tokens(n_windows)
+    if tick_size <= 0:
+        raise ValueError("tick_size must be > 0 for fast price kinematic centering.")
 
     tokenizer = _make_fast_tokenizer(window, fast_config, chunk_size)
     values = df[columns].to_numpy(dtype=np.float64)
-    tokens = tokenizer.transform_values(values, progress_desc=progress_desc)
-
     best_bid, best_ask = _best_prices(df)
     centers = ((best_bid.to_numpy(dtype=np.float64) + best_ask.to_numpy(dtype=np.float64)) * 0.5)[:n_windows]
-    constant_response = tokenizer.H @ np.ones(window, dtype=np.float64)
 
-    return (tokens - centers[:, None, None] * constant_response[None, None, :]) / tick_size
+    output = np.empty((n_windows, len(columns), len(KINEMATIC_SUFFIXES)), dtype=np.float64)
+    progress = tqdm(total=n_windows, desc=progress_desc, unit="rows", mininterval=5) if progress_desc else None
+
+    try:
+        for start in range(0, n_windows, chunk_size):
+            stop = min(start + chunk_size, n_windows)
+            block = values[start : stop + window - 1]
+            windows = sliding_windows_2d(block, window)
+            centered_windows = (windows - centers[start:stop, None, None]) / tick_size
+            output[start:stop] = np.einsum(
+                "dw,mwf->mfd",
+                tokenizer.H,
+                centered_windows,
+                optimize=True,
+            )
+            if progress is not None:
+                progress.update(stop - start)
+    finally:
+        if progress is not None:
+            progress.close()
+
+    return output
 
 
 def _fast_volume_tokens(

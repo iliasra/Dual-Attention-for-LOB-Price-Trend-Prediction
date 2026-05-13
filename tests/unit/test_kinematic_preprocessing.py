@@ -30,6 +30,7 @@ from kinematic_preprocessing import (
     PriceStaticProcessor,
     SnapshotBatchProcessor,
     VolumeStaticProcessor,
+    _fast_price_tokens,
     _static_centering,
     fit_exp_scaling_parameters,
     fit_plgs_parameters,
@@ -38,6 +39,7 @@ from kinematic_preprocessing import (
     plgs_value,
     time_to_sincos,
 )
+from fast_kinematic_preprocessing import PenalizedBSplineKinematicTokenizer
 
 
 def test_handle_abnormal_prices_drops_complete_ghost_levels() -> None:
@@ -138,6 +140,49 @@ def test_fit_exp_scaling_parameters_uses_quantile_and_target() -> None:
     np.testing.assert_allclose(result["k"], expected_k)
     np.testing.assert_allclose(1.0 - np.exp(-expected_quantile / result["k"]), 0.5)
     assert result["n_values"] == len(values)
+
+
+def test_fast_price_tokens_center_windows_before_spline_filtering() -> None:
+    df = pd.DataFrame(
+        {
+            "bid_price_1": [99.0, 100.0, 101.0, 102.0],
+            "ask_price_1": [101.0, 102.0, 103.0, 104.0],
+            "ask_price_2": [102.0, 103.0, 104.0, 105.0],
+        }
+    )
+    fast_config = FastKinematicConfig(
+        n_basis=4,
+        df=4.0,
+        eval_at=1.0,
+        selected_smoothing_lambda=0.0,
+    )
+    window = 3
+    tick_size = 2.0
+
+    tokens = _fast_price_tokens(
+        df,
+        ["ask_price_1", "ask_price_2"],
+        window=window,
+        tick_size=tick_size,
+        fast_config=fast_config,
+        chunk_size=2,
+    )
+    tokenizer = PenalizedBSplineKinematicTokenizer(
+        window=window,
+        n_basis=fast_config.n_basis,
+        smoothing_lambda=0.0,
+        eval_at=fast_config.eval_at,
+        chunk_size=2,
+        dtype=np.float64,
+    )
+    centers = ((df["bid_price_1"] + df["ask_price_1"]) * 0.5).to_numpy(dtype=float)
+    values = df[["ask_price_1", "ask_price_2"]].to_numpy(dtype=float)
+    expected = []
+    for start in range(len(df) - window + 1):
+        centered_window = (values[start : start + window] - centers[start]) / tick_size
+        expected.append(np.einsum("dw,wf->fd", tokenizer.H, centered_window, optimize=True))
+
+    np.testing.assert_allclose(tokens, np.asarray(expected))
 
 
 def test_message_orderbook_joiner_copies_time_and_delta_t() -> None:

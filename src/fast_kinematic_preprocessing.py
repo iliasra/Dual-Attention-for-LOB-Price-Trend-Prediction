@@ -246,15 +246,23 @@ def mean_gcv_score(
     degree: int = 3,
     ridge: float = 1e-8,
     chunk_size: int = 4096,
+    centers_by_day: list[np.ndarray] | None = None,
+    scale: float = 1.0,
 ) -> tuple[float, float]:
     """
     Computes the mean per-window GCV score over all train windows.
 
     GCV(window) = (||y - Sy||^2 / W) / (1 - df / W)^2.
     Multiple features are averaged as independent spline windows.
+    If centers_by_day is provided, each window is centered by its start
+    center and divided by scale before fitting/scoring.
     """
     if chunk_size <= 0:
         raise ValueError("chunk_size must be > 0.")
+    if scale <= 0:
+        raise ValueError("scale must be > 0.")
+    if centers_by_day is not None and len(centers_by_day) != len(values_by_day):
+        raise ValueError("centers_by_day must match values_by_day length.")
 
     smoother = bspline_smoother_matrix(
         window=window,
@@ -272,7 +280,7 @@ def mean_gcv_score(
 
     total_score = 0.0
     total_count = 0
-    for values in values_by_day:
+    for day_index, values in enumerate(values_by_day):
         values = np.asarray(values, dtype=np.float64)
         if values.ndim != 2:
             raise ValueError(f"Expected train values with shape [N, F], got {values.shape}.")
@@ -280,11 +288,20 @@ def mean_gcv_score(
         n_windows = n_rows - window + 1
         if n_windows <= 0 or n_features == 0:
             continue
+        centers = None
+        if centers_by_day is not None:
+            centers = np.asarray(centers_by_day[day_index], dtype=np.float64)
+            if len(centers) < n_windows:
+                raise ValueError(
+                    f"Expected at least {n_windows} centers for train day {day_index}, got {len(centers)}."
+                )
 
         for start in range(0, n_windows, chunk_size):
             stop = min(start + chunk_size, n_windows)
             block = values[start : stop + window - 1]
             windows = sliding_windows_2d(block, window)
+            if centers is not None:
+                windows = (windows - centers[start:stop, None, None]) / scale
             fitted = np.einsum("ij,mjf->mif", smoother, windows, optimize=True)
             rss = np.sum((windows - fitted) ** 2, axis=1)
             scores = (rss / float(window)) / denominator
@@ -306,6 +323,8 @@ def optimize_smoothing_lambda_gcv(
     ridge: float = 1e-8,
     chunk_size: int = 4096,
     n_df_candidates: int = 25,
+    centers_by_day: list[np.ndarray] | None = None,
+    scale: float = 1.0,
 ) -> GCVOptimizationResult:
     """
     Selects lambda by minimizing mean train GCV under an effective-df budget.
@@ -363,6 +382,8 @@ def optimize_smoothing_lambda_gcv(
             degree=degree,
             ridge=ridge,
             chunk_size=chunk_size,
+            centers_by_day=centers_by_day,
+            scale=scale,
         )
         result = GCVOptimizationResult(
             smoothing_lambda=float(smoothing_lambda),
