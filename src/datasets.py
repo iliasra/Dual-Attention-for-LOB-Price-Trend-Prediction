@@ -104,11 +104,20 @@ class LOBDataset(Dataset):
         if not (len(self.X_data) == len(self.T_data) == len(self.y_data)):
             raise ValueError("x_paths, t_paths, and y_paths must contain the same number of files.")
 
+        expected_num_features: int | None = None
         for day_idx, (features, times, labels) in enumerate(zip(self.X_data, self.T_data, self.y_data)):
             if features.ndim != 2:
                 raise ValueError(
                     f"Feature file at index {day_idx} must contain compact features with shape "
                     "[num_rows, num_features]."
+                )
+            num_features = int(features.shape[1])
+            if expected_num_features is None:
+                expected_num_features = num_features
+            elif num_features != expected_num_features:
+                raise ValueError(
+                    f"Feature file at index {day_idx} has {num_features} feature columns, "
+                    f"expected {expected_num_features}. All features.npy files must share shape[1]."
                 )
             if times.ndim != 1:
                 raise ValueError(

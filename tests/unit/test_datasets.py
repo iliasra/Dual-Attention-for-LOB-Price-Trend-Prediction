@@ -102,6 +102,30 @@ def test_lob_dataset_getitem_returns_sequence_window_starting_at_idx(artifact_di
     assert y_label.item() == 0
 
 
+def test_lob_dataset_rejects_inconsistent_feature_widths(artifact_dir: Path) -> None:
+    x_path_1 = artifact_dir / "day_1_features.npy"
+    x_path_2 = artifact_dir / "day_2_features.npy"
+    t_path_1 = artifact_dir / "day_1_times.npy"
+    t_path_2 = artifact_dir / "day_2_times.npy"
+    y_path_1 = artifact_dir / "day_1_labels.npy"
+    y_path_2 = artifact_dir / "day_2_labels.npy"
+
+    np.save(x_path_1, np.ones((4, 2), dtype=np.float32))
+    np.save(x_path_2, np.ones((4, 3), dtype=np.float32))
+    np.save(t_path_1, np.arange(4, dtype=np.float32))
+    np.save(t_path_2, np.arange(4, dtype=np.float32))
+    np.save(y_path_1, np.zeros(4, dtype=np.int64))
+    np.save(y_path_2, np.zeros(4, dtype=np.int64))
+
+    with pytest.raises(ValueError, match="index 1.*expected 2"):
+        LOBDataset(
+            [str(x_path_1), str(x_path_2)],
+            [str(t_path_1), str(t_path_2)],
+            [str(y_path_1), str(y_path_2)],
+            sequence_window=2,
+        )
+
+
 def test_build_rejects_unknown_labels() -> None:
     df = pd.DataFrame(
         {

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
 
 try:
     from configuration import ExperimentConfig, FoldConfig, load_config
@@ -54,6 +55,7 @@ except ImportError:  # pragma: no cover
 
 SPLIT_NAMES = ("train", "validation", "test")
 DERIVATIVES_STATS_FILENAME = "derivatives_stats.yaml"
+FEATURE_SCHEMA_FILENAME = "feature_schema.yaml"
 
 
 @dataclass(slots=True)
@@ -650,6 +652,9 @@ class LobProcessingPipeline:
     def fold_derivatives_stats_path(self, fold_id: str) -> Path:
         return self.derivatives_stats_dir / fold_id / DERIVATIVES_STATS_FILENAME
 
+    def fold_feature_schema_path(self, fold_id: str) -> Path:
+        return self.sequence_dir / fold_id / FEATURE_SCHEMA_FILENAME
+
     def fit_train_normalizer(self, train_days: list[ProcessedDay], stats_path: Path | None = None) -> DerivativeNormalizer:
         print(f"Fitting derivative normalizer on {len(train_days)} training day(s).")
         target_stats_path = stats_path or (self.derivatives_stats_dir / DERIVATIVES_STATS_FILENAME)
@@ -674,6 +679,52 @@ class LobProcessingPipeline:
                     raise ValueError(f"{day.pair.label} has not been snapshot-processed yet.")
                 day.normalized = normalizer.transform(day.processed)
         print("Finished normalization for all splits.")
+
+    def apply_feature_schema(self, processed_splits: dict[str, list[ProcessedDay]], schema_path: Path) -> list[str]:
+        train_days = processed_splits.get("train", [])
+        if not train_days:
+            raise ValueError("Cannot build feature schema: no training day is available.")
+        if train_days[0].normalized is None:
+            raise ValueError(f"{train_days[0].pair.label} has not been normalized yet.")
+
+        ordered_feature_columns = self.sequence_builder.feature_columns(train_days[0].normalized)
+        if not ordered_feature_columns:
+            raise ValueError("Cannot build feature schema: the first training day has no feature columns.")
+
+        expected_features = set(ordered_feature_columns)
+        excluded_columns = {
+            self.config.data.time_column,
+            self.config.data.label_column,
+            *self.config.data.feature_exclude_columns,
+        }
+        for split in SPLIT_NAMES:
+            for day in processed_splits.get(split, []):
+                if day.normalized is None:
+                    raise ValueError(f"{day.pair.label} in split {split} has not been normalized yet.")
+                current_feature_columns = self.sequence_builder.feature_columns(day.normalized)
+                current_features = set(current_feature_columns)
+                missing = sorted(expected_features - current_features)
+                extra = sorted(current_features - expected_features)
+                if missing or extra:
+                    raise ValueError(
+                        f"Feature schema mismatch for {day.pair.label} ({split}): "
+                        f"missing columns={missing}, extra columns={extra}."
+                    )
+
+                non_feature_columns = [column for column in day.normalized.columns if column in excluded_columns]
+                day.normalized = day.normalized.loc[:, non_feature_columns + ordered_feature_columns]
+
+        schema_path.parent.mkdir(parents=True, exist_ok=True)
+        schema_path.write_text(
+            yaml.safe_dump(
+                {"ordered_feature_columns": ordered_feature_columns},
+                sort_keys=False,
+                allow_unicode=False,
+            ),
+            encoding="utf-8",
+        )
+        print(f"Saved feature schema with {len(ordered_feature_columns)} columns to {schema_path}.")
+        return ordered_feature_columns
 
     def save_split_outputs(
         self,
@@ -727,6 +778,7 @@ class LobProcessingPipeline:
 
         fold_processed_dir = self.processed_dir / fold.id
         fold_sequence_dir = self.sequence_dir / fold.id
+        self.apply_feature_schema(processed_splits, self.fold_feature_schema_path(fold.id))
         self.save_split_outputs(
             processed_splits,
             processed_dir=fold_processed_dir,

@@ -1,2 +1,2 @@
-"""Core package for the thesis refactor."""
+"""Core package for the thesis."""
 

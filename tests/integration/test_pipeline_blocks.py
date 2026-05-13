@@ -39,7 +39,7 @@ from kinematic_preprocessing import (
     SnapshotBatchProcessor,
 )
 from model import build_model
-from processing import LobProcessingPipeline
+from processing import LobFilePair, LobProcessingPipeline, ProcessedDay
 
 
 @pytest.fixture()
@@ -353,14 +353,19 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert "Selected price static PLGS parameters from train:" in output
     assert "Selected volume static exponential scaling from train:" in output
     assert (artifact_dir / "processed" / "fold_001" / "train" / "TEST_2020-01-01_processed.csv").exists()
-    assert (artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-01_features.npy").exists()
+    train_features_path = artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-01_features.npy"
+    assert train_features_path.exists()
     assert (artifact_dir / "sequences" / "fold_001" / "validation" / "TEST_2020-01-02_features.npy").exists()
     assert (artifact_dir / "sequences" / "fold_001" / "test" / "TEST_2020-01-03_features.npy").exists()
     metadata_path = artifact_dir / "sequences" / "fold_001" / "preprocessing_metadata.yaml"
+    feature_schema_path = artifact_dir / "sequences" / "fold_001" / "feature_schema.yaml"
     assert metadata_path.exists()
+    assert feature_schema_path.exists()
     assert (artifact_dir / "derivatives" / "fold_001" / "derivatives_stats.yaml").exists()
 
     metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+    feature_schema = yaml.safe_load(feature_schema_path.read_text(encoding="utf-8"))
+    assert len(feature_schema["ordered_feature_columns"]) == np.load(train_features_path).shape[1]
     label_distribution = metadata["label_distribution"]
     assert label_distribution["method"] == "smoothing_C_adaptive"
     assert label_distribution["train"]["total"] > 0
@@ -379,3 +384,53 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert volume_metadata["target"] == payload["preprocessing"]["volume_static"]["target"]
     assert volume_metadata["k"] > 0.0
     assert volume_metadata["n_values"] > 0
+
+
+def test_feature_schema_rejects_missing_or_extra_split_columns(artifact_dir: Path) -> None:
+    data_config, _ = make_test_configs()
+    pipeline = object.__new__(LobProcessingPipeline)
+    pipeline.config = type("Config", (), {"data": data_config})()
+    pipeline.sequence_builder = DailySequenceBuilder(data_config)
+
+    def make_processed_day(split: str, date: str, df: pd.DataFrame) -> ProcessedDay:
+        pair = LobFilePair(
+            symbol="TEST",
+            date=date,
+            message_path=artifact_dir / f"{date}_message.csv",
+            orderbook_path=artifact_dir / f"{date}_orderbook.csv",
+        )
+        return ProcessedDay(
+            split=split,
+            pair=pair,
+            raw=df,
+            joined=df,
+            labeled=df,
+            message_features=df,
+            processed=df,
+            normalized=df.copy(),
+        )
+
+    train_df = pd.DataFrame(
+        {
+            "time": [1.0, 2.0, 3.0],
+            "trend_label": [0, 0, 1],
+            "feature_a": [1.0, 2.0, 3.0],
+            "feature_b": [4.0, 5.0, 6.0],
+        }
+    )
+    validation_df = pd.DataFrame(
+        {
+            "time": [1.0, 2.0, 3.0],
+            "trend_label": [0, 1, 1],
+            "feature_a": [1.0, 2.0, 3.0],
+            "feature_c": [7.0, 8.0, 9.0],
+        }
+    )
+    processed_splits = {
+        "train": [make_processed_day("train", "2020-01-01", train_df)],
+        "validation": [make_processed_day("validation", "2020-01-02", validation_df)],
+        "test": [],
+    }
+
+    with pytest.raises(ValueError, match="Feature schema mismatch.*missing columns=.*feature_b.*extra columns=.*feature_c"):
+        pipeline.apply_feature_schema(processed_splits, artifact_dir / "feature_schema.yaml")
