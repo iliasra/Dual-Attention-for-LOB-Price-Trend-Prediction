@@ -45,11 +45,24 @@ def test_config_loader_reports_invalid_allowed_value(artifact_dir: Path) -> None
 def test_tick_size_is_inherited_from_data_config() -> None:
     config = load_config()
 
+    assert config.seed == 42
     assert config.data.tick_size == 100.0
     assert config.data.logs_dir == "../logs"
     assert config.preprocessing.message.tick_size == config.data.tick_size
     assert config.preprocessing.price_kinematic.tick_size == config.data.tick_size
     assert config.preprocessing.price_static.tick_size == config.data.tick_size
+
+
+def test_config_loader_reports_negative_seed(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["seed"] = -1
+
+    broken_config_path = artifact_dir / "negative_seed.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="seed"):
+        ExperimentConfig.from_yaml(broken_config_path)
 
 
 def test_fast_kinematic_config_values_are_loaded() -> None:

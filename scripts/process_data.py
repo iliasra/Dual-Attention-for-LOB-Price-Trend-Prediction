@@ -8,11 +8,16 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from configuration import load_config
 from processing import LobProcessingPipeline
+from utils import set_global_seed
 
 
 def main() -> None:
-    summary = LobProcessingPipeline().run()
+    config = load_config()
+    set_global_seed(config.seed)
+    print(f"Global seed set to {config.seed}.")
+    summary = LobProcessingPipeline(config).run()
     for fold_id, split_summary in summary.items():
         print(fold_id)
         for split, shapes in split_summary.items():

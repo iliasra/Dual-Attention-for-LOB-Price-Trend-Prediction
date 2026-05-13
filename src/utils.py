@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import random
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,45 @@ def to_python_type(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return value.tolist()
     return value
+
+
+def set_global_seed(seed: int, *, deterministic_torch: bool = True) -> None:
+    """Seed Python, NumPy, and PyTorch RNGs for reproducible runs."""
+    seed = int(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
+    try:
+        import torch
+    except ImportError:  # pragma: no cover - torch is optional for preprocessing-only use.
+        return
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if deterministic_torch:
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
+
+def torch_generator_from_seed(seed: int) -> Any:
+    """Create a CPU torch.Generator seeded for deterministic DataLoader shuffling."""
+    import torch
+
+    generator = torch.Generator()
+    generator.manual_seed(int(seed))
+    return generator
+
+
+def seed_torch_worker(worker_id: int) -> None:
+    """Seed NumPy and Python RNGs inside a PyTorch DataLoader worker."""
+    import torch
+
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def deep_update(original: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:

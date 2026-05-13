@@ -27,6 +27,7 @@ from run_logging import (
     save_run_summary,
 )
 from training import LobTrainer, class_weights_from_sequence_labels
+from utils import seed_torch_worker, set_global_seed, torch_generator_from_seed
 
 
 def sequence_paths(sequence_dir: Path, split: str) -> tuple[list[str], list[str], list[str]]:
@@ -152,8 +153,12 @@ def train_fold(
     fold_log_dir: Path,
     fold_result_dir: Path,
     run_stem: str,
+    seed: int | None = None,
 ) -> dict:
+    fold_seed = config.seed if seed is None else int(seed)
+    set_global_seed(fold_seed)
     print(f"Starting training fold '{fold_id}'.")
+    print(f"Fold '{fold_id}' global seed: {fold_seed}.")
     print(f"Fold '{fold_id}' sequence directory: {fold_sequence_dir}")
     print(f"Fold '{fold_id}' log directory: {fold_log_dir}")
     print(f"Fold '{fold_id}' result directory: {fold_result_dir}")
@@ -201,10 +206,12 @@ def train_fold(
     )
 
     loader_kwargs = config.training.data_loader_kwargs()
+    loader_kwargs["worker_init_fn"] = seed_torch_worker
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.training.batch_size,
         shuffle=True,
+        generator=torch_generator_from_seed(fold_seed),
         **loader_kwargs,
     )
     validation_loader = DataLoader(
@@ -298,6 +305,8 @@ def train_fold(
 
 def main() -> None:
     config = load_config()
+    set_global_seed(config.seed)
+    print(f"Global seed set to {config.seed}.")
     sequence_dir = resolve_config_path(config, config.data.sequence_data_dir)
     logs_dir = resolve_config_path(config, config.data.logs_dir)
     run_stem = next_run_stem(logs_dir)
@@ -307,6 +316,7 @@ def main() -> None:
 
     summary = {
         "run": run_stem,
+        "seed": config.seed,
         "config": str(config.path),
         "log_dir": str(run_log_dir),
         "result_dir": str(run_result_dir),
@@ -328,6 +338,7 @@ def main() -> None:
             fold_log_dir=paths["log_dir"],
             fold_result_dir=paths["result_dir"],
             run_stem=run_stem,
+            seed=config.seed,
         )
         summary["folds"][fold.id] = fold_summary
 

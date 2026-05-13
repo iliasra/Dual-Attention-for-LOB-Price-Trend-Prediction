@@ -1,3 +1,5 @@
+seed: 42
+
 data:
   raw_data_dir: ../data/LOBSTER_artificial_3days
   processed_data_dir: ../data/processed_dataframes

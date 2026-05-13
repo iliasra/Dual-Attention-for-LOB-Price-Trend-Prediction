@@ -11,6 +11,7 @@ BEST_MODEL_FILENAME = "best_lob_transformer.pth"
 
 
 REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
+    "seed": None,
     "data": {
         "raw_data_dir": None,
         "processed_data_dir": None,
@@ -901,6 +902,7 @@ class TrainingConfig:
 @dataclass(slots=True)
 class ExperimentConfig:
     path: Path
+    seed: int
     data: DataConfig
     dataset_splits: DatasetSplitConfig
     folds: list[FoldConfig]
@@ -919,9 +921,13 @@ class ExperimentConfig:
 
         data_config = DataConfig.from_dict(payload["data"])
         dataset_splits = DatasetSplitConfig.from_dict(payload["dataset_splits"])
+        seed = int(_require_explicit_value(payload["seed"], "seed"))
+        if seed < 0:
+            raise ValueError("Invalid experiment config; seed must be >= 0.")
 
         return cls(
             path=config_path.resolve(),
+            seed=seed,
             data=data_config,
             dataset_splits=dataset_splits,
             folds=_folds_from_payload(payload, dataset_splits),
