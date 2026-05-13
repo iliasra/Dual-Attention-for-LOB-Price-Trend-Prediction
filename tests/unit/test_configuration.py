@@ -154,6 +154,44 @@ def test_smoothing_threshold_string_none_is_loaded_as_none_with_adaptive_thresho
     assert loaded.preprocessing.labels.smoothing.adaptive_threshold.enabled is True
 
 
+def test_smoothing_config_validates_non_negative_k(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["k"] = -1
+
+    config_path = artifact_dir / "bad_smoothing_k.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="smoothing\\.k"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_smoothing_config_validates_positive_h(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["h"] = 0
+
+    config_path = artifact_dir / "bad_smoothing_h.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="smoothing\\.h"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_smoothing_method_c_requires_k_strictly_less_than_h(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["method"] = "C"
+    payload["preprocessing"]["labels"]["smoothing"]["k"] = 5
+    payload["preprocessing"]["labels"]["smoothing"]["h"] = 5
+
+    config_path = artifact_dir / "bad_smoothing_c_windows.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="method C requires k < h"):
+        ExperimentConfig.from_yaml(config_path)
+
+
 def test_adaptive_threshold_config_is_optional_for_legacy_configs(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
@@ -330,11 +368,11 @@ def test_training_data_loader_settings_are_loaded() -> None:
     assert config.training.early_stopping_patience == 8
     assert config.training.persistent_workers is False
     assert config.training.class_weights is None
-    assert config.training.pin_memory is False
+    assert config.training.pin_memory is (config.training.device == "cuda")
     assert config.training.data_loader_kwargs() == {
         "num_workers": config.training.num_workers,
         "persistent_workers": False,
-        "pin_memory": False,
+        "pin_memory": config.training.device == "cuda",
     }
 
 

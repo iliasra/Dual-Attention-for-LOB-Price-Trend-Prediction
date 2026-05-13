@@ -256,7 +256,7 @@ def _make_static_refactor_config(method: str) -> tuple[DataConfig, Preprocessing
                 method="C",
                 threshold=0.0,
                 k=1,
-                h=1,
+                h=2,
                 bid_column="bid_price_1",
                 ask_column="ask_price_1",
             ),

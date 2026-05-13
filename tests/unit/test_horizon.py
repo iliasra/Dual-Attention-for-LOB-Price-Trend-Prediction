@@ -5,6 +5,7 @@ import pandas as pd
 
 from configuration import AdaptiveThresholdConfig, LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
 from horizon import (
+    SmoothingMethodC,
     SmoothingMethodA,
     TargetLabelPipeline,
     TrendThresholdClassifier,
@@ -94,6 +95,15 @@ def test_smoothing_method_a_uses_future_rolling_mean() -> None:
     assert result.isna().iloc[-1]
 
 
+def test_smoothing_method_c_validates_windows() -> None:
+    for k, h in [(-1, 2), (1, 0), (2, 2)]:
+        try:
+            SmoothingMethodC(k=k, h=h)
+        except ValueError:
+            continue
+        raise AssertionError(f"Expected SmoothingMethodC to reject k={k}, h={h}.")
+
+
 def test_trend_threshold_classifier_maps_three_classes() -> None:
     values = pd.Series([-0.20, -0.05, 0.0, 0.05, 0.20])
 
@@ -155,14 +165,14 @@ def test_target_label_pipeline_keeps_constant_threshold_when_adaptive_threshold_
     )
 
     constant_result = TargetLabelPipeline(
-        make_smoothing_config(method="C", threshold=0.001, k=1, h=1)
+        make_smoothing_config(method="C", threshold=0.001, k=1, h=2)
     ).transform(df)
     disabled_result = TargetLabelPipeline(
         make_smoothing_config(
             method="C",
             threshold=0.001,
             k=1,
-            h=1,
+            h=2,
             adaptive_threshold=disabled_adaptive,
         )
     ).transform(df)
@@ -190,7 +200,7 @@ def test_calculate_adaptive_method_c_threshold_uses_cost_floor() -> None:
         df,
         midprices,
         k=1,
-        h=1,
+        h=2,
         bid_col="bid_price_1",
         ask_col="ask_price_1",
         config=config,
@@ -223,7 +233,7 @@ def test_calculate_adaptive_method_c_threshold_components_expose_floor_dominance
         df,
         midprices,
         k=1,
-        h=1,
+        h=2,
         bid_col="bid_price_1",
         ask_col="ask_price_1",
         config=config,
@@ -297,7 +307,7 @@ def test_target_label_pipeline_uses_adaptive_threshold_for_method_c() -> None:
         method="C",
         threshold=1.0,
         k=1,
-        h=1,
+        h=2,
         adaptive_threshold=AdaptiveThresholdConfig(
             enabled=True,
             exit_spread_window=2,

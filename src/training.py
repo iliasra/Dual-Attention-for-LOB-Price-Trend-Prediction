@@ -297,45 +297,26 @@ class LobTrainer:
                 criterion=criterion,
                 description=f"Epoch {epoch + 1}/{self.config.epochs} [Val]",
             )
-            test_result = None
-            if test_loader is not None:
-                test_result = self.evaluate(
-                    model=model,
-                    data_loader=test_loader,
-                    criterion=criterion,
-                    description=f"Epoch {epoch + 1}/{self.config.epochs} [Test]",
-                )
             scheduler.step()
             history.append(
                 EpochResult(
                     train_loss=train_result.loss,
                     val_loss=val_result.loss,
-                    test_loss=None if test_result is None else test_result.loss,
                     train_metrics=train_result.metrics,
                     val_metrics=val_result.metrics,
-                    test_metrics=None if test_result is None else test_result.metrics,
                 )
             )
 
             if val_result.loss < best_val_loss:
                 best_val_loss = val_result.loss
                 best_epoch = epoch + 1
-                best_test_result = test_result
                 epochs_without_improvement = 0
                 best_path = Path(self.config.best_model_path)
                 best_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(model.state_dict(), best_path)
-                test_suffix = ""
-                if test_result is not None:
-                    test_suffix = (
-                        f", test_loss={test_result.loss:.6f}, "
-                        f"test_acc={test_result.metrics.accuracy:.4f}, "
-                        f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
-                        f"test_ece={test_result.metrics.expected_calibration_error:.4f}"
-                    )
                 print(
                     f"Saved new best model to {best_path} from epoch {best_epoch} "
-                    f"with val_loss={best_val_loss:.6f}{test_suffix}."
+                    f"with val_loss={best_val_loss:.6f}."
                 )
             else:
                 epochs_without_improvement += 1
@@ -346,15 +327,7 @@ class LobTrainer:
                 f"train_acc={train_result.metrics.accuracy:.4f}, "
                 f"val_acc={val_result.metrics.accuracy:.4f}, "
                 f"val_macro_f1={val_result.metrics.macro_f1:.4f}, "
-                f"val_ece={val_result.metrics.expected_calibration_error:.4f}"
-                + (
-                    f", test_loss={test_result.loss:.6f}, "
-                    f"test_acc={test_result.metrics.accuracy:.4f}, "
-                    f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
-                    f"test_ece={test_result.metrics.expected_calibration_error:.4f}."
-                    if test_result is not None
-                    else "."
-                )
+                f"val_ece={val_result.metrics.expected_calibration_error:.4f}."
             )
             if (
                 self.config.early_stopping_patience > 0
@@ -368,8 +341,19 @@ class LobTrainer:
                 break
 
         if best_epoch:
+            best_path = Path(self.config.best_model_path)
+            model.load_state_dict(torch.load(best_path, map_location=self.device, weights_only=True))
             best_suffix = ""
-            if best_test_result is not None:
+            if test_loader is not None:
+                best_test_result = self.evaluate(
+                    model=model,
+                    data_loader=test_loader,
+                    criterion=criterion,
+                    description=f"Best epoch {best_epoch} [Test]",
+                )
+                best_history = history[best_epoch - 1]
+                best_history.test_loss = best_test_result.loss
+                best_history.test_metrics = best_test_result.metrics
                 best_suffix = (
                     f", test_loss={best_test_result.loss:.6f}, "
                     f"test_acc={best_test_result.metrics.accuracy:.4f}, "

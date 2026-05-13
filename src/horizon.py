@@ -37,6 +37,10 @@ class SmoothingStrategy(Protocol):
 class SmoothingMethodA:
     k: int = 10
 
+    def __post_init__(self) -> None:
+        if self.k < 0:
+            raise ValueError("SmoothingMethodA requires k >= 0.")
+
     def __call__(self, midprices: pd.Series) -> pd.Series:
         m_plus = midprices.rolling(window=self.k + 1).mean().shift(-self.k)
         return (m_plus - midprices) / midprices
@@ -45,6 +49,10 @@ class SmoothingMethodA:
 @dataclass(slots=True)
 class SmoothingMethodB:
     k: int = 10
+
+    def __post_init__(self) -> None:
+        if self.k < 0:
+            raise ValueError("SmoothingMethodB requires k >= 0.")
 
     def __call__(self, midprices: pd.Series) -> pd.Series:
         m_minus = midprices.rolling(window=self.k + 1).mean()
@@ -57,10 +65,22 @@ class SmoothingMethodC:
     k: int = 5
     h: int = 10
 
+    def __post_init__(self) -> None:
+        _validate_method_c_windows(self.k, self.h)
+
     def __call__(self, midprices: pd.Series) -> pd.Series:
         w_minus = midprices.rolling(window=self.k + 1).mean()
         w_plus = midprices.rolling(window=self.k + 1).mean().shift(-self.h)
         return (w_plus - w_minus) / w_minus
+
+
+def _validate_method_c_windows(k: int, h: int) -> None:
+    if k < 0:
+        raise ValueError("Smoothing method C requires k >= 0.")
+    if h <= 0:
+        raise ValueError("Smoothing method C requires h > 0.")
+    if k >= h:
+        raise ValueError("Smoothing method C requires k < h.")
 
 
 def smoothing_method_A(midprices: pd.Series, k: int = 10) -> pd.Series:
@@ -106,6 +126,7 @@ def calculate_adaptive_method_c_threshold_components(
     ask_col: str,
     config: AdaptiveThresholdConfig,
 ) -> pd.DataFrame:
+    _validate_method_c_windows(k, h)
     w_minus = midprices.rolling(window=k + 1).mean()
     spread = calculate_spread(df, bid_col=bid_col, ask_col=ask_col)
     exit_spread_min_periods = min(config.exit_spread_window, max(10, config.exit_spread_window // 10))

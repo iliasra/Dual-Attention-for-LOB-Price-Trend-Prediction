@@ -497,6 +497,14 @@ class SmoothingLabelConfig:
     ask_column: str
     adaptive_threshold: AdaptiveThresholdConfig | None = None
 
+    def __post_init__(self) -> None:
+        if self.k < 0:
+            raise ValueError("preprocessing.labels.smoothing.k must be >= 0.")
+        if self.h <= 0:
+            raise ValueError("preprocessing.labels.smoothing.h must be > 0.")
+        if self.method.upper() == "C" and self.k >= self.h:
+            raise ValueError("preprocessing.labels.smoothing method C requires k < h.")
+
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SmoothingLabelConfig":
         adaptive_payload = payload.get("adaptive_threshold")

@@ -113,7 +113,7 @@ def make_test_configs(tokenization_method: str = "basis") -> tuple[DataConfig, P
                 method="C",
                 threshold=0.0,
                 k=1,
-                h=1,
+                h=2,
                 bid_column="bid_price_1",
                 ask_column="ask_price_1",
             ),
@@ -325,7 +325,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     ]
     payload["preprocessing"]["snapshot_window"] = 4
     payload["preprocessing"]["labels"]["smoothing"]["k"] = 1
-    payload["preprocessing"]["labels"]["smoothing"]["h"] = 1
+    payload["preprocessing"]["labels"]["smoothing"]["h"] = 2
     payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"] = {
         "enabled": True,
         "exit_spread_window": 2,
