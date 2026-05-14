@@ -11,8 +11,10 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 try:
+    from compatibility import autocast_context, load_torch_weights, make_grad_scaler
     from configuration import TrainingConfig, load_config
 except ImportError:  # pragma: no cover
+    from .compatibility import autocast_context, load_torch_weights, make_grad_scaler
     from .configuration import TrainingConfig, load_config
 
 
@@ -249,7 +251,7 @@ class LobTrainer:
         self.config = config or load_config().training
         self.device = torch.device(self.config.device)
         self.amp_enabled = self.config.use_amp and self.device.type == "cuda"
-        self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=self.amp_enabled)
+        self.scaler = make_grad_scaler(device=self.device, enabled=self.amp_enabled)
 
     def _criterion(self) -> FocalLoss:
         alpha = None
@@ -258,7 +260,7 @@ class LobTrainer:
         return FocalLoss(alpha=alpha, gamma=self.config.focal_gamma).to(self.device)
 
     def _autocast_context(self):
-        return torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled)
+        return autocast_context(device=self.device, enabled=self.amp_enabled)
 
     def fit(
         self,
@@ -342,7 +344,7 @@ class LobTrainer:
 
         if best_epoch:
             best_path = Path(self.config.best_model_path)
-            model.load_state_dict(torch.load(best_path, map_location=self.device, weights_only=True))
+            model.load_state_dict(load_torch_weights(best_path, map_location=self.device))
             best_suffix = ""
             if test_loader is not None:
                 best_test_result = self.evaluate(
