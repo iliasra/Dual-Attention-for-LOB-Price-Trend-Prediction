@@ -10,7 +10,7 @@ WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
 RESULT_FILE="dry_run_results.txt"
 
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
-conda activate thesis
+conda activate transformer
 
 cp -r "$PROJECT_DIR" "$TMPDIR/"
 cd "$WORK_DIR"
