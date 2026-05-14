@@ -5,8 +5,8 @@
 
 set -euo pipefail
 
-PROJECT_DIR="$HOME/thesis"
-WORK_DIR="$TMPDIR/thesis"
+PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
+WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
 RESULT_FILE="dry_run_results.txt"
 
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
