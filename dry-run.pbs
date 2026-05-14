@@ -69,7 +69,7 @@ PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python -c "import yaml; from configur
 
 echo
 echo "===== RUNNING VRAM DRY RUN ====="
-python scripts/vram_dry_run.py \
+PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python scripts/vram_dry_run.py \
   --batch-size 32 \
   --sequence-length 100 \
   --num-features 240 \
