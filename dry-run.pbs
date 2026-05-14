@@ -9,6 +9,15 @@ PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
 WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
 RESULT_FILE="dry_run_results.txt"
 
+ml purge
+ml load tools/prod
+ml load Python/3.13.1-GCCcore-14.2.0
+ml load SciPy-bundle/2025.07-gfbf-2025.07
+ml load PyYAML/6.0.2-GCCcore-14.3.0
+ml load GPyTorch/1.11-foss-2023a-CUDA-12.1.1
+ml load tqdm/4.67.1-GCCcore-14.3.0
+ml load pytest/8.3.3-GCCcore-13.3.0
+
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
 conda activate transformer
 
