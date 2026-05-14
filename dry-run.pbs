@@ -3,27 +3,81 @@
 #PBS -l walltime=00:10:00
 #PBS -l select=1:ncpus=8:mem=24gb:ngpus=1:gpu_type=A100
 
-set -euo pipefail
+set -uo pipefail
 
 PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
 WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
 RESULT_FILE="dry_run_results.txt"
+RESULT_PATH="$TMPDIR/$RESULT_FILE"
+
+finish() {
+  echo
+  echo "===== FINISHING JOB ====="
+  echo "TMPDIR=$TMPDIR"
+  echo "PROJECT_DIR=$PROJECT_DIR"
+  echo "WORK_DIR=$WORK_DIR"
+  echo "Trying to copy result file back..."
+
+  if [ -f "$RESULT_PATH" ]; then
+    cp "$RESULT_PATH" "$PROJECT_DIR/$RESULT_FILE"
+    echo "Copied result file to $PROJECT_DIR/$RESULT_FILE"
+  else
+    echo "WARNING: result file was not created: $RESULT_PATH"
+  fi
+}
+trap finish EXIT
+
+exec > >(tee -a "$RESULT_PATH") 2>&1
+
+echo "===== JOB START ====="
+date
+echo "HOSTNAME=$(hostname)"
+echo "HOME=$HOME"
+echo "PBS_O_WORKDIR=$PBS_O_WORKDIR"
+echo "TMPDIR=$TMPDIR"
+echo "PWD=$(pwd)"
 
 ml purge
 ml load tools/prod
 ml load SciPy-bundle/2025.07-gfbf-2025.07
 ml load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
 
+echo
+echo "===== GPU INFO ====="
+which nvidia-smi || true
+nvidia-smi || true
+
+echo
+echo "===== PYTHON INFO ====="
+which python
+python --version
+python -c "import sys; print(sys.executable); print(sys.version)"
+python -c "import torch; print('torch', torch.__version__); print('cuda available', torch.cuda.is_available()); print('cuda device count', torch.cuda.device_count())"
+
+echo
+echo "===== COPYING PROJECT ====="
 cp -r "$PROJECT_DIR" "$TMPDIR/"
 cd "$WORK_DIR"
+echo "Now in PWD=$(pwd)"
+ls -la
+ls -la scripts
+ls -la src
 
-export PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}"
+echo
+echo "===== IMPORT TEST ====="
+PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python -c "import yaml; from configuration import load_config; from model import build_model; print('imports ok')"
+
+echo
+echo "===== RUNNING VRAM DRY RUN ====="
 python scripts/vram_dry_run.py \
   --batch-size 32 \
   --sequence-length 100 \
   --num-features 240 \
   --steps 5 \
-> "$TMPDIR/$RESULT_FILE" 2>&1
+
+echo
+echo "===== JOB COMPLETED OK ====="
+date
 
 cp "$TMPDIR/$RESULT_FILE" "$HOME/$RESULT_FILE"
 
