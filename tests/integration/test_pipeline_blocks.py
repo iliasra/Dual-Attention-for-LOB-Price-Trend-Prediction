@@ -348,6 +348,8 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
 
     assert "fold_001" in summary
     assert "fold_001 adaptive method C train label distribution:" in output
+    assert "fold_001 adaptive method C validation label distribution:" in output
+    assert "fold_001 adaptive method C test label distribution:" in output
     assert "cost_floor > volatility_floor" in output
     assert "volatility_floor > cost_floor" in output
     assert "Selected price static PLGS parameters from train:" in output
@@ -368,8 +370,9 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert len(feature_schema["ordered_feature_columns"]) == np.load(train_features_path).shape[1]
     label_distribution = metadata["label_distribution"]
     assert label_distribution["method"] == "smoothing_C_adaptive"
-    assert label_distribution["train"]["total"] > 0
-    assert set(label_distribution["train"]) >= {"-1", "0", "1"}
+    for split in ("train", "validation", "test"):
+        assert label_distribution[split]["total"] > 0
+        assert set(label_distribution[split]) >= {"-1", "0", "1"}
     floor_comparison = label_distribution["adaptive_threshold_floor_comparison"]
     assert floor_comparison["valid_rows"] > 0
     assert floor_comparison["cost_floor_gt_volatility_floor"]["percentage"] > 0.0

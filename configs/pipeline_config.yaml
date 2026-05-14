@@ -1,7 +1,7 @@
 seed: 42
 
 data:
-  raw_data_dir: ../data/LOBSTER_artificial_3days
+  raw_data_dir: ../data/LOBSTER
   processed_data_dir: ../data/processed_dataframes
   sequence_data_dir: ../data/sequences
   logs_dir: ../logs
@@ -41,8 +41,8 @@ preprocessing:
       method: C
       # threshold is ignored if adaptive_threshold.enabled = true
       threshold: null
-      k: 5
-      h: 10
+      k: 10
+      h: 100
       bid_column: bid_price_1
       ask_column: ask_price_1
       adaptive_threshold:

@@ -529,34 +529,49 @@ class LobProcessingPipeline:
             and smoothing_config.adaptive_threshold.enabled
         )
 
-    def train_label_distribution(self, train_days: list[ProcessedDay]) -> dict[str, object] | None:
-        if not self.uses_adaptive_method_c_labels():
-            return None
-
+    def _label_distribution_for_days(self, days: list[ProcessedDay]) -> dict[str, object]:
         label_column = self.config.data.label_column
         label_values = [
             day.labeled[label_column]
-            for day in train_days
+            for day in days
             if label_column in day.labeled.columns
         ]
         labels = pd.concat(label_values, ignore_index=True) if label_values else pd.Series(dtype=int)
         total = int(len(labels))
-        distribution: dict[str, object] = {
-            "method": "smoothing_C_adaptive",
-            "train": {
-                "total": total,
-            },
-        }
-        train_distribution = distribution["train"]
-        if not isinstance(train_distribution, dict):
-            raise RuntimeError("Invalid label distribution payload.")
+        distribution: dict[str, object] = {"total": total}
 
         for class_value in (-1, 0, 1):
             count = int((labels == class_value).sum())
-            train_distribution[str(class_value)] = {
+            distribution[str(class_value)] = {
                 "count": count,
                 "percentage": 0.0 if total == 0 else float(100.0 * count / total),
             }
+        return distribution
+
+    def label_distribution(self, processed_splits: dict[str, list[ProcessedDay]]) -> dict[str, object] | None:
+        if not self.uses_adaptive_method_c_labels():
+            return None
+
+        distribution: dict[str, object] = {
+            "method": "smoothing_C_adaptive",
+        }
+        for split in SPLIT_NAMES:
+            distribution[split] = self._label_distribution_for_days(processed_splits.get(split, []))
+
+        train_days = processed_splits.get("train", [])
+        floor_comparison = self.adaptive_threshold_floor_comparison(train_days)
+        if floor_comparison is not None:
+            distribution["adaptive_threshold_floor_comparison"] = floor_comparison
+        return distribution
+
+    def train_label_distribution(self, train_days: list[ProcessedDay]) -> dict[str, object] | None:
+        if not self.uses_adaptive_method_c_labels():
+            return None
+
+        distribution: dict[str, object] = {
+            "method": "smoothing_C_adaptive",
+            "train": self._label_distribution_for_days(train_days),
+        }
         floor_comparison = self.adaptive_threshold_floor_comparison(train_days)
         if floor_comparison is not None:
             distribution["adaptive_threshold_floor_comparison"] = floor_comparison
@@ -620,18 +635,19 @@ class LobProcessingPipeline:
     def print_label_distribution(fold_id: str, distribution: dict[str, object] | None) -> None:
         if distribution is None:
             return
-        train_distribution = distribution.get("train")
-        if not isinstance(train_distribution, dict):
-            return
-
-        print(f"{fold_id} adaptive method C train label distribution:")
-        for class_value in ("-1", "0", "1"):
-            class_distribution = train_distribution.get(class_value)
-            if not isinstance(class_distribution, dict):
+        for split in SPLIT_NAMES:
+            split_distribution = distribution.get(split)
+            if not isinstance(split_distribution, dict):
                 continue
-            count = int(class_distribution.get("count", 0))
-            percentage = float(class_distribution.get("percentage", 0.0))
-            print(f"- class {int(class_value):>2}: {count} ({percentage:.2f}%)")
+
+            print(f"{fold_id} adaptive method C {split} label distribution:")
+            for class_value in ("-1", "0", "1"):
+                class_distribution = split_distribution.get(class_value)
+                if not isinstance(class_distribution, dict):
+                    continue
+                count = int(class_distribution.get("count", 0))
+                percentage = float(class_distribution.get("percentage", 0.0))
+                print(f"- class {int(class_value):>2}: {count} ({percentage:.2f}%)")
 
         floor_comparison = distribution.get("adaptive_threshold_floor_comparison")
         if not isinstance(floor_comparison, dict):
@@ -766,7 +782,7 @@ class LobProcessingPipeline:
         print(f"Starting fold {fold.id}.")
         self.reset_fold_state()
         processed_splits = self.prepared_splits_for_fold(fold, split_pairs, prepared_days)
-        label_distribution = self.train_label_distribution(processed_splits["train"])
+        label_distribution = self.label_distribution(processed_splits)
         self.print_label_distribution(fold.id, label_distribution)
         plgs_parameters = self.fit_price_static_plgs_parameters(processed_splits["train"])
         volume_static_exp = self.fit_volume_static_exp_parameters(processed_splits["train"])
