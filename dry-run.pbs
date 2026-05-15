@@ -19,8 +19,7 @@ finish() {
   echo "Trying to copy result file back..."
 
   if [ -f "$RESULT_PATH" ]; then
-    cp "$RESULT_PATH" "$PROJECT_DIR/$RESULT_FILE"
-    echo "Copied result file to $PROJECT_DIR/$RESULT_FILE"
+    echo "$RESULT_FILE successfully created"
   else
     echo "WARNING: result file was not created: $RESULT_PATH"
   fi
@@ -80,4 +79,3 @@ echo "===== JOB COMPLETED OK ====="
 date
 
 cp "$TMPDIR/$RESULT_FILE" "$HOME/$RESULT_FILE"
-
