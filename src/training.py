@@ -11,10 +11,10 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 try:
-    from compatibility import autocast_context, load_torch_weights, make_grad_scaler
+    from compatibility import autocast_context, load_torch_weights, make_grad_scaler, resolve_torch_device
     from configuration import TrainingConfig, load_config
 except ImportError:  # pragma: no cover
-    from .compatibility import autocast_context, load_torch_weights, make_grad_scaler
+    from .compatibility import autocast_context, load_torch_weights, make_grad_scaler, resolve_torch_device
     from .configuration import TrainingConfig, load_config
 
 
@@ -249,7 +249,7 @@ class EpochResult:
 class LobTrainer:
     def __init__(self, config: TrainingConfig | None = None) -> None:
         self.config = config or load_config().training
-        self.device = torch.device(self.config.device)
+        self.device = resolve_torch_device(self.config.device)
         self.amp_enabled = self.config.use_amp and self.device.type == "cuda"
         self.scaler = make_grad_scaler(device=self.device, enabled=self.amp_enabled)
 

@@ -376,15 +376,16 @@ def test_fast_kinematic_method_requires_tick_reference(artifact_dir: Path) -> No
 
 def test_training_data_loader_settings_are_loaded() -> None:
     config = load_config()
+    pin_memory = config.training.device.startswith("cuda")
 
     assert config.training.num_workers >= 0
     assert config.training.early_stopping_patience == 8
     assert config.training.class_weights is None
-    assert config.training.pin_memory is (config.training.device == "cuda")
+    assert config.training.pin_memory is pin_memory
     assert config.training.data_loader_kwargs() == {
         "num_workers": config.training.num_workers,
         "persistent_workers": config.training.persistent_workers,
-        "pin_memory": config.training.device == "cuda",
+        "pin_memory": pin_memory,
     }
 
 
@@ -406,6 +407,19 @@ def test_training_pin_memory_is_enabled_for_cuda(artifact_dir: Path) -> None:
     payload["training"]["device"] = "cuda"
 
     cuda_config_path = artifact_dir / "cuda_config.yaml"
+    cuda_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    cuda_config = ExperimentConfig.from_yaml(cuda_config_path)
+
+    assert cuda_config.training.pin_memory is True
+
+
+def test_training_pin_memory_is_enabled_for_indexed_cuda(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["device"] = "cuda:0"
+
+    cuda_config_path = artifact_dir / "indexed_cuda_config.yaml"
     cuda_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     cuda_config = ExperimentConfig.from_yaml(cuda_config_path)

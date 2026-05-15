@@ -38,8 +38,24 @@ class _NoOpGradScaler:
         return None
 
 
+def resolve_torch_device(device: str | torch.device) -> torch.device:
+    device_obj = torch.device(device)
+    if device_obj.type == "cuda" and device_obj.index is None and torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    return device_obj
+
+
+def cuda_device_index(device: str | torch.device) -> int:
+    device_obj = resolve_torch_device(device)
+    if device_obj.type != "cuda":
+        raise ValueError(f"Expected a CUDA device, got {device_obj}.")
+    if device_obj.index is None:
+        return torch.cuda.current_device()
+    return int(device_obj.index)
+
+
 def torch_device_type(device: str | torch.device) -> str:
-    return torch.device(device).type
+    return resolve_torch_device(device).type
 
 
 def make_grad_scaler(device: str | torch.device, enabled: bool):

@@ -175,7 +175,6 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.price_kinematic.reference": {"tick", "time"},
     "preprocessing.volume_kinematic.reference": {"tick", "time"},
     "model.rope_type": {"crope", "hybrid_crope", "hybrid-crope", "hybrid"},
-    "training.device": {"cpu", "cuda"},
 }
 
 
@@ -250,6 +249,18 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
+def _is_valid_training_device(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    device = value.strip().lower()
+    if device in {"cpu", "cuda"}:
+        return True
+    if not device.startswith("cuda:"):
+        return False
+    index = device.removeprefix("cuda:")
+    return index.isdigit() and int(index) >= 0
+
+
 def _validate_allowed_values(payload: dict[str, Any]) -> None:
     invalid: list[str] = []
 
@@ -264,6 +275,10 @@ def _validate_allowed_values(payload: dict[str, Any]) -> None:
 
         if comparable not in allowed:
             invalid.append(f"{path}={value!r}; allowed values are {sorted(allowed_values)}")
+
+    training_device = _get_nested(payload, "training.device")
+    if not _is_valid_training_device(training_device):
+        invalid.append(f"training.device={training_device!r}; allowed values are ['cpu', 'cuda', 'cuda:<index>']")
 
     if invalid:
         raise ValueError("Invalid experiment config; invalid values: " + "; ".join(invalid))
@@ -868,7 +883,7 @@ class TrainingConfig:
 
     @property
     def pin_memory(self) -> bool:
-        return self.device.lower() == "cuda"
+        return self.device.lower().startswith("cuda")
 
     @property
     def best_model_path(self) -> Path:

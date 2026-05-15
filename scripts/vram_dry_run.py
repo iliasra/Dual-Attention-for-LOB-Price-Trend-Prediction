@@ -6,7 +6,7 @@ from dataclasses import replace
 import torch
 import torch.nn.functional as F
 
-from compatibility import autocast_context, make_grad_scaler, torch_device_type
+from compatibility import autocast_context, cuda_device_index, make_grad_scaler, resolve_torch_device, torch_device_type
 from configuration import load_config
 from model import build_model
 
@@ -22,10 +22,11 @@ def run_vram_test(
     steps: int = 5,
     device: str = "cuda",
 ) -> None:
-    device_obj = torch.device(device)
+    device_obj = resolve_torch_device(device)
     device_type = torch_device_type(device_obj)
     if device_type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available.")
+    device_index = cuda_device_index(device_obj)
 
     config = load_config()
     model_config = replace(
@@ -38,7 +39,7 @@ def run_vram_test(
     amp_enabled = bool(training_config.use_amp and device_type == "cuda")
 
     torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats(device_obj)
+    torch.cuda.reset_peak_memory_stats(device_index)
 
     model = build_model(model_config).to(device_obj)
     model.train()
@@ -88,12 +89,12 @@ def run_vram_test(
         scaler.step(optimizer)
         scaler.update()
 
-        torch.cuda.synchronize(device_obj)
+        torch.cuda.synchronize(device_index)
 
-        allocated = torch.cuda.memory_allocated(device_obj)
-        reserved = torch.cuda.memory_reserved(device_obj)
-        peak_allocated = torch.cuda.max_memory_allocated(device_obj)
-        peak_reserved = torch.cuda.max_memory_reserved(device_obj)
+        allocated = torch.cuda.memory_allocated(device_index)
+        reserved = torch.cuda.memory_reserved(device_index)
+        peak_allocated = torch.cuda.max_memory_allocated(device_index)
+        peak_reserved = torch.cuda.max_memory_reserved(device_index)
 
         print(
             f"step={step + 1:02d} "
@@ -103,12 +104,12 @@ def run_vram_test(
             f"peak_reserved={bytes_to_gib(peak_reserved):.2f} GiB"
         )
 
-    free, total = torch.cuda.mem_get_info(device_obj)
+    free, total = torch.cuda.mem_get_info(device_index)
     print()
     print(f"GPU total={bytes_to_gib(total):.2f} GiB")
     print(f"GPU free after test={bytes_to_gib(free):.2f} GiB")
-    print(f"Peak allocated={bytes_to_gib(torch.cuda.max_memory_allocated(device_obj)):.2f} GiB")
-    print(f"Peak reserved={bytes_to_gib(torch.cuda.max_memory_reserved(device_obj)):.2f} GiB")
+    print(f"Peak allocated={bytes_to_gib(torch.cuda.max_memory_allocated(device_index)):.2f} GiB")
+    print(f"Peak reserved={bytes_to_gib(torch.cuda.max_memory_reserved(device_index)):.2f} GiB")
 
 
 if __name__ == "__main__":
