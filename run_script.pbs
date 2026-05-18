@@ -100,12 +100,8 @@ echo "LOG_HOME_PATH=$LOG_HOME_PATH"
 echo "RUN_OUTPUT_DIR=$RUN_OUTPUT_DIR"
 
 ml purge
-ml load tools/prod
-ml load SciPy-bundle/2025.07-gfbf-2025.07 # pandas/2.3.1 numpy/2.3.2 scipy/1.16.1
-ml load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
-ml load PyYAML/6.0.2-GCCcore-14.3.0
-ml load tqdm/4.67.1-GCCcore-14.3.0
-
+eval "$($HOME/miniforge3/bin/conda shell.bash hook)"
+conda activate transformer
 
 echo
 echo "===== GPU INFO ====="

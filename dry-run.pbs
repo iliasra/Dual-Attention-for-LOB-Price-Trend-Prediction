@@ -67,10 +67,8 @@ echo "PBS_O_WORKDIR=$PBS_O_WORKDIR"
 echo "TMPDIR=$TMPDIR"
 echo "PWD=$(pwd)"
 
-ml purge
-ml load tools/prod
-ml load SciPy-bundle/2025.07-gfbf-2025.07
-ml load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
+eval "$(~/miniforge3/bin/conda shell.bash hook)"
+conda activate transformer
 
 echo
 echo "===== GPU INFO ====="
