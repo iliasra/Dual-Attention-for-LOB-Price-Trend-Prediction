@@ -1149,8 +1149,8 @@ class FittedDerivativeNormalizer:
 # ---------------------------------------------------------------------------
 # Legacy functional API
 # ---------------------------------------------------------------------------
-# These wrappers are kept for compatibility with notebooks or older
-# scripts. The production pipeline uses the class-based processors above.
+# These wrappers are kept for legacy notebooks or older scripts. The
+# production pipeline uses the class-based processors above.
 
 def price_kinematic_stream(
     df: pd.DataFrame,

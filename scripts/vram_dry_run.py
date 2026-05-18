@@ -6,7 +6,6 @@ from dataclasses import replace
 import torch
 import torch.nn.functional as F
 
-from compatibility import autocast_context, cuda_device_index, make_grad_scaler, resolve_torch_device, torch_device_type
 from configuration import load_config
 from model import build_model
 
@@ -22,11 +21,11 @@ def run_vram_test(
     steps: int = 5,
     device: str = "cuda",
 ) -> None:
-    device_obj = resolve_torch_device(device)
-    device_type = torch_device_type(device_obj)
+    device_obj = torch.device(device)
+    device_type = device_obj.type
     if device_type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available.")
-    device_index = cuda_device_index(device_obj)
+    device_index = device_obj.index if device_obj.index is not None else torch.cuda.current_device()
 
     config = load_config()
     model_config = replace(
@@ -50,7 +49,7 @@ def run_vram_test(
         weight_decay=training_config.weight_decay,
     )
 
-    scaler = make_grad_scaler(device=device_obj, enabled=amp_enabled)
+    scaler = torch.amp.GradScaler(device=device_type, enabled=amp_enabled)
 
     x = torch.randn(batch_size, sequence_length, num_features, device=device_obj)
     t = torch.arange(sequence_length, device=device_obj, dtype=torch.float32)
@@ -73,7 +72,7 @@ def run_vram_test(
     for step in range(steps):
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast_context(device=device_obj, enabled=amp_enabled):
+        with torch.amp.autocast(device_type=device_type, enabled=amp_enabled):
             logits = model(x, t)
             loss = F.cross_entropy(logits, y)
             moe_loss = getattr(model, "moe_load_balancing_loss", None)

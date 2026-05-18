@@ -127,7 +127,7 @@ ls -la src
 echo
 echo "===== RUNNING SCRIPTS ====="
 echo
-echo "===== MODULE COMPATIBILITY PREFLIGHT ====="
+echo "===== MODULE PREFLIGHT ====="
 PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python - <<'PY'
 import sys
 from dataclasses import replace
@@ -140,7 +140,6 @@ import yaml
 import tqdm
 from scipy.interpolate import BSpline, UnivariateSpline
 
-from compatibility import cuda_device_index, resolve_torch_device
 from configuration import load_config
 from model import build_model
 
@@ -167,14 +166,14 @@ config = load_config()
 build_model(replace(config.model, d_input=8, max_dt=1.0))
 
 if config.training.device.startswith("cuda"):
-    device = resolve_torch_device(config.training.device)
-    device_index = cuda_device_index(device)
+    device = torch.device(config.training.device)
+    device_index = device.index if device.index is not None else torch.cuda.current_device()
     free, total = torch.cuda.mem_get_info(device_index)
     print("resolved cuda device", device)
     print("cuda memory total", total)
     print("cuda memory free", free)
 
-print("module compatibility preflight ok")
+print("module preflight ok")
 PY
 echo
 echo "===== RUNNING PROCESSING PIPELINE ====="
