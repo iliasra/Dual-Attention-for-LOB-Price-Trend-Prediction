@@ -71,30 +71,36 @@ in `configs/pipeline_config.yaml`.
 ```text
 .
 |-- configs/
-|   `-- pipeline_config.yaml        # Main experiment, preprocessing, model, and training config
+|   `-- pipeline_config.yaml              # Main experiment, preprocessing, model, and training config
 |-- data/
-|   |-- LOBSTER/                    # Raw LOBSTER-style files, ignored by git
-|   |-- processed_dataframes/       # Processed CSV outputs
-|   |-- sequences/                  # Saved X/T/y NumPy sequence tensors
-|   `-- derivatives_z_scores/       # Fitted derivative normalization statistics
-|-- results/                        # Trained model checkpoints and experimental outputs
+|   |-- LOBSTER/                          # Raw LOBSTER-style files, ignored by git
+|   |-- processed_dataframes/             # Processed CSV outputs
+|   |-- sequences/                        # Saved X/T/y NumPy sequence tensors
+|   `-- derivatives_z_scores/             # Fitted derivative normalization statistics
+|-- logs/                                 # Contains logging files
+|-- results/                              # Trained model checkpoints and experimental outputs
 |-- scripts/
-|   |-- process_data.py             # Runs the preprocessing pipeline
-|   `-- run_training.py             # Trains the model from saved sequences
+|   |-- process_data.py                   # Runs the preprocessing pipeline
+|   `-- run_training.py                   # Trains the model from saved sequences
 |-- src/
-|   |-- configuration.py            # YAML configuration dataclasses
-|   |-- datasets.py                 # Sequence construction and PyTorch dataset
-|   |-- horizon.py                  # Trend labelling strategies
-|   |-- kinematic_preprocessing.py  # Static and kinematic LOB feature engineering
-|   |-- model.py                    # Dual-attention transformer model
-|   |-- processing.py               # End-to-end preprocessing pipeline
-|   |-- training.py                 # Loss, trainer, optimizer loop
-|   `-- utils.py                    # YAML and helper utilities
+|   |-- configuration.py                  # YAML configuration dataclasses
+|   |-- datasets.py                       # Sequence construction and PyTorch dataset
+|   |-- fast_kinematic_preprocessing.py   # Faster vectorized alternative to compute kinematic stream
+|   |-- horizon.py                        # Trend labelling strategies
+|   |-- kinematic_preprocessing.py        # Static and kinematic LOB feature engineering
+|   |-- model.py                          # Dual-attention transformer model
+|   |-- processing.py                     # End-to-end preprocessing pipeline
+|   |-- run_logging.py                    # Logging functions
+|   |-- training.py                       # Loss, trainer, optimizer loop
+|   `-- utils.py                          # YAML and helper utilities
 |-- tests/
-|   |-- unit/                       # Focused tests for small components
-|   |-- integration/                # Synthetic pipeline/model integration tests
-|   `-- smoke/                      # Smoke test on a small LOBSTER sample
-|-- requirements.txt
+|   |-- unit/                             # Focused tests for small components
+|   |-- integration/                      # Synthetic pipeline/model integration tests
+|   `-- smoke/                            # Smoke test on a small LOBSTER sample
+|-- requirements.txt                      
+|-- dry-run.pbs                           # Dry-run test on HPC 
+|-- environment.yml                       # Contains package and versions to create conda env
+|--run_script.pbs                         # PBS script to run full experiment on HPC cluster
 `-- pytest.ini
 ```
 
