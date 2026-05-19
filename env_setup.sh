@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -euo pipefail
+set -eo pipefail
 
 if [ "$#" -ne 1 ]; then
     echo "Usage: $0 /path/to/environment.yml"
@@ -28,6 +28,8 @@ if [ ! -d "$HOME/miniforge3"]; then
 else 
     echo "miniforge already installed."
 fi
+
+eval "$($HOME/miniforge3/bin/conda shell.bash hook)"
 
 echo "Running Conda dry-run"
 conda env create -f "$ENV_FILE" --solver=libmamba --dry-run
