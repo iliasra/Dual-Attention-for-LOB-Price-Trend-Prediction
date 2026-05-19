@@ -48,7 +48,7 @@ I focus on two complementary research directions:
 
 The codebase is organized around a two-stage workflow.
 
-```powershell
+```bash
 python scripts\process_data.py
 python scripts\run_training.py
 ```
@@ -80,6 +80,7 @@ in `configs/pipeline_config.yaml`.
 |-- logs/                                 # Contains logging files
 |-- results/                              # Trained model checkpoints and experimental outputs
 |-- scripts/
+|   |-- vram_dry_run.py                   # GPU VRAM workload test on HPC
 |   |-- process_data.py                   # Runs the preprocessing pipeline
 |   `-- run_training.py                   # Trains the model from saved sequences
 |-- src/
@@ -99,6 +100,7 @@ in `configs/pipeline_config.yaml`.
 |   `-- smoke/                            # Smoke test on a small LOBSTER sample
 |-- requirements.txt                      
 |-- dry-run.pbs                           # Dry-run test on HPC 
+|-- env_setup.sh                          # Allows to setup the required conda environment
 |-- environment.yml                       # Contains package and versions to create conda env
 |--run_script.pbs                         # PBS script to run full experiment on HPC cluster
 `-- pytest.ini
@@ -127,19 +129,35 @@ data/sequences/<split>/<symbol>_<date>_labels.npy
 I maintain unit and integration tests to keep the research pipeline stable while
 I iterate on modelling ideas.
 
-```powershell
+```bash
 python -m pytest -q
 ```
 
 On my local machine, I usually run the tests through the `transformer` conda
 environment:
 
-```powershell
+```bash
 conda --no-plugins run -n transformer python -m pytest -q
 ```
 
 The smoke test in `tests/smoke/` is used as a lightweight end-to-end sanity
 check on a small LOBSTER sample.
+
+## HPC Runs guidelines
+
+In order to launch a run from the HPC, you may execute the following: 
+
+```bash
+cd $HOME
+
+git clone https://github.com/iliasra/Dual-Attention-for-LOB-Price-Trend-Prediction.git
+
+chmod +x Dual-Attention-for-LOB-Price-Trend-Prediction/env_setup.sh
+
+./Dual-Attention-for-LOB-Price-Trend-Prediction/env_setup.sh Dual-Attention-for-LOB-Price-Trend-Prediction/environment.yml
+
+qsub Dual-Attention-for-LOB-Price-Trend-Prediction/run_script.pbs
+```
 
 ## Status
 
