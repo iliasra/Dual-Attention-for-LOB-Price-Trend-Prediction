@@ -1,5 +1,5 @@
 """
-This source code aims at implementing a second method to 
+This source code file aims at implementing a second method to 
 compute spline approximation of price/volume kinematics. This
 methods leverages on a unique set of knots to precompute a matrix
 H used to compute the spline approximation over each window by doing 
