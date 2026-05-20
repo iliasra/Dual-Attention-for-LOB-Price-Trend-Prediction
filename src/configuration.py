@@ -179,6 +179,10 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
 
 
 def _ensure_list(value: Any) -> list[str] | None:
+    """
+    Force the input value (sourced from the YAML config file) 
+    to be converted as a list. Treats None, "auto", "none", "" as None.
+    """
     if value is None:
         return None
     if isinstance(value, str):
@@ -190,11 +194,27 @@ def _ensure_list(value: Any) -> list[str] | None:
 
 
 def _validate_required_config(payload: Any, schema: dict[str, Any]) -> None:
+    """
+    Validate the YAML config file structure. Raises ValueError if the configuration 
+    YAML implies a missing/unexpected/invalid argument. 
+
+    Args:
+      payload (Any) : the loaded yaml config, typically a Python dict.
+      schema  (dict) : The required config schema to compare the payload with.
+    """
     missing: list[str] = []
     invalid_mappings: list[str] = []
     unexpected: list[str] = []
 
     def walk(node: Any, subtree: dict[str, Any], prefix: str = "") -> None:
+        """Recursive walk into a dict schema. The function compares each node 
+        against a schema subtree.
+        
+        Args: 
+          node (Any) : typically a dict (the node) we currently explore.
+          subtree (dict) : the subset of parameters to explore/check.
+          prefix (str) : the prefix used to navigate inside the tree. 
+        """
         if not isinstance(node, dict):
             invalid_mappings.append(prefix or "<root>")
             return
@@ -229,6 +249,19 @@ def _validate_required_config(payload: Any, schema: dict[str, Any]) -> None:
 
 
 def _get_nested(payload: dict[str, Any], dotted_path: str) -> Any:
+    """Return a dotted path from a nested mapping. Typically used for logging
+    or to generate human-readable outputs. 
+
+    Args:
+        payload (dict) : Nested configuration mapping to traverse.
+        dotted_path (str) : Dot-separated path, for example "training.device".
+
+    Returns:
+        The value stored at dotted_path.
+
+    Raises:
+        KeyError: If any path component is missing.
+    """
     current: Any = payload
     for part in dotted_path.split("."):
         current = current[part]
@@ -236,12 +269,36 @@ def _get_nested(payload: dict[str, Any], dotted_path: str) -> Any:
 
 
 def _require_explicit_value(value: Any, dotted_path: str) -> Any:
+    """Require a configuration value to be explicitly set.
+
+    Args:
+        value: Value read from the configuration payload.
+        dotted_path: Human-readable dotted path used in the error message.
+
+    Returns:
+        The original value when it is not None.
+
+    Raises:
+        ValueError: If value is None.
+    """
     if value is None:
         raise ValueError(f"Invalid experiment config; {dotted_path} must be set explicitly.")
     return value
 
 
 def _optional_float(value: Any) -> float | None:
+    """Convert an optional configuration value to float.
+
+    Args:
+        value: Raw value read from the configuration payload.
+
+    Returns:
+        None for null-like inputs, otherwise value converted to float.
+
+    Raises:
+        TypeError: If value cannot be converted to float.
+        ValueError: If value cannot be parsed as a valid float.
+    """
     if value is None:
         return None
     if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
@@ -250,6 +307,15 @@ def _optional_float(value: Any) -> float | None:
 
 
 def _is_valid_training_device(value: Any) -> bool:
+    """Check whether a training device string is accepted.
+
+    Args:
+        value: Candidate training device value.
+
+    Returns:
+        True for "cpu", "cuda", or "cuda:<non-negative index>";
+        otherwise ``False``.
+    """
     if not isinstance(value, str):
         return False
     device = value.strip().lower()
@@ -262,6 +328,14 @@ def _is_valid_training_device(value: Any) -> bool:
 
 
 def _validate_allowed_values(payload: dict[str, Any]) -> None:
+    """Validate enumerated configuration values.
+
+    Args:
+        payload: Loaded YAML configuration payload.
+
+    Raises:
+        ValueError: If any configured value is outside its allowed set.
+    """
     invalid: list[str] = []
 
     for path, allowed_values in ALLOWED_CONFIG_VALUES.items():
@@ -301,6 +375,14 @@ class DataConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "DataConfig":
+        """Build a data configuration from a YAML subsection.
+
+        Args:
+            payload: data section of the loaded configuration.
+
+        Returns:
+            A populated DataConfig instance.
+        """
         return cls(
             raw_data_dir=str(payload["raw_data_dir"]),
             processed_data_dir=str(payload["processed_data_dir"]),
@@ -323,6 +405,7 @@ class KinematicTokenizationConfig:
     chunk_size: int
 
     def __post_init__(self) -> None:
+        """Check kinematic tokenization settings."""
         self.method = self.method.lower()
         if self.method not in {"basis", "fast"}:
             raise ValueError("preprocessing.kinematic_tokenization.method must be 'basis' or 'fast'.")
@@ -331,6 +414,7 @@ class KinematicTokenizationConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "KinematicTokenizationConfig":
+        """Build kinematic tokenization settings from a YAML subsection."""
         return cls(
             method=str(_require_explicit_value(payload["method"], "preprocessing.kinematic_tokenization.method")),
             chunk_size=int(
@@ -347,6 +431,7 @@ class FastKinematicConfig:
     selected_smoothing_lambda: float | None = None
 
     def __post_init__(self) -> None:
+        """Check fast B-spline tokenization parameters."""
         if self.n_basis <= 3:
             raise ValueError("Fast kinematic n_basis must be > 3 for cubic B-splines.")
         if not 0.0 < self.df <= self.n_basis:
@@ -358,6 +443,7 @@ class FastKinematicConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], prefix: str) -> "FastKinematicConfig":
+        """Build fast kinematic settings from a YAML subsection."""
         return cls(
             n_basis=int(_require_explicit_value(payload["n_basis"], f"{prefix}.n_basis")),
             df=float(_require_explicit_value(payload["df"], f"{prefix}.df")),
@@ -371,6 +457,7 @@ class BasisKinematicConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], prefix: str) -> "BasisKinematicConfig":
+        """Build basis kinematic settings from a YAML subsection."""
         return cls(
             alpha=float(_require_explicit_value(payload["alpha"], f"{prefix}.alpha")),
         )
@@ -387,6 +474,7 @@ class PriceKinematicConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], tick_size: float) -> "PriceKinematicConfig":
+        """Build price kinematic settings from a YAML subsection."""
         return cls(
             enabled=bool(payload["enabled"]),
             columns=_ensure_list(payload["columns"]),
@@ -414,6 +502,7 @@ class PriceStaticConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], tick_size: float) -> "PriceStaticConfig":
+        """Build static price scaling settings from a YAML subsection."""
         return cls(
             enabled=bool(payload["enabled"]),
             columns=_ensure_list(payload["columns"]),
@@ -434,6 +523,7 @@ class VolumeKinematicConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "VolumeKinematicConfig":
+        """Build volume kinematic settings from a YAML subsection."""
         return cls(
             enabled=bool(payload["enabled"]),
             columns=_ensure_list(payload["columns"]),
@@ -458,6 +548,7 @@ class VolumeStaticConfig:
     k: float | None = None
 
     def __post_init__(self) -> None:
+        """Check static volume scaling parameters."""
         if not 0.0 <= self.quantile <= 100.0:
             raise ValueError("preprocessing.volume_static.quantile must be in [0, 100].")
         if not 0.0 < self.target < 1.0:
@@ -467,6 +558,7 @@ class VolumeStaticConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "VolumeStaticConfig":
+        """Build static volume scaling settings from a YAML subsection."""
         return cls(
             enabled=bool(payload["enabled"]),
             columns=_ensure_list(payload["columns"]),
@@ -483,6 +575,7 @@ class AdaptiveThresholdConfig:
     volatility_lambda: float
 
     def __post_init__(self) -> None:
+        """Check adaptive label-threshold parameters."""
         if self.exit_spread_window <= 0:
             raise ValueError("preprocessing.labels.smoothing.adaptive_threshold.exit_spread_window must be > 0.")
         if self.volatility_window <= 0:
@@ -494,6 +587,7 @@ class AdaptiveThresholdConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "AdaptiveThresholdConfig":
+        """Build adaptive threshold settings from a YAML subsection."""
         return cls(
             enabled=bool(payload["enabled"]),
             exit_spread_window=int(payload["exit_spread_window"]),
@@ -514,6 +608,7 @@ class SmoothingLabelConfig:
     adaptive_threshold: AdaptiveThresholdConfig | None = None
 
     def __post_init__(self) -> None:
+        """Check smoothing-label horizon parameters."""
         if self.k < 0:
             raise ValueError("preprocessing.labels.smoothing.k must be >= 0.")
         if self.h <= 0:
@@ -523,6 +618,7 @@ class SmoothingLabelConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SmoothingLabelConfig":
+        """Build smoothing-label settings from a YAML subsection."""
         adaptive_payload = payload.get("adaptive_threshold")
         return cls(
             method=str(payload["method"]),
@@ -548,6 +644,7 @@ class TripleBarrierLabelConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TripleBarrierLabelConfig":
+        """Build triple-barrier label settings from a YAML subsection."""
         return cls(
             horizon=int(payload["horizon"]),
             upper_barrier_ticks=float(payload["upper_barrier_ticks"]),
@@ -566,6 +663,7 @@ class LabelConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "LabelConfig":
+        """Build label settings from a YAML subsection."""
         return cls(
             strategy=str(payload["strategy"]),
             smoothing=SmoothingLabelConfig.from_dict(payload["smoothing"]),
@@ -584,6 +682,7 @@ class MessageConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], tick_size: float) -> "MessageConfig":
+        """Build message preprocessing settings from a YAML subsection."""
         return cls(
             tick_size=float(tick_size),
             size_column=str(payload["size_column"]),
@@ -609,6 +708,7 @@ class TemporalFeaturesConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TemporalFeaturesConfig":
+        """Build temporal feature settings from a YAML subsection."""
         return cls(
             add_day_sincos=bool(payload["add_day_sincos"]),
             day_frequency=int(payload["day_frequency"]),
@@ -627,6 +727,7 @@ class NormalizationConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "NormalizationConfig":
+        """Build normalization settings from a YAML subsection."""
         return cls(
             derivatives_stats_dir=str(payload["derivatives_stats_dir"]),
             scope=str(payload["scope"]),
@@ -640,6 +741,18 @@ def _validate_split_dates(
     validation_dates: list[str],
     test_dates: list[str],
 ) -> None:
+    """Check split completeness, disjointness, and chronological order.
+
+    Args:
+        context: Name included in validation error messages.
+        train_dates: Dates assigned to the training split.
+        validation_dates: Dates assigned to the validation split.
+        test_dates: Dates assigned to the test split.
+
+    Raises:
+        ValueError: If any split is empty, if a date appears in multiple splits, or
+            if train/validation/test dates are not strictly ordered.
+    """
     missing = [
         split_name
         for split_name, dates in (
@@ -682,6 +795,11 @@ class DatasetSplitConfig:
     test_dates: list[str]
 
     def __post_init__(self) -> None:
+        """Check the configured dataset split dates.
+
+        Raises:
+            ValueError: If split dates are empty, overlapping, or out of order.
+        """
         _validate_split_dates(
             "dataset_splits",
             train_dates=self.train_dates,
@@ -691,6 +809,7 @@ class DatasetSplitConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "DatasetSplitConfig":
+        """Build dataset split settings from a YAML subsection."""
         return cls(
             train_dates=[str(value) for value in payload["train_dates"]],
             validation_dates=[str(value) for value in payload["validation_dates"]],
@@ -706,6 +825,12 @@ class FoldConfig:
     test_dates: list[str]
 
     def __post_init__(self) -> None:
+        """Check fold identifier and split dates.
+
+        Raises:
+            ValueError: If the fold id is blank, or if split dates are empty,
+                overlapping, or out of order.
+        """
         if not self.id.strip():
             raise ValueError("folds[].id must be a non-empty string.")
         _validate_split_dates(
@@ -717,6 +842,7 @@ class FoldConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "FoldConfig":
+        """Build a fold configuration from a YAML mapping."""
         return cls(
             id=str(_require_explicit_value(payload.get("id"), "folds[].id")),
             train_dates=[str(value) for value in payload.get("train_dates", [])],
@@ -726,6 +852,7 @@ class FoldConfig:
 
     @classmethod
     def from_dataset_splits(cls, payload: DatasetSplitConfig) -> "FoldConfig":
+        """Create the default single fold from top-level dataset splits."""
         return cls(
             id="single",
             train_dates=payload.train_dates,
@@ -735,6 +862,18 @@ class FoldConfig:
 
 
 def _folds_from_payload(payload: dict[str, Any], dataset_splits: DatasetSplitConfig) -> list[FoldConfig]:
+    """Resolve fold settings from the loaded configuration payload.
+
+    Args:
+        payload: Loaded YAML configuration payload.
+        dataset_splits: Fallback split configuration used when no folds are provided.
+
+    Returns:
+        A non-empty list of fold configurations.
+
+    Raises:
+        ValueError: If "folds" is not a list, or if fold ids are duplicated.
+    """
     raw_folds = payload.get("folds")
     if raw_folds in (None, []):
         return [FoldConfig.from_dataset_splits(dataset_splits)]
@@ -767,6 +906,7 @@ class PreprocessingConfig:
     volume_static: VolumeStaticConfig
 
     def __post_init__(self) -> None:
+        """Check cross-field preprocessing constraints."""
         if self.kinematic_tokenization.method != "fast":
             return
 
@@ -784,6 +924,7 @@ class PreprocessingConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], tick_size: float) -> "PreprocessingConfig":
+        """Build preprocessing settings from a YAML subsection."""
         return cls(
             snapshot_window=int(payload["snapshot_window"]),
             labels=LabelConfig.from_dict(payload["labels"]),
@@ -821,6 +962,11 @@ class ModelConfig:
     max_dt: float | None = None
 
     def __post_init__(self) -> None:
+        """Check model-derived scalar settings.
+
+        Raises:
+            ValueError: If "max_dt_quantile" or resolved "max_dt" is out of range.
+        """
         if not 0.0 <= self.max_dt_quantile <= 100.0:
             raise ValueError("model.max_dt_quantile must be in [0, 100].")
         if self.max_dt is not None and self.max_dt < 0.0:
@@ -828,6 +974,7 @@ class ModelConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ModelConfig":
+        """Build model settings from a YAML subsection."""
         return cls(
             d_input=None if payload["d_input"] is None else int(payload["d_input"]),
             d_model=int(payload["d_model"]),
@@ -850,6 +997,18 @@ class ModelConfig:
         )
 
     def resolved_d_input(self, inferred_feature_count: int | None = None) -> int:
+        """Return the configured or inferred model input width.
+
+        Args:
+            inferred_feature_count: Feature count inferred from prepared data when
+                "d_input" is not explicitly configured.
+
+        Returns:
+            The input feature dimension to use when building the model.
+
+        Raises:
+            ValueError: If ``d_input`` is unset and no inferred feature count is provided.
+        """
         if self.d_input is not None:
             return self.d_input
         if inferred_feature_count is None:
@@ -874,6 +1033,7 @@ class TrainingConfig:
     class_weights: list[float] | None = None
 
     def __post_init__(self) -> None:
+        """Check training worker settings."""
         if self.num_workers < 0:
             raise ValueError("training.num_workers must be >= 0.")
         if self.early_stopping_patience < 0:
@@ -883,13 +1043,28 @@ class TrainingConfig:
 
     @property
     def pin_memory(self) -> bool:
+        """Whether data loaders should pin memory for CUDA transfers.
+
+        Returns:
+            True when the configured device starts with "cuda".
+        """
         return self.device.lower().startswith("cuda")
 
     @property
     def best_model_path(self) -> Path:
+        """Path where the best model checkpoint should be stored.
+
+        Returns:
+            model_dir joined with the standard best-model filename.
+        """
         return Path(self.model_dir) / BEST_MODEL_FILENAME
 
     def data_loader_kwargs(self) -> dict[str, bool | int]:
+        """Return PyTorch data-loader worker and memory options.
+
+        Returns:
+            Keyword arguments for ``DataLoader`` construction.
+        """
         return {
             "num_workers": self.num_workers,
             "persistent_workers": self.persistent_workers,
@@ -898,6 +1073,7 @@ class TrainingConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TrainingConfig":
+        """Build training settings from a YAML subsection."""
         return cls(
             device=str(payload["device"]).lower(),
             epochs=int(payload["epochs"]),
@@ -927,6 +1103,19 @@ class ExperimentConfig:
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ExperimentConfig":
+        """Load and validate an experiment configuration from YAML.
+
+        Args:
+            path: Path to the YAML configuration file.
+
+        Returns:
+            A fully populated ``ExperimentConfig`` instance.
+
+        Raises:
+            ValueError: If the file contents violate the expected schema or value
+                constraints.
+            yaml.YAMLError: If the YAML file cannot be parsed.
+        """
         config_path = Path(path)
         with config_path.open("r", encoding="utf-8") as handle:
             payload = yaml.safe_load(handle) or {}
@@ -953,5 +1142,14 @@ class ExperimentConfig:
 
 
 def load_config(path: str | Path | None = None) -> ExperimentConfig:
+    """Load the project experiment configuration.
+
+    Args:
+        path: Optional path to a YAML configuration file. When omitted, the default
+            "configs/pipeline_config.yaml" file is used.
+
+    Returns:
+        A fully populated "ExperimentConfig" instance.
+    """
     default_path = Path(__file__).resolve().parent.parent / "configs" / "pipeline_config.yaml"
     return ExperimentConfig.from_yaml(path or default_path)

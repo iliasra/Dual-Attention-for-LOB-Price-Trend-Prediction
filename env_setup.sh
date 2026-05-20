@@ -29,7 +29,9 @@ else
     echo "miniforge already installed."
 fi
 
+set +u
 eval "$($HOME/miniforge3/bin/conda shell.bash hook)"
+set -u
 
 echo "Running Conda dry-run"
 conda env create -f "$ENV_FILE" --solver=libmamba --dry-run

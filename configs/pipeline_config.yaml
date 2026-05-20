@@ -34,13 +34,10 @@ folds:
 preprocessing:
   snapshot_window: 100
   labels:
-    # allowed: smoothing, triple_barrier
-    strategy: smoothing
+    strategy: smoothing # allowed: smoothing, triple_barrier
     smoothing:
-      # allowed: A, B, C
-      method: C
-      # threshold is ignored if adaptive_threshold.enabled = true
-      threshold: null
+      method: C # allowed: A, B, C
+      threshold: null # threshold is ignored if adaptive_threshold.enabled = true
       k: 10
       h: 100
       bid_column: bid_price_1
@@ -57,7 +54,7 @@ preprocessing:
       lower_barrier_ticks: 3.0
       bid_column: bid_price_1
       ask_column: ask_price_1
-      # if null, computes the midprice based on level 1 bid/ask prices
+      # if price_column null, computes the midprice based on level 1 bid/ask prices
       price_column:
   message:
     size_column: size
@@ -71,26 +68,20 @@ preprocessing:
     add_day_sincos: true
     day_frequency: 86400
     keep_timestamp: true
-    # 34200 = 9.30 am
-    market_open_seconds: 34200
-    # 57600 = 4 pm
-    market_close_seconds: 57600
+    market_open_seconds: 34200 # 34200 = 9.30 am for NYSE opening
+    market_close_seconds: 57600 # 57600 = 4 pm for NYSE closing
     start_offset_minutes: 15
     end_offset_minutes: 15
   normalization:
     derivatives_stats_dir: ../data/derivatives_z_scores
-    # allowed: train_only
-    scope: train_only
+    scope: train_only # allowed: train_only (used for readiness only)
   kinematic_tokenization:
-    # allowed: basis, fast
-    method: fast
-    # shared by fast price and volume tokenization
-    chunk_size: 100000
+    method: fast # allowed: basis, fast
+    chunk_size: 100000 # shared by fast price and volume tokenization
   price_kinematic:
     enabled: true
     columns: auto
-    # allowed: tick, time
-    reference: tick
+    reference: tick # allowed: tick, time
     basis:
       alpha: 5.0 # smoothing parameter
     fast:
@@ -106,8 +97,7 @@ preprocessing:
   volume_kinematic:
     enabled: true
     columns: auto
-    # allowed: tick, time
-    reference: tick
+    reference: tick # allowed: tick, time
     basis:
       alpha: 5.0 # smoothing parameter
     fast:
@@ -151,8 +141,7 @@ model:
   classifier_dropout: 0.1
 
 training:
-  # allowed: cpu, cuda
-  device: cuda
+  device: cuda # allowed: cpu, cuda
   epochs: 50
   batch_size: 64
   num_workers: 8
