@@ -16,7 +16,7 @@ data:
   # NB: time/label col are automatically excluded as they are used
   # to generate specific .npy files for the model to use. 
   feature_exclude_columns: []
-  sequence_window: 100
+  sequence_window: 64
 
 # fallback only used when folds is empty
 dataset_splits:
@@ -30,26 +30,26 @@ folds:
     train_dates: ["2024-03-04", "2024-03-05", "2024-03-06"]
     validation_dates: ["2024-03-07"]
     test_dates: ["2024-03-08"]
-  - id: fold_002
-    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07"]
-    validation_dates: ["2024-03-08"]
-    test_dates: ["2024-03-11"]
-  - id: fold_003
-    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08"]
-    validation_dates: ["2024-03-11"]
-    test_dates: ["2024-03-12"]
-  - id: fold_004
-    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11"]
-    validation_dates: ["2024-03-12"]
-    test_dates: ["2024-03-13"]
-  - id: fold_005
-    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11", "2024-03-12"]
-    validation_dates: ["2024-03-13"]
-    test_dates: ["2024-03-14"]
-  - id: fold_006
-    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11", "2024-03-12", "2024-03-13"]
-    validation_dates: ["2024-03-14"]
-    test_dates: ["2024-03-15"]
+#  - id: fold_002
+#    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07"]
+#    validation_dates: ["2024-03-08"]
+#    test_dates: ["2024-03-11"]
+#  - id: fold_003
+#    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08"]
+#    validation_dates: ["2024-03-11"]
+#    test_dates: ["2024-03-12"]
+#  - id: fold_004
+#    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11"]
+#    validation_dates: ["2024-03-12"]
+#    test_dates: ["2024-03-13"]
+#  - id: fold_005
+#    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11", "2024-03-12"]
+#    validation_dates: ["2024-03-13"]
+#    test_dates: ["2024-03-14"]
+#  - id: fold_006
+#    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11", "2024-03-12", "2024-03-13"]
+#    validation_dates: ["2024-03-14"]
+#    test_dates: ["2024-03-15"]
 
 preprocessing:
   snapshot_window: 100
@@ -66,7 +66,7 @@ preprocessing:
         enabled: true
         exit_spread_window: 100
         volatility_window: 256
-        round_trip_fees_bps: 0.8
+        round_trip_fees_bps: 1.5 # estimated for INTC in 03/24
         volatility_lambda: 1.0
     triple_barrier:
       horizon: 10
@@ -123,7 +123,7 @@ preprocessing:
     fast:
       n_basis: 20
       # maximum effective degrees of freedom explored by train GCV optimization
-      df: 20.0
+      df: 12.0
       # recommended value: 1.0, or 0.95, 0.9 to increase stability
       eval_at: 1.0
   volume_static:
@@ -162,10 +162,10 @@ model:
 
 training:
   device: cuda # allowed: cpu, cuda
-  epochs: 50
-  batch_size: 64
+  epochs: 20
+  batch_size: 32
   num_workers: 8
-  early_stopping_patience: 8
+  early_stopping_patience: 5
   persistent_workers: true
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4

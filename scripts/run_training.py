@@ -26,7 +26,7 @@ from run_logging import (
     save_run_log,
     save_run_summary,
 )
-from training import LobTrainer, class_weights_from_sequence_labels
+from training import EpochResult, LobTrainer, class_weights_from_sequence_labels
 from utils import seed_torch_worker, set_global_seed, torch_generator_from_seed
 
 
@@ -129,6 +129,38 @@ def resolve_class_weights(config: ExperimentConfig, train_dataset: LOBDataset) -
         "counts": counts,
         "gamma_mode": config.training.focal_gamma > 0.0,
     }
+
+
+def evaluate_best_model_on_test_split(
+    *,
+    trainer: LobTrainer,
+    model,
+    test_loader: DataLoader,
+    history: list[EpochResult],
+) -> None:
+    """Evaluate the validation-selected model once on the held-out test split."""
+    if not history:
+        raise ValueError("Cannot evaluate the test split because training produced no epoch history.")
+
+    best_epoch, best_history = min(enumerate(history, start=1), key=lambda item: item[1].val_loss)
+    print(
+        "Training uses train/validation splits only. "
+        f"Evaluating best validation epoch {best_epoch} on the held-out test split."
+    )
+    test_result = trainer.evaluate(
+        model=model,
+        data_loader=test_loader,
+        description=f"Best epoch {best_epoch} [Test]",
+    )
+    best_history.test_loss = test_result.loss
+    best_history.test_metrics = test_result.metrics
+    print(
+        f"Best epoch {best_epoch} test evaluation: "
+        f"test_loss={test_result.loss:.6f}, "
+        f"test_acc={test_result.metrics.accuracy:.4f}, "
+        f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
+        f"test_ece={test_result.metrics.expected_calibration_error:.4f}."
+    )
 
 
 def fold_artifact_paths(
@@ -254,7 +286,13 @@ def train_fold(
         preprocessing_metadata=preprocessing_metadata,
     )
     trainer = LobTrainer(config.training)
-    _, history = trainer.fit(model, train_loader, validation_loader, test_loader=test_loader)
+    model, history = trainer.fit(model, train_loader, validation_loader)
+    evaluate_best_model_on_test_split(
+        trainer=trainer,
+        model=model,
+        test_loader=test_loader,
+        history=history,
+    )
 
     save_epoch_history(history, run_losses_path, config=config, fold=fold_id)
     save_confusion_matrices(history, run_confusion_matrices_path, fold=fold_id)

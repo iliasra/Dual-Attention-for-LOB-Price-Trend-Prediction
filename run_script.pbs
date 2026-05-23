@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N training
-#PBS -l walltime=05:00:00
-#PBS -l select=1:ncpus=8:mem=24gb:ngpus=1:gpu_type=A100
+#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1:gpu_type=A100
 
 set -eo pipefail
 

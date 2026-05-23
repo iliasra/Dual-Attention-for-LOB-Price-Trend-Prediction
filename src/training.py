@@ -265,8 +265,12 @@ class LobTrainer:
         model: nn.Module,
         train_loader: Iterable,
         val_loader: Iterable,
-        test_loader: Iterable | None = None,
     ) -> tuple[nn.Module, list[EpochResult]]:
+        """Train using only train/validation data and reload the best validation model.
+
+        The held-out test split is intentionally excluded from this method. Evaluate
+        the returned best model on test data after training has finished.
+        """
         model = model.to(self.device)
         criterion = self._criterion()
         optimizer = torch.optim.AdamW(
@@ -277,7 +281,6 @@ class LobTrainer:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config.epochs)
         best_val_loss = float("inf")
         best_epoch = 0
-        best_test_result: EvaluationResult | None = None
         epochs_without_improvement = 0
         history: list[EpochResult] = []
 
@@ -343,26 +346,9 @@ class LobTrainer:
         if best_epoch:
             best_path = Path(self.config.best_model_path)
             model.load_state_dict(torch.load(best_path, map_location=self.device, weights_only=True))
-            best_suffix = ""
-            if test_loader is not None:
-                best_test_result = self.evaluate(
-                    model=model,
-                    data_loader=test_loader,
-                    criterion=criterion,
-                    description=f"Best epoch {best_epoch} [Test]",
-                )
-                best_history = history[best_epoch - 1]
-                best_history.test_loss = best_test_result.loss
-                best_history.test_metrics = best_test_result.metrics
-                best_suffix = (
-                    f", test_loss={best_test_result.loss:.6f}, "
-                    f"test_acc={best_test_result.metrics.accuracy:.4f}, "
-                    f"test_macro_f1={best_test_result.metrics.macro_f1:.4f}, "
-                    f"test_ece={best_test_result.metrics.expected_calibration_error:.4f}"
-                )
             print(
                 f"Best model selected from epoch {best_epoch}: "
-                f"val_loss={best_val_loss:.6f}{best_suffix}."
+                f"val_loss={best_val_loss:.6f}."
             )
         print("Training finished.")
         return model, history
