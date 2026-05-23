@@ -61,11 +61,25 @@ FEATURE_SCHEMA_FILENAME = "feature_schema.yaml"
 
 
 @dataclass(slots=True)
+class LobFileSegment:
+    message_path: Path
+    orderbook_path: Path
+
+    def __post_init__(self) -> None:
+        self.message_path = Path(self.message_path)
+        self.orderbook_path = Path(self.orderbook_path)
+
+
+@dataclass(slots=True)
 class LobFilePair:
     symbol: str
     date: str
-    message_path: Path
-    orderbook_path: Path
+    segments: tuple[LobFileSegment, ...]
+
+    def __post_init__(self) -> None:
+        self.segments = tuple(self.segments)
+        if not self.segments:
+            raise ValueError("LobFilePair must contain at least one segment.")
 
     @property
     def output_stem(self) -> str:
@@ -73,7 +87,12 @@ class LobFilePair:
 
     @property
     def label(self) -> str:
-        return f"{self.symbol} {self.date}"
+        suffix = "" if self.segment_count == 1 else f" ({self.segment_count} segments)"
+        return f"{self.symbol} {self.date}{suffix}"
+
+    @property
+    def segment_count(self) -> int:
+        return len(self.segments)
 
 
 @dataclass(slots=True)
@@ -127,32 +146,68 @@ class LobProcessingPipeline:
     def _resolve_path(self, path: Path) -> Path:
         return path if path.is_absolute() else (self.config_dir / path).resolve()
 
+    @staticmethod
+    def _lobster_file_key(file_path: Path) -> tuple[str, str] | None:
+        parts = file_path.name.split("_")
+        if len(parts) < 4:
+            return None
+        symbol = parts[0]
+        date = parts[1]
+        return symbol, date
+
+    @staticmethod
+    def _lobster_segment_sort_key(file_path: Path) -> tuple[int, str]:
+        parts = file_path.name.split("_")
+        try:
+            return int(parts[2]), file_path.name
+        except (IndexError, ValueError):
+            return 0, file_path.name
+
     def discover_pairs(self) -> list[LobFilePair]:
         """gathers message/orderbook data by asset and day"""
         if not self.data_dir.exists():
             raise FileNotFoundError(f"LOBSTER directory not found: {self.data_dir}")
 
-        files = list(self.data_dir.iterdir())
-        grouped: dict[tuple[str, str], dict[str, Path]] = {}
+        grouped_segments: dict[tuple[str, str], list[tuple[Path, Path]]] = {}
+        unmatched: list[Path] = []
+        orderbook_paths = {path.name: path for path in self.data_dir.glob("*_orderbook_*.csv")}
+        matched_orderbooks: set[Path] = set()
 
-        for file_path in files:
-            parts = file_path.name.split("_")
-            if len(parts) < 2:
+        for message_path in sorted(self.data_dir.glob("*_message_*.csv")):
+            key = self._lobster_file_key(message_path)
+            if key is None:
                 continue
-            symbol = parts[0]
-            date = parts[1]
-            key = (symbol, date)
-            grouped.setdefault(key, {})
-            if "message" in file_path.name:
-                grouped[key]["message"] = file_path
-            elif "orderbook" in file_path.name:
-                grouped[key]["orderbook"] = file_path
+            orderbook_path = orderbook_paths.get(message_path.name.replace("_message_", "_orderbook_"))
+            if orderbook_path is None:
+                unmatched.append(message_path)
+                continue
+            grouped_segments.setdefault(key, []).append((message_path, orderbook_path))
+            matched_orderbooks.add(orderbook_path)
 
-        pairs = [
-            LobFilePair(symbol=symbol, date=date, message_path=paths["message"], orderbook_path=paths["orderbook"])
-            for (symbol, date), paths in grouped.items()
-            if {"message", "orderbook"} <= set(paths)
-        ]
+        unmatched.extend(
+            orderbook_path
+            for orderbook_path in sorted(orderbook_paths.values())
+            if orderbook_path not in matched_orderbooks
+        )
+        if unmatched:
+            raise ValueError(
+                "Unmatched LOBSTER files without message/orderbook counterpart: "
+                + ", ".join(path.name for path in unmatched)
+            )
+
+        pairs: list[LobFilePair] = []
+        for (symbol, date), segments in grouped_segments.items():
+            sorted_segments = sorted(segments, key=lambda segment: self._lobster_segment_sort_key(segment[0]))
+            pairs.append(
+                LobFilePair(
+                    symbol=symbol,
+                    date=date,
+                    segments=tuple(
+                        LobFileSegment(message_path=message_path, orderbook_path=orderbook_path)
+                        for message_path, orderbook_path in sorted_segments
+                    ),
+                )
+            )
         return sorted(pairs, key=lambda pair: (pair.symbol, pair.date))
 
     def split_pairs(self, pairs: list[LobFilePair]) -> dict[str, list[LobFilePair]]:
@@ -258,13 +313,9 @@ class LobProcessingPipeline:
                 processed[split].append(self._clone_prepared_day(prepared_days[pair.output_stem], split))
         return processed
 
-    def load_and_trim_pair(self, pair: LobFilePair) -> pd.DataFrame:
-        """this function: delete 'ghost' levels if placeholder values are recognized;
-        joins orderbook/message data for a particular day;
-        filters out the first/last 15 minutes."""
-        print(f"Loading raw data for {pair.label}.")
+    def _load_joined_segment(self, segment: LobFileSegment) -> pd.DataFrame:
         message_result = read_lobster_message_csv(
-            pair.message_path,
+            segment.message_path,
             time_column=self.config.data.time_column,
             size_column=self.config.preprocessing.message.size_column,
             price_column=self.config.preprocessing.message.price_column,
@@ -272,20 +323,44 @@ class LobProcessingPipeline:
             categorical_value_map=self.config.preprocessing.message.categorical_value_map,
         )
         message_df = message_result.dataframe
-        orderbook_df = read_lobster_orderbook_csv(pair.orderbook_path).dataframe
+        orderbook_df = read_lobster_orderbook_csv(segment.orderbook_path).dataframe
         trading_session_mask = message_df[self.config.data.time_column].between(
             self.config.preprocessing.temporal_features.market_open_seconds,
             self.config.preprocessing.temporal_features.market_close_seconds,
             inclusive="both",
         )
-        if not bool(trading_session_mask.any()):
-            raise ValueError(
-                f"No rows for {pair.label} inside trading session window "
-                f"[{self.config.preprocessing.temporal_features.market_open_seconds}, "
-                f"{self.config.preprocessing.temporal_features.market_close_seconds}] seconds."
+        if bool(trading_session_mask.any()):
+            handle_abnormal_prices([message_df, orderbook_df], row_mask=trading_session_mask)
+        else:
+            print(
+                f"Segment {segment.message_path.name} has no rows inside the configured trading session; "
+                "it will be trimmed."
             )
-        handle_abnormal_prices([message_df, orderbook_df], row_mask=trading_session_mask)
-        joined = self.joiner.transform(message_df, orderbook_df)
+        return self.joiner.transform(message_df, orderbook_df)
+
+    def load_and_trim_pair(self, pair: LobFilePair) -> pd.DataFrame:
+        """this function: delete 'ghost' levels if placeholder values are recognized;
+        joins orderbook/message data for a particular day;
+        filters out the first/last 15 minutes."""
+        print(f"Loading raw data for {pair.label}.")
+        joined_segments = [
+            self._load_joined_segment(segment)
+            for segment in pair.segments
+        ]
+        joined = pd.concat(joined_segments, ignore_index=True) if len(joined_segments) > 1 else joined_segments[0]
+        if len(joined_segments) > 1:
+            before_dedup = len(joined)
+            dedupe_columns = [column for column in joined.columns if column != "delta_t"]
+            joined = joined.drop_duplicates(subset=dedupe_columns, ignore_index=True)
+            duplicate_count = before_dedup - len(joined)
+            if duplicate_count:
+                print(f"Removed {duplicate_count} duplicated rows across segments for {pair.label}.")
+        joined = joined.sort_values(
+            self.config.data.time_column,
+            kind="mergesort",
+            ignore_index=True,
+        )
+        joined["delta_t"] = joined[self.config.data.time_column] - joined[self.config.data.time_column].shift(1)
         trimmed = self.session_filter.transform(joined) #session_filter.transform gets rid of first/last 15 mins
         print(f"Loaded and trimmed {pair.label}: {len(trimmed)} rows.")
         return trimmed

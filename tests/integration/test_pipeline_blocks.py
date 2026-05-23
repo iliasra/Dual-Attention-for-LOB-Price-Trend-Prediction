@@ -37,9 +37,10 @@ from kinematic_preprocessing import (
     MessageFeatureProcessor,
     MessageOrderbookJoiner,
     SnapshotBatchProcessor,
+    TradingSessionFilter,
 )
 from model import build_model
-from processing import LobFilePair, LobProcessingPipeline, ProcessedDay
+from processing import LobFilePair, LobFileSegment, LobProcessingPipeline, ProcessedDay
 
 
 @pytest.fixture()
@@ -399,8 +400,12 @@ def test_feature_schema_rejects_missing_or_extra_split_columns(artifact_dir: Pat
         pair = LobFilePair(
             symbol="TEST",
             date=date,
-            message_path=artifact_dir / f"{date}_message.csv",
-            orderbook_path=artifact_dir / f"{date}_orderbook.csv",
+            segments=(
+                LobFileSegment(
+                    message_path=artifact_dir / f"{date}_message.csv",
+                    orderbook_path=artifact_dir / f"{date}_orderbook.csv",
+                ),
+            ),
         )
         return ProcessedDay(
             split=split,
@@ -437,3 +442,81 @@ def test_feature_schema_rejects_missing_or_extra_split_columns(artifact_dir: Pat
 
     with pytest.raises(ValueError, match="Feature schema mismatch.*missing columns=.*feature_b.*extra columns=.*feature_c"):
         pipeline.apply_feature_schema(processed_splits, artifact_dir / "feature_schema.yaml")
+
+
+def test_pipeline_loads_multiple_lobster_segments_for_one_trading_day(artifact_dir: Path) -> None:
+    data_config, preprocessing_config = make_test_configs()
+    preprocessing_config.temporal_features.market_open_seconds = 34200.0
+    preprocessing_config.temporal_features.market_close_seconds = 34204.0
+    preprocessing_config.temporal_features.start_offset_minutes = 0
+    preprocessing_config.temporal_features.end_offset_minutes = 0
+
+    message_columns = ["time", "type", "order_id", "size", "price", "direction"]
+    orderbook_columns = ["ask_price_1", "ask_size_1", "bid_price_1", "bid_size_1"]
+    first_messages = pd.DataFrame(
+        [
+            [34200.0, 1, 1, 10, 101.0, 1],
+            [34201.0, 1, 2, 11, 102.0, -1],
+            [34202.0, 3, 2, 11, 102.0, -1],
+        ],
+        columns=message_columns,
+    )
+    second_messages = pd.DataFrame(
+        [
+            [34202.0, 3, 2, 11, 102.0, -1],
+            [34203.0, 1, 3, 12, 103.0, 1],
+            [34204.0, 1, 4, 13, 104.0, -1],
+        ],
+        columns=message_columns,
+    )
+    first_orderbook = pd.DataFrame(
+        [
+            [101.0, 20, 100.0, 19],
+            [102.0, 21, 101.0, 20],
+            [102.0, 21, 101.0, 20],
+        ],
+        columns=orderbook_columns,
+    )
+    second_orderbook = pd.DataFrame(
+        [
+            [102.0, 21, 101.0, 20],
+            [103.0, 22, 102.0, 21],
+            [104.0, 23, 103.0, 22],
+        ],
+        columns=orderbook_columns,
+    )
+
+    for suffix, message_df, orderbook_df in (
+        ("34200000_34202000", first_messages, first_orderbook),
+        ("34202000_34204000", second_messages, second_orderbook),
+    ):
+        message_df.to_csv(artifact_dir / f"TEST_2020-01-01_{suffix}_message_1.csv", index=False)
+        orderbook_df.to_csv(artifact_dir / f"TEST_2020-01-01_{suffix}_orderbook_1.csv", index=False)
+
+    pipeline = object.__new__(LobProcessingPipeline)
+    pipeline.config = type(
+        "Config",
+        (),
+        {
+            "data": data_config,
+            "preprocessing": preprocessing_config,
+        },
+    )()
+    pipeline.data_dir = artifact_dir
+    pipeline.joiner = MessageOrderbookJoiner(time_column=data_config.time_column)
+    pipeline.session_filter = TradingSessionFilter(
+        time_column=data_config.time_column,
+        market_open_seconds=preprocessing_config.temporal_features.market_open_seconds,
+        market_close_seconds=preprocessing_config.temporal_features.market_close_seconds,
+        start_offset_minutes=0,
+        end_offset_minutes=0,
+    )
+
+    pairs = pipeline.discover_pairs()
+    assert len(pairs) == 1
+    assert pairs[0].segment_count == 2
+
+    trimmed = pipeline.load_and_trim_pair(pairs[0])
+
+    assert trimmed[data_config.time_column].tolist() == [34200.0, 34201.0, 34202.0, 34203.0, 34204.0]
+    assert len(trimmed) == 5

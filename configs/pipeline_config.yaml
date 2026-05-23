@@ -16,20 +16,40 @@ data:
   # NB: time/label col are automatically excluded as they are used
   # to generate specific .npy files for the model to use. 
   feature_exclude_columns: []
-  sequence_window: 64
+  sequence_window: 100
 
 # fallback only used when folds is empty
 dataset_splits:
-  train_dates: ["2012-06-21"]
-  validation_dates: ["2012-06-22"]
-  test_dates: ["2012-06-23"]
+  train_dates: ["2024-03-04"]
+  validation_dates: ["2024-03-05"]
+  test_dates: ["2024-03-06"]
 
 # default behavior: uses folds
 folds:
   - id: fold_001
-    train_dates: ["2012-06-21"]
-    validation_dates: ["2012-06-22"]
-    test_dates: ["2012-06-23"]
+    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06"]
+    validation_dates: ["2024-03-07"]
+    test_dates: ["2024-03-08"]
+  - id: fold_002
+    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07"]
+    validation_dates: ["2024-03-08"]
+    test_dates: ["2024-03-11"]
+  - id: fold_003
+    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08"]
+    validation_dates: ["2024-03-11"]
+    test_dates: ["2024-03-12"]
+  - id: fold_004
+    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11"]
+    validation_dates: ["2024-03-12"]
+    test_dates: ["2024-03-13"]
+  - id: fold_005
+    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11", "2024-03-12"]
+    validation_dates: ["2024-03-13"]
+    test_dates: ["2024-03-14"]
+  - id: fold_006
+    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11", "2024-03-12", "2024-03-13"]
+    validation_dates: ["2024-03-14"]
+    test_dates: ["2024-03-15"]
 
 preprocessing:
   snapshot_window: 100
