@@ -29,6 +29,18 @@ METRIC_NAMES = (
 SPLIT_METRIC_PREFIXES = ("train", "val", "test")
 
 
+def format_duration(seconds: float) -> str:
+    """Return a compact human-readable duration string."""
+    total_seconds = max(0.0, float(seconds))
+    hours, remainder = divmod(total_seconds, 3600.0)
+    minutes, seconds = divmod(remainder, 60.0)
+    if hours >= 1:
+        return f"{int(hours)}h {int(minutes):02d}m {seconds:05.2f}s"
+    if minutes >= 1:
+        return f"{int(minutes)}m {seconds:05.2f}s"
+    return f"{seconds:.2f}s"
+
+
 def resolve_config_path(config: ExperimentConfig, path: str | Path) -> Path:
     candidate = Path(path)
     return candidate if candidate.is_absolute() else (config.path.parent / candidate).resolve()
@@ -116,6 +128,7 @@ def save_preprocessing_metadata(
     label_distribution: dict[str, Any] | None = None,
     price_static_plgs: dict[str, Any] | None = None,
     volume_static_exp: dict[str, Any] | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> Path:
     lambdas = fast_smoothing_lambda_summary(config)
     if lambda_results:
@@ -135,6 +148,8 @@ def save_preprocessing_metadata(
         payload["price_static_plgs"] = price_static_plgs
     if volume_static_exp is not None:
         payload["volume_static_exp"] = volume_static_exp
+    if timing is not None:
+        payload["timing"] = timing
     target = preprocessing_metadata_path(sequence_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as handle:
@@ -402,6 +417,7 @@ def save_run_log(
     config_snapshot_path: Path,
     model_parameters: dict[str, int],
     preprocessing_metadata: dict[str, Any] | None = None,
+    timing: dict[str, Any] | None = None,
     fold: str = "single",
 ) -> None:
     lambda_summary = fast_smoothing_lambda_summary(config, preprocessing_metadata)
@@ -416,6 +432,10 @@ def save_run_log(
         handle.write(f"Confusion matrices: {confusion_matrices_path}\n")
         handle.write(f"Model directory: {config.training.model_dir}\n")
         handle.write(f"Best model path: {config.training.best_model_path}\n")
+        if timing:
+            handle.write("\nTiming\n")
+            for key, value in timing.items():
+                handle.write(f"{key}: {value}\n")
         handle.write("\nModel temporal window\n")
         handle.write(f"max_dt_quantile: {config.model.max_dt_quantile}\n")
         handle.write(f"resolved_max_dt: {config.model.max_dt}\n")

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from time import perf_counter
+from typing import Any
 
 import numpy as np
 from torch.utils.data import DataLoader
@@ -16,6 +18,7 @@ from datasets import LOBDataset
 from model import build_model
 from run_logging import (
     class_distribution,
+    format_duration,
     load_preprocessing_metadata,
     model_parameter_summary,
     next_run_stem,
@@ -134,10 +137,10 @@ def resolve_class_weights(config: ExperimentConfig, train_dataset: LOBDataset) -
 def evaluate_best_model_on_test_split(
     *,
     trainer: LobTrainer,
-    model,
+    model: Any,
     test_loader: DataLoader,
     history: list[EpochResult],
-) -> None:
+) -> float:
     """Evaluate the validation-selected model once on the held-out test split."""
     if not history:
         raise ValueError("Cannot evaluate the test split because training produced no epoch history.")
@@ -147,11 +150,13 @@ def evaluate_best_model_on_test_split(
         "Training uses train/validation splits only. "
         f"Evaluating best validation epoch {best_epoch} on the held-out test split."
     )
+    evaluation_start = perf_counter()
     test_result = trainer.evaluate(
         model=model,
         data_loader=test_loader,
         description=f"Best epoch {best_epoch} [Test]",
     )
+    evaluation_duration_seconds = perf_counter() - evaluation_start
     best_history.test_loss = test_result.loss
     best_history.test_metrics = test_result.metrics
     print(
@@ -159,8 +164,10 @@ def evaluate_best_model_on_test_split(
         f"test_loss={test_result.loss:.6f}, "
         f"test_acc={test_result.metrics.accuracy:.4f}, "
         f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
-        f"test_ece={test_result.metrics.expected_calibration_error:.4f}."
+        f"test_ece={test_result.metrics.expected_calibration_error:.4f} "
+        f"({format_duration(evaluation_duration_seconds)})."
     )
+    return evaluation_duration_seconds
 
 
 def fold_artifact_paths(
@@ -187,6 +194,7 @@ def train_fold(
     run_stem: str,
     seed: int | None = None,
 ) -> dict:
+    fold_start = perf_counter()
     fold_seed = config.seed if seed is None else int(seed)
     set_global_seed(fold_seed)
     print(f"Starting training fold '{fold_id}'.")
@@ -286,13 +294,24 @@ def train_fold(
         preprocessing_metadata=preprocessing_metadata,
     )
     trainer = LobTrainer(config.training)
+    fit_start = perf_counter()
     model, history = trainer.fit(model, train_loader, validation_loader)
-    evaluate_best_model_on_test_split(
+    fit_duration_seconds = perf_counter() - fit_start
+    test_evaluation_duration_seconds = evaluate_best_model_on_test_split(
         trainer=trainer,
         model=model,
         test_loader=test_loader,
         history=history,
     )
+    fold_duration_seconds = perf_counter() - fold_start
+    timing = {
+        "fold_training_seconds": round(fold_duration_seconds, 6),
+        "fold_training_duration": format_duration(fold_duration_seconds),
+        "model_fit_seconds": round(fit_duration_seconds, 6),
+        "model_fit_duration": format_duration(fit_duration_seconds),
+        "test_evaluation_seconds": round(test_evaluation_duration_seconds, 6),
+        "test_evaluation_duration": format_duration(test_evaluation_duration_seconds),
+    }
 
     save_epoch_history(history, run_losses_path, config=config, fold=fold_id)
     save_confusion_matrices(history, run_confusion_matrices_path, fold=fold_id)
@@ -308,9 +327,15 @@ def train_fold(
         config_snapshot_path=run_config_path,
         model_parameters=model_parameters,
         preprocessing_metadata=preprocessing_metadata,
+        timing=timing,
         fold=fold_id,
     )
-    print(f"Fold {fold_id} training complete. Best model saved to: {config.training.best_model_path}")
+    print(
+        f"Fold {fold_id} training complete "
+        f"(fit {timing['model_fit_duration']}, test {timing['test_evaluation_duration']}, "
+        f"total {timing['fold_training_duration']}). "
+        f"Best model saved to: {config.training.best_model_path}"
+    )
     print(f"Fold {fold_id} run log saved to: {run_log_path}")
     for epoch_index, result in enumerate(history, start=1):
         test_suffix = "" if result.test_loss is None else f", test_loss={result.test_loss:.6f}"
@@ -332,6 +357,7 @@ def train_fold(
         "model_max_dt": max_dt_summary,
         "class_weights": class_weight_summary,
         "dataset_sizes": dataset_sizes,
+        "timing": timing,
         "logs": {
             "run_log": str(run_log_path),
             "config": str(run_config_path),
@@ -342,6 +368,7 @@ def train_fold(
 
 
 def main() -> None:
+    training_start = perf_counter()
     config = load_config()
     set_global_seed(config.seed)
     print(f"Global seed set to {config.seed}.")
@@ -380,9 +407,15 @@ def main() -> None:
         )
         summary["folds"][fold.id] = fold_summary
 
+    training_duration_seconds = perf_counter() - training_start
+    summary["timing"] = {
+        "training_pipeline_seconds": round(training_duration_seconds, 6),
+        "training_pipeline_duration": format_duration(training_duration_seconds),
+    }
     summary_path = run_log_dir / "summary.yaml"
     save_run_summary(summary, summary_path)
     print(f"Run summary saved to: {summary_path}")
+    print(f"Training pipeline finished ({format_duration(training_duration_seconds)}).")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -29,7 +30,7 @@ try:
         price_static_distance_frame,
     )
     from lobster_io import read_lobster_message_csv, read_lobster_orderbook_csv
-    from run_logging import save_preprocessing_metadata
+    from run_logging import format_duration, save_preprocessing_metadata
 except ImportError:  # pragma: no cover
     from .configuration import ExperimentConfig, FoldConfig, load_config
     from .datasets import DailySequenceBuilder
@@ -52,7 +53,7 @@ except ImportError:  # pragma: no cover
         price_static_distance_frame,
     )
     from .lobster_io import read_lobster_message_csv, read_lobster_orderbook_csv
-    from .run_logging import save_preprocessing_metadata
+    from .run_logging import format_duration, save_preprocessing_metadata
 
 
 SPLIT_NAMES = ("train", "validation", "test")
@@ -875,6 +876,7 @@ class LobProcessingPipeline:
         split_pairs: dict[str, list[LobFilePair]],
         prepared_days: dict[str, ProcessedDay],
     ) -> dict[str, dict[str, tuple[int, int]]]:
+        fold_start = perf_counter()
         print(f"Starting fold {fold.id}.")
         self.reset_fold_state()
         processed_splits = self.prepared_splits_for_fold(fold, split_pairs, prepared_days)
@@ -896,6 +898,7 @@ class LobProcessingPipeline:
             processed_dir=fold_processed_dir,
             sequence_dir=fold_sequence_dir,
         )
+        fold_duration_seconds = perf_counter() - fold_start
         metadata_path = save_preprocessing_metadata(
             self.config,
             fold_sequence_dir,
@@ -903,9 +906,13 @@ class LobProcessingPipeline:
             label_distribution=label_distribution,
             price_static_plgs=plgs_parameters,
             volume_static_exp=volume_static_exp,
+            timing={
+                "fold_preprocessing_seconds": round(fold_duration_seconds, 6),
+                "fold_preprocessing_duration": format_duration(fold_duration_seconds),
+            },
         )
         print(f"Saved preprocessing metadata for fold {fold.id} to {metadata_path}.")
-        print(f"Finished fold {fold.id}.")
+        print(f"Finished fold {fold.id} ({format_duration(fold_duration_seconds)}).")
         return {
             split: {
                 day.pair.output_stem: day.normalized.shape if day.normalized is not None else day.processed.shape
@@ -915,13 +922,16 @@ class LobProcessingPipeline:
         }
 
     def run(self) -> dict[str, dict[str, dict[str, tuple[int, int]]]]:
+        pipeline_start = perf_counter()
         print("Starting LOB processing pipeline.")
         pairs = self.discover_pairs()
         print(f"Discovered {len(pairs)} message/orderbook file pair(s).")
+        prepare_start = perf_counter()
         prepared_days = self.prepare_required_days(pairs)
+        print(f"Prepared required trading days ({format_duration(perf_counter() - prepare_start)}).")
         summary: dict[str, dict[str, dict[str, tuple[int, int]]]] = {}
         for fold in self.config.folds:
             split_pairs = self.split_pairs_for_fold(pairs, fold)
             summary[fold.id] = self.run_fold(fold, split_pairs, prepared_days)
-        print("LOB processing pipeline finished.")
+        print(f"LOB processing pipeline finished ({format_duration(perf_counter() - pipeline_start)}).")
         return summary

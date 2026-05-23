@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Iterable
 
 import numpy as np
@@ -12,8 +13,10 @@ from tqdm import tqdm
 
 try:
     from configuration import TrainingConfig, load_config
+    from run_logging import format_duration
 except ImportError:  # pragma: no cover
     from .configuration import TrainingConfig, load_config
+    from .run_logging import format_duration
 
 
 class FocalLoss(nn.Module):
@@ -271,6 +274,7 @@ class LobTrainer:
         The held-out test split is intentionally excluded from this method. Evaluate
         the returned best model on test data after training has finished.
         """
+        fit_start = perf_counter()
         model = model.to(self.device)
         criterion = self._criterion()
         optimizer = torch.optim.AdamW(
@@ -350,7 +354,7 @@ class LobTrainer:
                 f"Best model selected from epoch {best_epoch}: "
                 f"val_loss={best_val_loss:.6f}."
             )
-        print("Training finished.")
+        print(f"Training finished ({format_duration(perf_counter() - fit_start)}).")
         return model, history
 
     def _run_epoch(
