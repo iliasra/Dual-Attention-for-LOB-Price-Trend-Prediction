@@ -28,6 +28,7 @@ try:
         handle_abnormal_prices,
         price_static_distance_frame,
     )
+    from lobster_io import read_lobster_message_csv, read_lobster_orderbook_csv
     from run_logging import save_preprocessing_metadata
 except ImportError:  # pragma: no cover
     from .configuration import ExperimentConfig, FoldConfig, load_config
@@ -50,6 +51,7 @@ except ImportError:  # pragma: no cover
         handle_abnormal_prices,
         price_static_distance_frame,
     )
+    from .lobster_io import read_lobster_message_csv, read_lobster_orderbook_csv
     from .run_logging import save_preprocessing_metadata
 
 
@@ -261,9 +263,28 @@ class LobProcessingPipeline:
         joins orderbook/message data for a particular day;
         filters out the first/last 15 minutes."""
         print(f"Loading raw data for {pair.label}.")
-        message_df = pd.read_csv(pair.message_path)
-        orderbook_df = pd.read_csv(pair.orderbook_path)
-        handle_abnormal_prices([message_df, orderbook_df])
+        message_result = read_lobster_message_csv(
+            pair.message_path,
+            time_column=self.config.data.time_column,
+            size_column=self.config.preprocessing.message.size_column,
+            price_column=self.config.preprocessing.message.price_column,
+            order_id_column=self.config.preprocessing.message.order_id_column,
+            categorical_value_map=self.config.preprocessing.message.categorical_value_map,
+        )
+        message_df = message_result.dataframe
+        orderbook_df = read_lobster_orderbook_csv(pair.orderbook_path).dataframe
+        trading_session_mask = message_df[self.config.data.time_column].between(
+            self.config.preprocessing.temporal_features.market_open_seconds,
+            self.config.preprocessing.temporal_features.market_close_seconds,
+            inclusive="both",
+        )
+        if not bool(trading_session_mask.any()):
+            raise ValueError(
+                f"No rows for {pair.label} inside trading session window "
+                f"[{self.config.preprocessing.temporal_features.market_open_seconds}, "
+                f"{self.config.preprocessing.temporal_features.market_close_seconds}] seconds."
+            )
+        handle_abnormal_prices([message_df, orderbook_df], row_mask=trading_session_mask)
         joined = self.joiner.transform(message_df, orderbook_df)
         trimmed = self.session_filter.transform(joined) #session_filter.transform gets rid of first/last 15 mins
         print(f"Loaded and trimmed {pair.label}: {len(trimmed)} rows.")

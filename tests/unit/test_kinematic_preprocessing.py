@@ -40,6 +40,7 @@ from kinematic_preprocessing import (
     time_to_sincos,
 )
 from fast_kinematic_preprocessing import PenalizedBSplineKinematicTokenizer
+from lobster_io import read_lobster_message_csv
 
 
 def test_handle_abnormal_prices_drops_complete_ghost_levels() -> None:
@@ -57,6 +58,64 @@ def test_handle_abnormal_prices_drops_complete_ghost_levels() -> None:
     assert "bid_price_2" not in df.columns
     assert "bid_size_2" not in df.columns
     assert {"ask_price_1", "ask_size_1"} <= set(df.columns)
+
+
+def test_handle_abnormal_prices_ignores_dummy_values_outside_row_mask() -> None:
+    df = pd.DataFrame(
+        {
+            "ask_price_1": [9999999999.0, 101.0, 102.0],
+            "ask_size_1": [0, 20, 21],
+            "bid_price_1": [99.0, 100.0, 101.0],
+            "bid_size_1": [19, 20, 21],
+        }
+    )
+
+    handle_abnormal_prices([df], row_mask=[False, True, True])
+
+    assert {"ask_price_1", "ask_size_1", "bid_price_1", "bid_size_1"} <= set(df.columns)
+
+
+def test_handle_abnormal_prices_drops_ghost_levels_inside_row_mask() -> None:
+    df = pd.DataFrame(
+        {
+            "ask_price_1": [9999999999.0, 101.0, 102.0],
+            "ask_size_1": [0, 20, 21],
+            "bid_price_2": [98.0, -9999999999.0, -9999999999.0],
+            "bid_size_2": [19, 0, 0],
+        }
+    )
+
+    handle_abnormal_prices([df], row_mask=[False, True, True])
+
+    assert {"bid_price_2", "bid_size_2"} & set(df.columns) == set()
+    assert {"ask_price_1", "ask_size_1"} <= set(df.columns)
+
+
+def test_read_lobster_message_csv_drops_trailing_extra_column() -> None:
+    artifact_dir = Path(__file__).resolve().parent / ".test_artifacts" / "read_lobster_message_csv"
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True)
+    message_path = artifact_dir / "sample_message.csv"
+    message_path.write_text(
+        "1.0,1,100,10,451200,1,UBSS\n"
+        "2.0,3,100,10,451200,-1,\n",
+        encoding="utf-8",
+    )
+
+    result = read_lobster_message_csv(
+        message_path,
+        time_column="time",
+        size_column="size",
+        price_column="price",
+        order_id_column="order_id",
+        categorical_value_map={"type": [1, 2, 3, 4, 5], "direction": [-1, 1]},
+    )
+
+    assert not result.had_header
+    assert result.dropped_trailing_extra_column
+    assert result.dataframe.columns.tolist() == ["time", "type", "order_id", "size", "price", "direction"]
+    assert result.dataframe.shape == (2, 6)
 
 
 def test_time_to_sincos_maps_day_quarters() -> None:

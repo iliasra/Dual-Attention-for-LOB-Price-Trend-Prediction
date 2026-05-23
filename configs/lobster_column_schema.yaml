@@ -1,0 +1,27 @@
+# Column schema used by src/lobster_io.py when raw LOBSTER CSV files do not
+# provide headers.
+#
+# Message files have the six standard LOBSTER fields below. Some feeds include
+# one extra trailing Market Participant ID/attribution column; the project drops 
+# that column before preprocessing.
+message:
+  columns:
+    - time
+    - type
+    - order_id
+    - size
+    - price
+    - direction
+  trailing_extra_column:
+    name: mpid
+    action: drop
+
+# Orderbook files repeat these four fields once per LOB level. The inferred
+# column names are built as <field>_<level>, starting at level_start.
+orderbook:
+  level_start: 1
+  per_level_columns:
+    - ask_price
+    - ask_size
+    - bid_price
+    - bid_size

@@ -30,13 +30,25 @@ except ImportError:  # pragma: no cover
     from .utils import save_yaml
 
 ArrayLike = Union[float, int, np.ndarray, pd.Series]
+DUMMY_PRICE_VALUES = [9999999999, -9999999999, 9999999999.0, -9999999999.0]
 
 
-def sanity_scheck(dataframes: list[pd.DataFrame]) -> None:
+def _normalize_row_mask(row_mask: pd.Series | np.ndarray | list[bool], length: int) -> np.ndarray:
+    mask = np.asarray(row_mask, dtype=bool)
+    if mask.shape != (length,):
+        raise ValueError(f"row_mask must have shape ({length},), got {mask.shape}.")
+    return mask
+
+
+def sanity_scheck(
+    dataframes: list[pd.DataFrame],
+    row_mask: pd.Series | np.ndarray | list[bool] | None = None,
+) -> None:
     for dataframe in dataframes:
-        if 9999999999 in dataframe.max(numeric_only=True).tolist():
+        checked = dataframe if row_mask is None else dataframe.loc[_normalize_row_mask(row_mask, len(dataframe))]
+        if 9999999999 in checked.max(numeric_only=True).tolist():
             raise ValueError("One dataframe contains abnormal value 9999999999.")
-        if -9999999999 in dataframe.min(numeric_only=True).tolist():
+        if -9999999999 in checked.min(numeric_only=True).tolist():
             raise ValueError("One dataframe contains abnormal value -9999999999.")
 
 
@@ -51,9 +63,11 @@ def _price_level_metadata(column_name: str) -> tuple[str, str, int] | None:
 def _ghost_level_columns(
     df: pd.DataFrame,
     dummy_values: list[float | int],
+    row_mask: pd.Series | np.ndarray | list[bool] | None = None,
 ) -> list[str]:
     columns_to_drop: set[str] = set()
     grouped_columns: dict[tuple[str, int], dict[str, str]] = {}
+    checked = df if row_mask is None else df.loc[_normalize_row_mask(row_mask, len(df))]
 
     for column in df.columns:
         metadata = _price_level_metadata(column)
@@ -66,7 +80,7 @@ def _ghost_level_columns(
         price_column = columns.get("price")
         if price_column is None:
             continue
-        is_ghost_level = df[price_column].isin(dummy_values).all()
+        is_ghost_level = checked[price_column].isin(dummy_values).all()
         if not is_ghost_level:
             continue
         columns_to_drop.add(price_column)
@@ -77,13 +91,15 @@ def _ghost_level_columns(
     return sorted(columns_to_drop)
 
 
-def handle_abnormal_prices(dataframes: list[pd.DataFrame]) -> None:
-    dummy_values = [9999999999, -9999999999, 9999999999.0, -9999999999.0]
+def handle_abnormal_prices(
+    dataframes: list[pd.DataFrame],
+    row_mask: pd.Series | np.ndarray | list[bool] | None = None,
+) -> None:
     for dataframe in dataframes:
-        columns_to_drop = _ghost_level_columns(dataframe, dummy_values)
+        columns_to_drop = _ghost_level_columns(dataframe, DUMMY_PRICE_VALUES, row_mask=row_mask)
         if columns_to_drop:
             dataframe.drop(columns=columns_to_drop, inplace=True)
-    sanity_scheck(dataframes)
+    sanity_scheck(dataframes, row_mask=row_mask)
 
 class ZScoreResult(NamedTuple):
     normalized: pd.Series
