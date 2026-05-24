@@ -123,61 +123,9 @@ cp -r "$PROJECT_DIR" "$TMPDIR/"
 cd "$WORK_DIR"
 echo "Now in PWD=$(pwd)"
 touch "$RUN_MARKER"
-ls -la
-ls -la scripts
-ls -la src
 
 echo
 echo "===== RUNNING SCRIPTS ====="
-echo
-echo "===== MODULE PREFLIGHT ====="
-PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python - <<'PY'
-import sys
-from dataclasses import replace
-
-import numpy as np
-import pandas as pd
-import scipy
-import torch
-import yaml
-import tqdm
-from scipy.interpolate import BSpline, UnivariateSpline
-
-from configuration import load_config
-from model import build_model
-
-print(sys.executable)
-print(sys.version)
-print("numpy", np.__version__)
-print("pandas", pd.__version__)
-print("scipy", scipy.__version__)
-print("torch", torch.__version__)
-print("torch cuda build", torch.version.cuda)
-print("cuda available", torch.cuda.is_available())
-print("cuda device count", torch.cuda.device_count())
-print("yaml", yaml.__version__)
-print("tqdm", tqdm.__version__)
-
-array = np.arange(6, dtype=np.float32).reshape(2, 3)
-tensor = torch.from_numpy(array)
-array[0, 0] = 123.0
-assert float(tensor[0, 0]) == 123.0
-assert tensor.numpy().shape == (2, 3)
-assert BSpline is not None and UnivariateSpline is not None
-
-config = load_config()
-build_model(replace(config.model, d_input=8, max_dt=1.0))
-
-if config.training.device.startswith("cuda"):
-    device = torch.device(config.training.device)
-    device_index = device.index if device.index is not None else torch.cuda.current_device()
-    free, total = torch.cuda.mem_get_info(device_index)
-    print("resolved cuda device", device)
-    print("cuda memory total", total)
-    print("cuda memory free", free)
-
-print("module preflight ok")
-PY
 echo
 echo "===== RUNNING TRAINING PIPELINE ====="
 PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python scripts/run_training.py
