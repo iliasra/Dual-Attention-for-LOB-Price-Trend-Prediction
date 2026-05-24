@@ -179,9 +179,6 @@ if config.training.device.startswith("cuda"):
 print("module preflight ok")
 PY
 echo
-echo "===== RUNNING PROCESSING PIPELINE ====="
-PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python scripts/process_data.py
-echo
 echo "===== RUNNING TRAINING PIPELINE ====="
 PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python scripts/run_training.py
 

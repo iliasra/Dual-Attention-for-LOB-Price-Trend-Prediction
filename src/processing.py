@@ -274,16 +274,21 @@ class LobProcessingPipeline:
             raise ValueError(f"Fold {fold.id} has no training file pairs.")
         return split_pairs
 
-    def _required_fold_dates(self) -> set[str]:
+    def _required_fold_dates(self, folds: list[FoldConfig] | None = None) -> set[str]:
         requested_dates: set[str] = set()
-        for fold in self.config.folds:
+        selected_folds = self.config.folds if folds is None else folds
+        for fold in selected_folds:
             requested_dates.update(fold.train_dates)
             requested_dates.update(fold.validation_dates)
             requested_dates.update(fold.test_dates)
         return requested_dates
 
-    def prepare_required_days(self, pairs: list[LobFilePair]) -> dict[str, ProcessedDay]:
-        required_dates = self._required_fold_dates()
+    def prepare_required_days(
+        self,
+        pairs: list[LobFilePair],
+        folds: list[FoldConfig] | None = None,
+    ) -> dict[str, ProcessedDay]:
+        required_dates = self._required_fold_dates(folds)
         prepared: dict[str, ProcessedDay] = {}
         for pair in pairs:
             if pair.date not in required_dates:
@@ -921,16 +926,32 @@ class LobProcessingPipeline:
             for split, days in processed_splits.items()
         }
 
-    def run(self) -> dict[str, dict[str, dict[str, tuple[int, int]]]]:
+    def run(
+        self,
+        selected_fold_ids: set[str] | None = None,
+    ) -> dict[str, dict[str, dict[str, tuple[int, int]]]]:
         pipeline_start = perf_counter()
         print("Starting LOB processing pipeline.")
         pairs = self.discover_pairs()
         print(f"Discovered {len(pairs)} message/orderbook file pair(s).")
+
+        selected_folds = [
+            fold
+            for fold in self.config.folds
+            if selected_fold_ids is None or fold.id in selected_fold_ids
+        ]
+        if selected_fold_ids is not None:
+            found = {fold.id for fold in selected_folds}
+            missing = sorted(selected_fold_ids - found)
+            if missing:
+                raise ValueError(f"Unknown fold id(s): {missing}")
+            print(f"Selected {len(selected_folds)} fold(s): {', '.join(fold.id for fold in selected_folds)}.")
+
         prepare_start = perf_counter()
-        prepared_days = self.prepare_required_days(pairs)
+        prepared_days = self.prepare_required_days(pairs, folds=selected_folds)
         print(f"Prepared required trading days ({format_duration(perf_counter() - prepare_start)}).")
         summary: dict[str, dict[str, dict[str, tuple[int, int]]]] = {}
-        for fold in self.config.folds:
+        for fold in selected_folds:
             split_pairs = self.split_pairs_for_fold(pairs, fold)
             summary[fold.id] = self.run_fold(fold, split_pairs, prepared_days)
         print(f"LOB processing pipeline finished ({format_duration(perf_counter() - pipeline_start)}).")

@@ -1,0 +1,86 @@
+#!/bin/bash
+#PBS -N lob_preprocess_fold
+#PBS -l walltime=12:00:00
+#PBS -l select=1:ncpus=8:mem=24gb:ompthreads=8
+# Keep this range aligned with the non-empty, non-comment lines in configs/folds.txt.
+#PBS -J 1-6
+
+set -euo pipefail
+
+PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
+WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
+FOLDS_FILE="$PROJECT_DIR/configs/folds.txt"
+
+ARRAY_JOB_ID="${PBS_JOBID%%[*}"
+PREPROCESS_RUN_ID="${PREPROCESS_RUN_ID:-preprocess_${ARRAY_JOB_ID}}"
+OUTPUT_ROOT="$HOME/lob_preprocessed/$PREPROCESS_RUN_ID"
+
+if [ ! -f "$FOLDS_FILE" ]; then
+  echo "Fold list not found: $FOLDS_FILE" >&2
+  exit 1
+fi
+
+FOLD_COUNT="$(awk 'NF && $1 !~ /^#/ { count++ } END { print count + 0 }' "$FOLDS_FILE")"
+FOLD_ID="$(
+  awk -v index="$PBS_ARRAY_INDEX" '
+    NF && $1 !~ /^#/ {
+      count++
+      if (count == index) {
+        print $1
+        exit
+      }
+    }
+  ' "$FOLDS_FILE"
+)"
+
+if [ -z "$FOLD_ID" ]; then
+  echo "No fold id found for PBS_ARRAY_INDEX=$PBS_ARRAY_INDEX in $FOLDS_FILE ($FOLD_COUNT fold(s))." >&2
+  exit 1
+fi
+
+echo "===== PREPROCESS ARRAY TASK ====="
+echo "PBS_JOBID=$PBS_JOBID"
+echo "ARRAY_JOB_ID=$ARRAY_JOB_ID"
+echo "PBS_ARRAY_INDEX=$PBS_ARRAY_INDEX"
+echo "FOLDS_FILE=$FOLDS_FILE"
+echo "FOLD_COUNT=$FOLD_COUNT"
+echo "FOLD_ID=$FOLD_ID"
+echo "TMPDIR=$TMPDIR"
+echo "OUTPUT_ROOT=$OUTPUT_ROOT"
+
+ml purge
+
+set +u
+eval "$($HOME/miniforge3/bin/conda shell.bash hook)"
+conda activate transformer
+set -u
+
+# Avoid accidental uncontrolled oversubscription.
+export OMP_NUM_THREADS=8
+export MKL_NUM_THREADS=8
+export OPENBLAS_NUM_THREADS=8
+export NUMEXPR_NUM_THREADS=8
+
+echo "===== COPYING PROJECT TO TMPDIR ====="
+cp -r "$PROJECT_DIR" "$TMPDIR/"
+cd "$WORK_DIR"
+
+echo "===== RUNNING PREPROCESSING FOR $FOLD_ID ====="
+PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" \
+python scripts/process_data.py --fold-id "$FOLD_ID"
+
+echo "===== COPYING OUTPUTS BACK ====="
+mkdir -p "$OUTPUT_ROOT/data/sequences"
+mkdir -p "$OUTPUT_ROOT/data/processed_dataframes"
+mkdir -p "$OUTPUT_ROOT/data/derivatives_z_scores"
+
+rsync -a "$WORK_DIR/data/sequences/$FOLD_ID" \
+  "$OUTPUT_ROOT/data/sequences/"
+
+rsync -a "$WORK_DIR/data/processed_dataframes/$FOLD_ID" \
+  "$OUTPUT_ROOT/data/processed_dataframes/"
+
+rsync -a "$WORK_DIR/data/derivatives_z_scores/$FOLD_ID" \
+  "$OUTPUT_ROOT/data/derivatives_z_scores/"
+
+echo "===== DONE $FOLD_ID ====="
