@@ -98,6 +98,7 @@ preprocessing:
   kinematic_tokenization:
     method: fast # allowed: basis, fast
     chunk_size: 100000 # shared by fast price and volume tokenization
+    n_df_candidates: 25 # shared number of effective-df candidates explored by train GCV
   price_kinematic:
     enabled: true
     columns: auto

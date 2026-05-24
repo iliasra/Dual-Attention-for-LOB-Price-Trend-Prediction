@@ -18,6 +18,12 @@ try:
         calculate_adaptive_method_c_threshold_components,
         calculate_midprice,
     )
+    from gcv_lambda_cache import (
+        aggregate_daily_gcv_caches,
+        daily_lambda_gcv_cache_path,
+        lambda_gcv_cache_key,
+        load_daily_gcv_cache,
+    )
     from kinematic_preprocessing import (
         DerivativeNormalizer,
         MessageFeatureProcessor,
@@ -40,6 +46,12 @@ except ImportError:  # pragma: no cover
         TargetLabelPipeline,
         calculate_adaptive_method_c_threshold_components,
         calculate_midprice,
+    )
+    from .gcv_lambda_cache import (
+        aggregate_daily_gcv_caches,
+        daily_lambda_gcv_cache_path,
+        lambda_gcv_cache_key,
+        load_daily_gcv_cache,
     )
     from .kinematic_preprocessing import (
         DerivativeNormalizer,
@@ -111,7 +123,13 @@ class ProcessedDay:
 
 
 class LobProcessingPipeline:
-    def __init__(self, config: ExperimentConfig | None = None, data_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        config: ExperimentConfig | None = None,
+        data_dir: str | Path | None = None,
+        lambda_cache_dir: str | Path | None = None,
+        require_lambda_cache: bool = False,
+    ) -> None:
         self.config = config or load_config()
         self.root_dir = Path(__file__).resolve().parent.parent
         self.config_dir = self.config.path.parent
@@ -122,6 +140,8 @@ class LobProcessingPipeline:
         self.derivatives_stats_dir = self._resolve_path(
             Path(self.config.preprocessing.normalization.derivatives_stats_dir)
         )
+        self.lambda_cache_dir = None if lambda_cache_dir is None else Path(lambda_cache_dir).resolve()
+        self.require_lambda_cache = bool(require_lambda_cache)
 
         self.joiner = MessageOrderbookJoiner(
             time_column=self.config.data.time_column,
@@ -458,6 +478,9 @@ class LobProcessingPipeline:
         if not stream_config.enabled:
             return
 
+        if self._try_optimize_fast_stream_lambda_from_cache(train_days, kind=kind):
+            return
+
         window = preprocessing.snapshot_window
         raw_values_by_day, raw_centers_by_day, scale = self._stream_values_for_lambda_optimization(
             train_days,
@@ -485,6 +508,7 @@ class LobProcessingPipeline:
             window=window,
             n_basis=fast_config.n_basis,
             max_df=fast_config.df,
+            n_df_candidates=preprocessing.kinematic_tokenization.n_df_candidates,
             chunk_size=gcv_chunk_size,
             centers_by_day=centers_by_day,
             scale=scale,
@@ -506,6 +530,97 @@ class LobProcessingPipeline:
         self._optimize_fast_stream_lambda(train_days, kind="price")
         self._optimize_fast_stream_lambda(train_days, kind="volume")
         self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
+
+    def _stream_config_for_kind(self, kind: str):
+        if kind == "price":
+            return self.config.preprocessing.price_kinematic
+        if kind == "volume":
+            return self.config.preprocessing.volume_kinematic
+        raise ValueError("kind must be 'price' or 'volume'.")
+
+    def _lambda_cache_key_for_stream(self, *, kind: str, scale: float) -> str:
+        preprocessing = self.config.preprocessing
+        fast_config = self._stream_config_for_kind(kind).fast
+        return lambda_gcv_cache_key(
+            window=preprocessing.snapshot_window,
+            n_basis=fast_config.n_basis,
+            max_df=fast_config.df,
+            scale=scale,
+            n_df_candidates=preprocessing.kinematic_tokenization.n_df_candidates,
+        )
+
+    def _try_optimize_fast_stream_lambda_from_cache(
+        self,
+        train_days: list[ProcessedDay],
+        *,
+        kind: str,
+    ) -> bool:
+        if self.lambda_cache_dir is None:
+            return False
+
+        preprocessing = self.config.preprocessing
+        stream_config = self._stream_config_for_kind(kind)
+        if not stream_config.enabled:
+            return True
+
+        _, _, scale = self._stream_values_for_lambda_optimization(train_days, kind=kind)
+        cache_key = self._lambda_cache_key_for_stream(kind=kind, scale=scale)
+
+        caches = []
+        missing: list[Path] = []
+
+        for day in train_days:
+            if len(day.message_features) < preprocessing.snapshot_window:
+                continue
+
+            cache_path = daily_lambda_gcv_cache_path(
+                self.lambda_cache_dir,
+                cache_key=cache_key,
+                kind=kind,
+                output_stem=day.pair.output_stem,
+            )
+            if not cache_path.exists():
+                missing.append(cache_path)
+                continue
+
+            caches.append(load_daily_gcv_cache(cache_path))
+
+        if missing:
+            message = (
+                f"Missing {kind} lambda GCV cache file(s): "
+                + ", ".join(str(path) for path in missing[:5])
+                + (" ..." if len(missing) > 5 else "")
+            )
+            if self.require_lambda_cache:
+                raise FileNotFoundError(message)
+            print(message)
+            print(f"Falling back to in-fold {kind} lambda optimization.")
+            return False
+
+        if not caches:
+            if self.require_lambda_cache:
+                raise ValueError(f"No {kind} lambda GCV caches available for this fold.")
+            return False
+
+        result, total_count = aggregate_daily_gcv_caches(caches)
+        stream_config.fast.selected_smoothing_lambda = result.smoothing_lambda
+
+        self.fast_smoothing_lambda_results[kind] = {
+            "selected_smoothing_lambda": float(result.smoothing_lambda),
+            "effective_df": float(result.effective_df),
+            "mean_gcv": float(result.gcv_score),
+            "gcv_cache_total_count": int(total_count),
+            "gcv_cache_days": int(len(caches)),
+        }
+
+        print(
+            f"Selected fast {kind} smoothing_lambda={result.smoothing_lambda:.8g} "
+            f"from daily GCV cache "
+            f"(effective_df={result.effective_df:.4f}, "
+            f"mean_gcv={result.gcv_score:.8g}, "
+            f"count={total_count})."
+        )
+        return True
 
     def reset_fold_state(self) -> None:
         self.config.preprocessing.price_kinematic.fast.selected_smoothing_lambda = None

@@ -9,9 +9,9 @@ PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
 WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
 LOG_FILE="run_logs.txt"
 LOG_PATH="$TMPDIR/$LOG_FILE"
-LOG_HOME_PATH="$HOME/$LOG_FILE"
 RUN_ID="${PBS_JOBID:-training_$(date +%Y%m%d_%H%M%S)}"
 RUN_OUTPUT_DIR="$HOME/run_outputs/$RUN_ID"
+PROJECT_JOB_LOG_DIR="$PROJECT_DIR/logs/pbs/$RUN_ID"
 LOG_FIFO="$TMPDIR/run_log_fifo.$$"
 RUN_MARKER="$TMPDIR/run_output_marker.$$"
 
@@ -31,26 +31,41 @@ copy_file_to_outputs() {
   cp -p "$source_path" "$target_path"
 }
 
+copy_file_to_project() {
+  source_path="$1"
+  relative_path="${source_path#$WORK_DIR/}"
+  target_path="$PROJECT_DIR/$relative_path"
+  mkdir -p "$(dirname "$target_path")"
+  cp -p "$source_path" "$target_path"
+}
+
+copy_generated_file() {
+  source_path="$1"
+  copy_file_to_project "$source_path"
+  copy_file_to_outputs "$source_path"
+}
+
 copy_run_outputs() {
   mkdir -p "$RUN_OUTPUT_DIR"
+  mkdir -p "$PROJECT_JOB_LOG_DIR"
 
   if [ -f "$LOG_PATH" ]; then
-    cp "$LOG_PATH" "$LOG_HOME_PATH"
     cp "$LOG_PATH" "$RUN_OUTPUT_DIR/$LOG_FILE"
+    cp "$LOG_PATH" "$PROJECT_JOB_LOG_DIR/$LOG_FILE"
   fi
 
   if [ -f "$RUN_MARKER" ] && [ -d "$WORK_DIR" ]; then
     for output_dir in "$WORK_DIR/logs" "$WORK_DIR/results"; do
       if [ -d "$output_dir" ]; then
         while IFS= read -r -d '' output_file; do
-          copy_file_to_outputs "$output_file"
+          copy_generated_file "$output_file"
         done < <(find "$output_dir" -type f -newer "$RUN_MARKER" -print0)
       fi
     done
 
     if [ -d "$WORK_DIR/data" ]; then
       while IFS= read -r -d '' output_file; do
-        copy_file_to_outputs "$output_file"
+        copy_generated_file "$output_file"
       done < <(find "$WORK_DIR/data" -type f -newer "$RUN_MARKER" \( -name "*.yaml" -o -name "*.yml" \) -print0)
     fi
   fi
@@ -66,8 +81,8 @@ finish() {
   echo "TMPDIR=$TMPDIR"
   echo "WORK_DIR=$WORK_DIR"
   echo "LOG_PATH=$LOG_PATH"
-  echo "LOG_HOME_PATH=$LOG_HOME_PATH"
   echo "RUN_OUTPUT_DIR=$RUN_OUTPUT_DIR"
+  echo "PROJECT_JOB_LOG_DIR=$PROJECT_JOB_LOG_DIR"
 
   exec 1>&3 2>&4
   wait "$TEE_PID" || true
@@ -96,8 +111,8 @@ echo "PBS_O_WORKDIR=$PBS_O_WORKDIR"
 echo "TMPDIR=$TMPDIR"
 echo "PWD=$(pwd)"
 echo "LOG_PATH=$LOG_PATH"
-echo "LOG_HOME_PATH=$LOG_HOME_PATH"
 echo "RUN_OUTPUT_DIR=$RUN_OUTPUT_DIR"
+echo "PROJECT_JOB_LOG_DIR=$PROJECT_JOB_LOG_DIR"
 
 ml purge
 

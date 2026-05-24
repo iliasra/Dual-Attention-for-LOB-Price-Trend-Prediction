@@ -70,13 +70,14 @@ def test_fast_kinematic_config_values_are_loaded() -> None:
 
     assert config.preprocessing.kinematic_tokenization.method in {"basis", "fast"}
     assert config.preprocessing.kinematic_tokenization.chunk_size == 100000
+    assert config.preprocessing.kinematic_tokenization.n_df_candidates == 25
     assert config.preprocessing.price_kinematic.basis.alpha == 5.0
     assert config.preprocessing.price_kinematic.fast.n_basis == 20
     assert config.preprocessing.price_kinematic.fast.df == 20.0
     assert config.preprocessing.price_kinematic.fast.eval_at == 1.0
     assert config.preprocessing.volume_kinematic.basis.alpha == 5.0
     assert config.preprocessing.volume_kinematic.fast.n_basis == 20
-    assert config.preprocessing.volume_kinematic.fast.df == 20.0
+    assert config.preprocessing.volume_kinematic.fast.df == 12.0
 
 
 def test_price_static_plgs_train_fitted_config_values_are_loaded() -> None:
@@ -147,7 +148,7 @@ def test_adaptive_threshold_config_values_are_loaded() -> None:
     assert adaptive.enabled is True
     assert adaptive.exit_spread_window == 100
     assert adaptive.volatility_window == 256
-    assert adaptive.round_trip_fees_bps == 0.8
+    assert adaptive.round_trip_fees_bps == 1.5
     assert adaptive.volatility_lambda == 1.0
 
 
@@ -258,9 +259,9 @@ def test_explicit_folds_are_loaded() -> None:
     config = load_config()
 
     assert [fold.id for fold in config.folds] == ["fold_001"]
-    assert config.folds[0].train_dates == ["2012-06-21"]
-    assert config.folds[0].validation_dates == ["2012-06-22"]
-    assert config.folds[0].test_dates == ["2012-06-23"]
+    assert config.folds[0].train_dates == ["2024-03-04", "2024-03-05", "2024-03-06"]
+    assert config.folds[0].validation_dates == ["2024-03-07"]
+    assert config.folds[0].test_dates == ["2024-03-08"]
 
 
 def test_folds_fallback_to_dataset_splits_when_missing(artifact_dir: Path) -> None:
@@ -379,7 +380,7 @@ def test_training_data_loader_settings_are_loaded() -> None:
     pin_memory = config.training.device.startswith("cuda")
 
     assert config.training.num_workers >= 0
-    assert config.training.early_stopping_patience == 8
+    assert config.training.early_stopping_patience == 5
     assert config.training.class_weights is None
     assert config.training.pin_memory is pin_memory
     assert config.training.data_loader_kwargs() == {

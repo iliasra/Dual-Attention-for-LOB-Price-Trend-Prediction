@@ -1,0 +1,77 @@
+#!/bin/bash
+#PBS -N lob_lambda_gcv_cache
+#PBS -l walltime=06:00:00
+#PBS -l select=1:ncpus=4:mem=24gb:ompthreads=4
+
+set -euo pipefail
+
+PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
+WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
+TASK_FILE="$PROJECT_DIR/data/gcv_cache/lambda_gcv_tasks.txt"
+CACHE_DIR="$PROJECT_DIR/data/gcv_cache"
+
+if [ ! -f "$TASK_FILE" ]; then
+  echo "Task file not found: $TASK_FILE" >&2
+  exit 1
+fi
+
+TASK_LINE="$(
+  awk -v index="$PBS_ARRAY_INDEX" '
+    NF && $1 !~ /^#/ {
+      count++
+      if (count == index) {
+        print
+        exit
+      }
+    }
+  ' "$TASK_FILE"
+)"
+
+if [ -z "$TASK_LINE" ]; then
+  echo "No lambda GCV cache task for PBS_ARRAY_INDEX=$PBS_ARRAY_INDEX"
+  exit 0
+fi
+
+read -r SYMBOL DATE KIND OUTPUT_STEM <<< "$TASK_LINE"
+
+echo "===== LAMBDA GCV CACHE TASK ====="
+echo "PBS_JOBID=$PBS_JOBID"
+echo "PBS_ARRAY_INDEX=$PBS_ARRAY_INDEX"
+echo "SYMBOL=$SYMBOL"
+echo "DATE=$DATE"
+echo "KIND=$KIND"
+echo "OUTPUT_STEM=$OUTPUT_STEM"
+echo "CACHE_DIR=$CACHE_DIR"
+echo "TMPDIR=$TMPDIR"
+
+ml purge
+
+set +u
+eval "$($HOME/miniforge3/bin/conda shell.bash hook)"
+conda activate transformer
+set -u
+
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export OPENBLAS_NUM_THREADS=4
+export NUMEXPR_NUM_THREADS=4
+
+echo "===== COPYING CODE TO TMPDIR ====="
+mkdir -p "$WORK_DIR"
+rsync -a --exclude="data" "$PROJECT_DIR/" "$WORK_DIR/"
+
+echo "===== STAGING RAW FILES FOR $SYMBOL $DATE ====="
+mkdir -p "$WORK_DIR/data/LOBSTER"
+rsync -a "$PROJECT_DIR/data/LOBSTER/${SYMBOL}_${DATE}_"* "$WORK_DIR/data/LOBSTER/"
+
+cd "$WORK_DIR"
+
+echo "===== BUILDING CACHE ====="
+PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" \
+python scripts/build_lambda_gcv_cache.py \
+  --symbol "$SYMBOL" \
+  --date "$DATE" \
+  --kind "$KIND" \
+  --cache-dir "$CACHE_DIR"
+
+echo "===== DONE CACHE TASK ====="

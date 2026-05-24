@@ -151,6 +151,7 @@ def make_test_configs(tokenization_method: str = "basis") -> tuple[DataConfig, P
         kinematic_tokenization=KinematicTokenizationConfig(
             method=tokenization_method,
             chunk_size=3,
+            n_df_candidates=4,
         ),
         price_kinematic=PriceKinematicConfig(
             enabled=True,

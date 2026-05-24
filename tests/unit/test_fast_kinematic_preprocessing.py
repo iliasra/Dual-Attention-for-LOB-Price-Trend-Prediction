@@ -8,6 +8,11 @@ from fast_kinematic_preprocessing import (
     mean_gcv_score,
     optimize_smoothing_lambda_gcv,
 )
+from gcv_lambda_cache import (
+    aggregate_daily_gcv_caches,
+    build_daily_gcv_cache,
+    lambda_gcv_cache_key,
+)
 
 
 def test_effective_degrees_of_freedom_decreases_with_lambda() -> None:
@@ -99,3 +104,60 @@ def test_gcv_score_can_center_price_windows_before_smoothing() -> None:
 
     np.testing.assert_allclose(shifted_score, base_score)
     np.testing.assert_allclose(shifted_df, base_df)
+
+
+def test_daily_gcv_cache_aggregation_matches_direct_optimization() -> None:
+    ticks = np.arange(26, dtype=np.float64)
+    first_day = np.column_stack(
+        [
+            10_000.0 + 0.2 * ticks + 0.001 * ticks**2,
+            10_002.0 + 0.1 * ticks + 0.002 * ticks**2,
+        ]
+    )
+    second_day = first_day + np.column_stack([0.05 * ticks, 0.03 * ticks])
+    centers_by_day = [first_day[:, 0] - 0.5, second_day[:, 0] - 0.5]
+    n_df_candidates = 5
+
+    direct = optimize_smoothing_lambda_gcv(
+        values_by_day=[first_day, second_day],
+        window=10,
+        n_basis=6,
+        max_df=5.0,
+        n_df_candidates=n_df_candidates,
+        chunk_size=4,
+        centers_by_day=centers_by_day,
+        scale=100.0,
+    )
+    caches = [
+        build_daily_gcv_cache(
+            values=values,
+            window=10,
+            n_basis=6,
+            max_df=5.0,
+            n_df_candidates=n_df_candidates,
+            chunk_size=4,
+            centers=centers,
+            scale=100.0,
+        )
+        for values, centers in zip([first_day, second_day], centers_by_day)
+    ]
+    cached, total_count = aggregate_daily_gcv_caches(caches)
+
+    assert total_count > 0
+    np.testing.assert_allclose(cached.smoothing_lambda, direct.smoothing_lambda)
+    np.testing.assert_allclose(cached.effective_df, direct.effective_df)
+    np.testing.assert_allclose(cached.gcv_score, direct.gcv_score)
+
+
+def test_lambda_gcv_cache_key_includes_candidate_count() -> None:
+    common = {
+        "window": 10,
+        "n_basis": 6,
+        "max_df": 5.0,
+        "scale": 100.0,
+    }
+
+    assert lambda_gcv_cache_key(**common, n_df_candidates=4) != lambda_gcv_cache_key(
+        **common,
+        n_df_candidates=5,
+    )

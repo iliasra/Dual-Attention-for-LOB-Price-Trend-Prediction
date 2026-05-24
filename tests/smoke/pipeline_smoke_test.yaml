@@ -69,6 +69,7 @@ preprocessing:
   kinematic_tokenization:
     method: basis
     chunk_size: 100000
+    n_df_candidates: 25
   price_kinematic:
     enabled: true
     columns: auto

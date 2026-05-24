@@ -20,16 +20,25 @@ def parse_args() -> argparse.Namespace:
         "--config",
         type=Path,
         default=None,
-        help="Optional: Preprocess only the fold with this id. If Not provided, the default behavior" \
-        "is to process all the fol+ds sequentially.",
+        help="Optional path to the pipeline YAML config. Defaults to configs/pipeline_config.yaml.",
     )
     parser.add_argument("--fold-id", type=str, default=None, help="Preprocess only the fold with this id.")
     parser.add_argument(
         "--fold-index",
         type=int,
         default=None,
-        help="Optional: Preprocess only the fold with this id. If Not provided, the default behavior" \
-        "is to process all the folds sequentially.",
+        help="Preprocess only the 1-based fold index from the config.",
+    )
+    parser.add_argument(
+        "--lambda-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional directory containing daily GCV lambda caches.",
+    )
+    parser.add_argument(
+        "--require-lambda-cache",
+        action="store_true",
+        help="Fail instead of falling back when a required daily GCV lambda cache is missing.",
     )
     return parser.parse_args()
 
@@ -38,6 +47,8 @@ def main() -> None:
     args = parse_args()
     if args.fold_id is not None and args.fold_index is not None:
         raise ValueError("Use either --fold-id or --fold-index, not both.")
+    if args.require_lambda_cache and args.lambda_cache_dir is None:
+        raise ValueError("--require-lambda-cache requires --lambda-cache-dir.")
 
     config = load_config(args.config)
     selected_fold_ids: set[str] | None = None
@@ -52,7 +63,11 @@ def main() -> None:
     print(f"Global seed set to {config.seed}.")
     if selected_fold_ids is not None:
         print(f"Selected fold(s): {', '.join(sorted(selected_fold_ids))}.")
-    summary = LobProcessingPipeline(config).run(selected_fold_ids=selected_fold_ids)
+    summary = LobProcessingPipeline(
+        config,
+        lambda_cache_dir=args.lambda_cache_dir,
+        require_lambda_cache=args.require_lambda_cache,
+    ).run(selected_fold_ids=selected_fold_ids)
     for fold_id, split_summary in summary.items():
         print(fold_id)
         for split, shapes in split_summary.items():

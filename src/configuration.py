@@ -82,6 +82,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "kinematic_tokenization": {
             "method": None,
             "chunk_size": None,
+            "n_df_candidates": None,
         },
         "price_kinematic": {
             "enabled": None,
@@ -403,6 +404,7 @@ class DataConfig:
 class KinematicTokenizationConfig:
     method: str
     chunk_size: int
+    n_df_candidates: int
 
     def __post_init__(self) -> None:
         """Check kinematic tokenization settings."""
@@ -411,6 +413,8 @@ class KinematicTokenizationConfig:
             raise ValueError("preprocessing.kinematic_tokenization.method must be 'basis' or 'fast'.")
         if self.chunk_size <= 0:
             raise ValueError("preprocessing.kinematic_tokenization.chunk_size must be > 0.")
+        if self.n_df_candidates <= 0:
+            raise ValueError("preprocessing.kinematic_tokenization.n_df_candidates must be > 0.")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "KinematicTokenizationConfig":
@@ -419,6 +423,12 @@ class KinematicTokenizationConfig:
             method=str(_require_explicit_value(payload["method"], "preprocessing.kinematic_tokenization.method")),
             chunk_size=int(
                 _require_explicit_value(payload["chunk_size"], "preprocessing.kinematic_tokenization.chunk_size")
+            ),
+            n_df_candidates=int(
+                _require_explicit_value(
+                    payload["n_df_candidates"],
+                    "preprocessing.kinematic_tokenization.n_df_candidates",
+                )
             ),
         )
 

@@ -319,10 +319,10 @@ def optimize_smoothing_lambda_gcv(
     window: int,
     n_basis: int,
     max_df: float,
+    n_df_candidates: int,
     degree: int = 3,
     ridge: float = 1e-8,
     chunk_size: int = 4096,
-    n_df_candidates: int = 25,
     centers_by_day: list[np.ndarray] | None = None,
     scale: float = 1.0,
 ) -> GCVOptimizationResult:
