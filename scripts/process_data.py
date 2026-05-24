@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Optional: Preprocess only the fold with this id. If Not provided, the default behavior" \
-        "is to process all the folds sequentially.",
+        "is to process all the fol+ds sequentially.",
     )
     parser.add_argument("--fold-id", type=str, default=None, help="Preprocess only the fold with this id.")
     parser.add_argument(

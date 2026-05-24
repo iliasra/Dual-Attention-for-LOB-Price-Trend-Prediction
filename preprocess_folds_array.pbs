@@ -12,8 +12,8 @@ WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
 FOLDS_FILE="$PROJECT_DIR/configs/folds.txt"
 
 ARRAY_JOB_ID="${PBS_JOBID%%[*}"
-PREPROCESS_RUN_ID="${PREPROCESS_RUN_ID:-preprocess_${ARRAY_JOB_ID}}"
-OUTPUT_ROOT="$HOME/lob_preprocessed/$PREPROCESS_RUN_ID"
+#PREPROCESS_RUN_ID="${PREPROCESS_RUN_ID:-preprocess_${ARRAY_JOB_ID}}"
+OUTPUT_ROOT="$PROJECT_DIR"
 
 if [ ! -f "$FOLDS_FILE" ]; then
   echo "Fold list not found: $FOLDS_FILE" >&2
@@ -70,17 +70,17 @@ PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" \
 python scripts/process_data.py --fold-id "$FOLD_ID"
 
 echo "===== COPYING OUTPUTS BACK ====="
-mkdir -p "$OUTPUT_ROOT/data/sequences"
-mkdir -p "$OUTPUT_ROOT/data/processed_dataframes"
-mkdir -p "$OUTPUT_ROOT/data/derivatives_z_scores"
+mkdir -p "$OUTPUT_ROOT/data/sequences/$FOLD_ID"
+mkdir -p "$OUTPUT_ROOT/data/processed_dataframes/$FOLD_ID"
+mkdir -p "$OUTPUT_ROOT/data/derivatives_z_scores/$FOLD_ID"
 
 rsync -a "$WORK_DIR/data/sequences/$FOLD_ID" \
-  "$OUTPUT_ROOT/data/sequences/"
+  "$OUTPUT_ROOT/data/sequences/$FOLD_ID/"
 
 rsync -a "$WORK_DIR/data/processed_dataframes/$FOLD_ID" \
-  "$OUTPUT_ROOT/data/processed_dataframes/"
+  "$OUTPUT_ROOT/data/processed_dataframes/$FOLD_ID/"
 
 rsync -a "$WORK_DIR/data/derivatives_z_scores/$FOLD_ID" \
-  "$OUTPUT_ROOT/data/derivatives_z_scores/"
+  "$OUTPUT_ROOT/data/derivatives_z_scores/$FOLD_ID/"
 
 echo "===== DONE $FOLD_ID ====="
