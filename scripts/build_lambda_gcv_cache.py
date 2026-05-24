@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from time import perf_counter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
@@ -17,6 +18,7 @@ from gcv_lambda_cache import (
     write_daily_gcv_cache,
 )
 from processing import LobProcessingPipeline
+from run_logging import format_duration
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,7 +104,11 @@ def main() -> None:
         print(f"Cache already exists, skipping: {cache_path}")
         return
 
-    print(f"Building GCV lambda cache: {cache_path}")
+    print(
+        "Building GCV lambda cache: "
+        f"symbol={args.symbol} date={args.date} kind={args.kind} -> {cache_path}"
+    )
+    build_start = perf_counter()
     cache = build_daily_gcv_cache(
         values=values,
         window=preprocessing.snapshot_window,
@@ -126,9 +132,21 @@ def main() -> None:
         },
         progress_desc=f"GCV cache {pair.output_stem} {args.kind}",
     )
+    build_duration_seconds = perf_counter() - build_start
+    cache = cache._replace(
+        metadata={
+            **cache.metadata,
+            "build_seconds": round(build_duration_seconds, 6),
+            "build_duration": format_duration(build_duration_seconds),
+        }
+    )
 
     write_daily_gcv_cache(cache_path, cache)
-    print(f"Saved GCV lambda cache: {cache_path}")
+    print(
+        "Saved GCV lambda cache: "
+        f"symbol={args.symbol} date={args.date} kind={args.kind} -> {cache_path} "
+        f"({format_duration(build_duration_seconds)})."
+    )
 
 
 if __name__ == "__main__":

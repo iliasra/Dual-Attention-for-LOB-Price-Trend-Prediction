@@ -4,11 +4,40 @@
 #PBS -l select=1:ncpus=4:mem=24gb:ompthreads=4
 
 set -euo pipefail
+SCRIPT_START_EPOCH="$(date +%s)"
 
 PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
 WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
 TASK_FILE="$PROJECT_DIR/data/gcv_cache/lambda_gcv_tasks.txt"
 CACHE_DIR="$PROJECT_DIR/data/gcv_cache"
+
+format_duration() {
+  total_seconds="$1"
+  hours=$((total_seconds / 3600))
+  minutes=$(((total_seconds % 3600) / 60))
+  seconds=$((total_seconds % 60))
+  if [ "$hours" -gt 0 ]; then
+    printf "%dh %02dm %02ds" "$hours" "$minutes" "$seconds"
+  elif [ "$minutes" -gt 0 ]; then
+    printf "%dm %02ds" "$minutes" "$seconds"
+  else
+    printf "%ds" "$seconds"
+  fi
+}
+
+finish() {
+  status=$?
+  end_epoch="$(date +%s)"
+  elapsed=$((end_epoch - SCRIPT_START_EPOCH))
+  duration="$(format_duration "$elapsed")"
+  echo
+  echo "===== FINISHING LAMBDA GCV CACHE TASK ====="
+  echo "Exit status=$status"
+  echo "Total runtime=$duration (${elapsed}s)"
+  exit "$status"
+}
+
+trap finish EXIT
 
 if [ ! -f "$TASK_FILE" ]; then
   echo "Task file not found: $TASK_FILE" >&2

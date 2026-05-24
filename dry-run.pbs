@@ -4,6 +4,7 @@
 #PBS -l select=1:ncpus=8:mem=24gb:ngpus=1:gpu_type=A100
 
 set -eo pipefail
+SCRIPT_START_EPOCH="$(date +%s)"
 
 PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
 WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
@@ -11,6 +12,20 @@ RESULT_FILE="dry_run_results.txt"
 RESULT_PATH="$TMPDIR/$RESULT_FILE"
 HOME_RESULT_PATH="$HOME/$RESULT_FILE"
 LOG_FIFO="$TMPDIR/dry_run_log_fifo.$$"
+
+format_duration() {
+  total_seconds="$1"
+  hours=$((total_seconds / 3600))
+  minutes=$(((total_seconds % 3600) / 60))
+  seconds=$((total_seconds % 60))
+  if [ "$hours" -gt 0 ]; then
+    printf "%dh %02dm %02ds" "$hours" "$minutes" "$seconds"
+  elif [ "$minutes" -gt 0 ]; then
+    printf "%dm %02ds" "$minutes" "$seconds"
+  else
+    printf "%ds" "$seconds"
+  fi
+}
 
 : > "$RESULT_PATH"
 mkfifo "$LOG_FIFO"
@@ -30,6 +45,10 @@ finish() {
   echo "WORK_DIR=$WORK_DIR"
   echo "RESULT_PATH=$RESULT_PATH"
   echo "HOME_RESULT_PATH=$HOME_RESULT_PATH"
+  end_epoch="$(date +%s)"
+  elapsed=$((end_epoch - SCRIPT_START_EPOCH))
+  duration="$(format_duration "$elapsed")"
+  echo "Total runtime=$duration (${elapsed}s)"
 
   exec 1>&3 2>&4
   wait "$TEE_PID" || true

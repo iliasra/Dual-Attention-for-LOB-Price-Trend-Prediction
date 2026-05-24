@@ -46,11 +46,11 @@ I focus on two complementary research directions:
 
 ## Current Pipeline
 
-The codebase is organized around a two-stage workflow.
+The codebase is organized around a preprocessing and training workflow. When fast kinematic tokenization is enabled, an optional GCV cache can be built before preprocessing so that expanding-window folds do not recompute the same daily GCV scores repeatedly.
 
 ```bash
-python scripts\process_data.py
-python scripts\run_training.py
+python scripts/process_data.py
+python scripts/run_training.py
 ```
 
 `scripts/process_data.py` runs the preprocessing pipeline. It loads
@@ -63,6 +63,9 @@ dataframes and model-ready sequence tensors.
 datasets and dataloaders, instantiates the dual-attention model, and trains it
 using the configured training loop.
 
+For fast kinematic tokenization, `scripts/list_lambda_gcv_tasks.py` and
+`scripts/build_lambda_gcv_cache.py` can precompute daily GCV score caches under `data/gcv_cache/`. The preprocessing pipeline can then read those caches through `--lambda-cache-dir`.
+
 Each training sample is a full event window of length `sequence_window`, defined
 in `configs/pipeline_config.yaml`.
 
@@ -71,24 +74,32 @@ in `configs/pipeline_config.yaml`.
 ```text
 .
 |-- configs/
+|   |-- folds.txt                         # Fold ids to preprocess in PBS array jobs
+|   |-- lobster_column_schema.yaml        # Explicit LOBSTER message/orderbook column schema
 |   `-- pipeline_config.yaml              # Main experiment, preprocessing, model, and training config
 |-- data/
 |   |-- LOBSTER/                          # Raw LOBSTER-style files, ignored by git
+|   |-- gcv_cache/                        # Daily GCV lambda cache files and task lists
 |   |-- processed_dataframes/             # Processed CSV outputs
 |   |-- sequences/                        # Saved X/T/y NumPy sequence tensors
 |   `-- derivatives_z_scores/             # Fitted derivative normalization statistics
-|-- logs/                                 # Contains logging files
-|-- results/                              # Trained model checkpoints and experimental outputs
+|-- logs/                                 # Run logs, metrics, config snapshots, PBS logs
+|-- results/                              # Trained model checkpoints
 |-- scripts/
-|   |-- vram_dry_run.py                   # GPU VRAM workload test on HPC
+|   |-- build_lambda_gcv_cache.py         # Builds one daily GCV cache task
+|   |-- list_lambda_gcv_tasks.py          # Lists daily GCV cache tasks
 |   |-- process_data.py                   # Runs the preprocessing pipeline
-|   `-- run_training.py                   # Trains the model from saved sequences
+|   |-- run_training.py                   # Trains the model from saved sequences
+|   |-- validate_lobster_format.py        # Validates raw LOBSTER CSV files
+|   `-- vram_dry_run.py                   # GPU VRAM workload test on HPC
 |-- src/
 |   |-- configuration.py                  # YAML configuration dataclasses
 |   |-- datasets.py                       # Sequence construction and PyTorch dataset
 |   |-- fast_kinematic_preprocessing.py   # Faster vectorized alternative to compute kinematic stream
+|   |-- gcv_lambda_cache.py               # Daily GCV cache construction and aggregation
 |   |-- horizon.py                        # Trend labelling strategies
 |   |-- kinematic_preprocessing.py        # Static and kinematic LOB feature engineering
+|   |-- lobster_io.py                     # LOBSTER CSV loading and column inference
 |   |-- model.py                          # Dual-attention transformer model
 |   |-- processing.py                     # End-to-end preprocessing pipeline
 |   |-- run_logging.py                    # Logging functions
@@ -102,27 +113,57 @@ in `configs/pipeline_config.yaml`.
 |-- dry-run.pbs                           # Dry-run test on HPC 
 |-- env_setup.sh                          # Allows to setup the required conda environment
 |-- environment.yml                       # Contains package and versions to create conda env
-|--run_script.pbs                         # PBS script to run full experiment on HPC cluster
+|-- build_lambda_gcv_cache_array.pbs       # PBS array job for GCV cache construction
+|-- preprocess_folds_array.pbs             # PBS array job for fold-level preprocessing
+|-- run_training.pbs                       # PBS script to train from preprocessed folds
 `-- pytest.ini
 ```
 
 ## Data Products
 
+When preprocessing folds are enabled, outputs are fold-scoped.
+
 The preprocessing stage writes normalized processed dataframes to:
 
 ```text
-data/processed_dataframes/<split>/<symbol>_<date>_processed.csv
+data/processed_dataframes/<fold_id>/<split>/<symbol>_<date>_processed.csv
 ```
 
 It writes model-ready sequence tensors to:
 
 ```text
-data/sequences/<split>/<symbol>_<date>_features.npy
-data/sequences/<split>/<symbol>_<date>_times.npy
-data/sequences/<split>/<symbol>_<date>_labels.npy
+data/sequences/<fold_id>/<split>/<symbol>_<date>_features.npy
+data/sequences/<fold_id>/<split>/<symbol>_<date>_times.npy
+data/sequences/<fold_id>/<split>/<symbol>_<date>_labels.npy
 ```
 
 `LOBDataset` reconstructs sliding windows from these compact arrays during training.
+
+Additional preprocessing artifacts include:
+
+```text
+data/sequences/<fold_id>/preprocessing_metadata.yaml
+data/sequences/<fold_id>/feature_schema.yaml
+data/derivatives_z_scores/<fold_id>/derivatives_stats.yaml
+```
+
+If fast kinematic tokenization uses the daily GCV cache, cache artifacts are
+stored as:
+
+```text
+data/gcv_cache/lambda_gcv_tasks.txt
+data/gcv_cache/<cache_key>/<price|volume>/<symbol>_<date>.npz
+```
+
+Training writes per-run and per-fold logs/checkpoints under:
+
+```text
+logs/run_<N>/summary.yaml
+logs/run_<N>/<fold_id>/run.log
+logs/run_<N>/<fold_id>/metrics.csv
+logs/run_<N>/<fold_id>/confusion_matrices.yaml
+results/run_<N>/<fold_id>/best_lob_transformer.pth
+```
 
 ## Testing
 
@@ -143,9 +184,16 @@ conda --no-plugins run -n transformer python -m pytest -q
 The smoke test in `tests/smoke/` is used as a lightweight end-to-end sanity
 check on a small LOBSTER sample.
 
-## HPC Runs guidelines
+## HPC Runs Guidelines
 
-In order to launch a run from the HPC, you may execute the following: 
+The expected HPC workflow is:
+
+1. create the environment;
+2. generate and build the daily GCV cache;
+3. preprocess folds as array jobs;
+4. train the model from the preprocessed fold artifacts.
+
+Start by cloning the project and creating the conda environment:
 
 ```bash
 cd $HOME
@@ -155,8 +203,98 @@ git clone https://github.com/iliasra/Dual-Attention-for-LOB-Price-Trend-Predicti
 chmod +x Dual-Attention-for-LOB-Price-Trend-Prediction/env_setup.sh
 
 ./Dual-Attention-for-LOB-Price-Trend-Prediction/env_setup.sh Dual-Attention-for-LOB-Price-Trend-Prediction/environment.yml
+```
 
-qsub Dual-Attention-for-LOB-Price-Trend-Prediction/run_script.pbs
+Place the raw LOBSTER files under:
+
+```text
+$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction/data/LOBSTER/
+```
+
+Then edit `configs/pipeline_config.yaml` and `configs/folds.txt` as needed. The
+PBS array range in `preprocess_folds_array.pbs` must match the number of
+non-empty, non-comment lines in `configs/folds.txt`.
+
+### 1. Generate GCV Cache Tasks
+
+From the project root:
+
+```bash
+cd $HOME/Dual-Attention-for-LOB-Price-Trend-Prediction
+
+PYTHONPATH="$PWD/src:${PYTHONPATH:-}" \
+python scripts/list_lambda_gcv_tasks.py
+```
+
+This prints the number of cache tasks and writes:
+
+```text
+data/gcv_cache/lambda_gcv_tasks.txt
+```
+
+If `preprocessing.kinematic_tokenization.method` is not `fast`, the task file is
+empty and this cache step can be skipped.
+
+### 2. Build the Daily GCV Cache
+
+Submit one PBS array task per line of `data/gcv_cache/lambda_gcv_tasks.txt`.
+Replace `<N_TASKS>` with the number printed by `list_lambda_gcv_tasks.py`.
+
+```bash
+qsub -J 1-<N_TASKS> build_lambda_gcv_cache_array.pbs
+```
+
+Each task stages the raw files for one `(symbol, date, price|volume)` job and
+writes `.npz` cache files under `data/gcv_cache/`.
+
+### 3. Preprocess Folds
+
+Once the GCV cache is complete, submit the fold preprocessing array:
+
+```bash
+qsub preprocess_folds_array.pbs
+```
+
+`preprocess_folds_array.pbs` reads fold ids from `configs/folds.txt`, runs:
+
+```bash
+python scripts/process_data.py \
+  --fold-id "$FOLD_ID" \
+  --lambda-cache-dir "$PROJECT_DIR/data/gcv_cache" \
+  --require-lambda-cache
+```
+
+and copies fold outputs back to:
+
+```text
+data/sequences/<fold_id>/
+data/processed_dataframes/<fold_id>/
+data/derivatives_z_scores/<fold_id>/
+```
+
+For a local or sequential preprocessing run without the cache requirement, use:
+
+```bash
+python scripts/process_data.py
+```
+
+Without `--fold-id` or `--fold-index`, all configured folds are processed
+sequentially.
+
+### 4. Train
+
+After preprocessing has produced all configured fold sequence directories:
+
+```bash
+qsub run_training.pbs
+```
+
+`run_training.pbs` trains over the configured folds and copies generated logs
+and model weights back into `$PROJECT_DIR/logs/` and `$PROJECT_DIR/results/`.
+It also saves the PBS stdout/stderr stream under:
+
+```text
+logs/pbs/<PBS_JOBID>/run_logs.txt
 ```
 
 ## Status
