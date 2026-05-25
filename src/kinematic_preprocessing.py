@@ -1089,10 +1089,15 @@ class DerivativeNormalizer:
     stats_: dict[str, dict[str, float | int]] = field(default_factory=dict)
 
     def fit(self, dataframes: list[pd.DataFrame]) -> "DerivativeNormalizer":
+        """Fit exact train-only derivative stats; transform uses mean/std only."""
         if not dataframes:
             raise ValueError("Cannot fit derivative normalizer on an empty list of dataframes.")
 
-        concatenated = pd.concat(dataframes, axis=0, ignore_index=True)
+        derivative_frames = [
+            dataframe.loc[:, derivative_feature_columns(dataframe)]
+            for dataframe in dataframes
+        ]
+        concatenated = pd.concat(derivative_frames, axis=0, ignore_index=True)
         self.stats_ = {}
         for column in derivative_feature_columns(concatenated):
             stats = _derivative_stats(concatenated[column])
@@ -1109,6 +1114,7 @@ class DerivativeNormalizer:
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply fitted derivative z-scores to a processed dataframe."""
         if not self.stats_:
             self.stats_ = self.load_stats(self.output_path)
         if not self.stats_:

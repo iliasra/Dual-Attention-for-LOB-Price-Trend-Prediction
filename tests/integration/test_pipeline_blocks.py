@@ -87,8 +87,8 @@ def write_lobster_day(raw_dir: Path, symbol: str, date: str, rows: int = 14) -> 
     message_df, orderbook_df = make_synthetic_lob_frames(rows=rows)
     message_df["time"] = 34200.0 + message_df["time"]
     raw_dir.mkdir(parents=True, exist_ok=True)
-    message_df.to_csv(raw_dir / f"{symbol}_{date}_message.csv", index=False)
-    orderbook_df.to_csv(raw_dir / f"{symbol}_{date}_orderbook.csv", index=False)
+    message_df.to_csv(raw_dir / f"{symbol}_{date}_34200000_57600000_message_10.csv", index=False)
+    orderbook_df.to_csv(raw_dir / f"{symbol}_{date}_34200000_57600000_orderbook_10.csv", index=False)
 
 
 def make_test_configs(tokenization_method: str = "basis") -> tuple[DataConfig, PreprocessingConfig]:

@@ -51,24 +51,26 @@ def test_processing_pipeline_runs_only_selected_fold_dates() -> None:
     ]
     pipeline = object.__new__(LobProcessingPipeline)
     pipeline.config = SimpleNamespace(folds=folds)
-    prepared_dates: list[str] = []
+    run_fold_dates: list[dict[str, list[str]]] = []
 
     pipeline.discover_pairs = lambda: pairs
 
-    def prepare_pair(pair: LobFilePair, split: str) -> SimpleNamespace:
-        prepared_dates.append(pair.date)
-        return SimpleNamespace(pair=pair, split=split)
+    def run_fold(fold: FoldConfig, split_pairs: dict[str, list[LobFilePair]]):
+        run_fold_dates.append({split: [pair.date for pair in split_pairs[split]] for split in split_pairs})
+        return {split: {pair.output_stem: (0, 0) for pair in split_pairs[split]} for split in split_pairs}
 
-    pipeline.prepare_pair = prepare_pair
-    pipeline.run_fold = lambda fold, split_pairs, prepared_days: {
-        split: {pair.output_stem: (0, 0) for pair in split_pairs[split]}
-        for split in ("train", "validation", "test")
-    }
+    pipeline.run_fold = run_fold
 
     summary = pipeline.run(selected_fold_ids={"fold_002"})
 
     assert list(summary) == ["fold_002"]
-    assert prepared_dates == ["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04"]
+    assert run_fold_dates == [
+        {
+            "train": ["2020-01-01", "2020-01-02"],
+            "validation": ["2020-01-03"],
+            "test": ["2020-01-04"],
+        }
+    ]
     assert "TEST_2020-01-04" in summary["fold_002"]["test"]
 
 

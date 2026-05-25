@@ -32,6 +32,7 @@ from kinematic_preprocessing import (
     VolumeStaticProcessor,
     _fast_price_tokens,
     _static_centering,
+    derivative_feature_columns,
     fit_exp_scaling_parameters,
     fit_plgs_parameters,
     handle_abnormal_prices,
@@ -152,6 +153,45 @@ def test_derivative_normalizer_fit_overwrites_stale_stats() -> None:
 
     assert set(loaded_stats) == {"price_kin_vel"}
     assert loaded_stats["price_kin_vel"]["mean"] == 20.0
+
+
+def test_derivative_normalizer_fit_matches_full_concat_stats() -> None:
+    artifact_dir = Path(__file__).resolve().parent / ".test_artifacts" / "derivative_normalizer_exact"
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True)
+    stats_path = artifact_dir / "derivatives_stats.yaml"
+    first_train = pd.DataFrame(
+        {
+            "time": [1.0, 2.0, 3.0],
+            "price_kin_vel": [1.0, np.nan, 3.0],
+            "price_kin_acc": [0.1, 0.2, 0.3],
+            "static_feature": [10.0, 20.0, 30.0],
+        }
+    )
+    second_train = pd.DataFrame(
+        {
+            "time": [4.0, 5.0],
+            "price_kin_vel": [np.inf, 5.0],
+            "price_kin_jrk": [7.0, 8.0],
+            "static_feature": [40.0, 50.0],
+        }
+    )
+
+    DerivativeNormalizer(stats_path).fit([first_train, second_train])
+    loaded_stats = DerivativeNormalizer.load_stats(stats_path)
+    concatenated = pd.concat([first_train, second_train], ignore_index=True)
+
+    assert set(loaded_stats) == set(derivative_feature_columns(concatenated))
+    for column in derivative_feature_columns(concatenated):
+        values = pd.to_numeric(concatenated[column], errors="coerce")
+        finite_values = values[np.isfinite(values)]
+        np.testing.assert_allclose(loaded_stats[column]["mean"], float(concatenated[column].mean()), equal_nan=True)
+        np.testing.assert_allclose(loaded_stats[column]["std"], float(concatenated[column].std(ddof=0)), equal_nan=True)
+        np.testing.assert_allclose(loaded_stats[column]["q001"], float(finite_values.quantile(0.001)), equal_nan=True)
+        np.testing.assert_allclose(loaded_stats[column]["q999"], float(finite_values.quantile(0.999)), equal_nan=True)
+        assert loaded_stats[column]["n_nan"] == int(values.isna().sum())
+        assert loaded_stats[column]["n_inf"] == int(np.isinf(values).sum())
 
 
 def test_static_centering_removes_touch_tick_symmetrically() -> None:

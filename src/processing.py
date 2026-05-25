@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -30,6 +31,7 @@ try:
         MessageOrderbookJoiner,
         SnapshotBatchProcessor,
         TradingSessionFilter,
+        derivative_feature_columns,
         fit_exp_scaling_parameters,
         fit_plgs_parameters,
         handle_abnormal_prices,
@@ -59,6 +61,7 @@ except ImportError:  # pragma: no cover
         MessageOrderbookJoiner,
         SnapshotBatchProcessor,
         TradingSessionFilter,
+        derivative_feature_columns,
         fit_exp_scaling_parameters,
         fit_plgs_parameters,
         handle_abnormal_prices,
@@ -110,16 +113,35 @@ class LobFilePair:
 
 @dataclass(slots=True)
 class ProcessedDay:
+    """Temporary per-day payload; dataframe fields may be released to reduce RAM."""
+
     split: str
     pair: LobFilePair
-    raw: pd.DataFrame
-    joined: pd.DataFrame
-    labeled: pd.DataFrame
-    message_features: pd.DataFrame
+    raw: pd.DataFrame | None
+    joined: pd.DataFrame | None
+    labeled: pd.DataFrame | None
+    message_features: pd.DataFrame | None
     processed: pd.DataFrame | None = None
     normalized: pd.DataFrame | None = None
     processed_csv_path: Path | None = None
     sequence_paths: tuple[Path, Path, Path] | None = None
+
+    def release_raw_frames(self) -> None:
+        """Release raw/joined/labeled frames after train-only diagnostics."""
+        self.raw = None
+        self.joined = None
+        self.labeled = None
+
+    def release_processed_frames(self) -> None:
+        """Release feature, processed, and normalized frames after saving."""
+        self.message_features = None
+        self.processed = None
+        self.normalized = None
+
+    def release_all_frames(self) -> None:
+        """Release all dataframe payloads held by this day."""
+        self.release_raw_frames()
+        self.release_processed_frames()
 
 
 class LobProcessingPipeline:
@@ -166,6 +188,14 @@ class LobProcessingPipeline:
 
     def _resolve_path(self, path: Path) -> Path:
         return path if path.is_absolute() else (self.config_dir / path).resolve()
+
+    @staticmethod
+    def _require_frame(day: ProcessedDay, attr: str, context: str) -> pd.DataFrame:
+        """Return a day dataframe or fail clearly if it was released."""
+        frame = getattr(day, attr)
+        if frame is None:
+            raise ValueError(f"{day.pair.label} has no '{attr}' dataframe available for {context}.")
+        return frame
 
     @staticmethod
     def _lobster_file_key(file_path: Path) -> tuple[str, str] | None:
@@ -308,6 +338,7 @@ class LobProcessingPipeline:
         pairs: list[LobFilePair],
         folds: list[FoldConfig] | None = None,
     ) -> dict[str, ProcessedDay]:
+        """Legacy in-memory preparation path; not used by RAM-safe HPC preprocessing."""
         required_dates = self._required_fold_dates(folds)
         prepared: dict[str, ProcessedDay] = {}
         for pair in pairs:
@@ -333,6 +364,7 @@ class LobProcessingPipeline:
         split_pairs: dict[str, list[LobFilePair]],
         prepared_days: dict[str, ProcessedDay],
     ) -> dict[str, list[ProcessedDay]]:
+        """Legacy helper that clones preloaded days into fold splits."""
         processed = {name: [] for name in SPLIT_NAMES}
         for split, pairs in split_pairs.items():
             for pair in pairs:
@@ -409,8 +441,10 @@ class LobProcessingPipeline:
         )
 
     def preprocess_pair(self, pair: LobFilePair, split: str) -> ProcessedDay:
+        """Legacy eager preprocessing helper retained for notebooks/tests."""
         day = self.prepare_pair(pair, split)
-        day.processed = self.snapshot_processor.transform(day.message_features, source_label=pair.label)
+        message_features = self._require_frame(day, "message_features", "snapshot preprocessing")
+        day.processed = self.snapshot_processor.transform(message_features, source_label=pair.label)
         print(
             f"Finished preprocessing for {pair.label}: "
             f"{day.processed.shape[0]} rows, {day.processed.shape[1]} columns."
@@ -418,6 +452,7 @@ class LobProcessingPipeline:
         return day
 
     def preprocess_splits(self, split_pairs: dict[str, list[LobFilePair]]) -> dict[str, list[ProcessedDay]]:
+        """Legacy in-memory split preparation; run_fold now streams days."""
         processed = {name: [] for name in SPLIT_NAMES}
         for split, pairs in split_pairs.items():
             print(f"Starting preprocessing split '{split}' with {len(pairs)} day(s).")
@@ -448,19 +483,20 @@ class LobProcessingPipeline:
             else 1.0
         )
         for day in train_days:
+            message_features = self._require_frame(day, "message_features", f"{kind} lambda optimization")
             columns = self.snapshot_processor.window_processor._resolve_stream_columns(
-                day.message_features,
+                message_features,
                 stream_config,
                 kind,
             )
             if not columns:
                 continue
-            values = day.message_features[columns].to_numpy(dtype=float)
+            values = message_features[columns].to_numpy(dtype=float)
             if kind == "volume":
                 values = np.log1p(values)
             values_by_day.append(values)
             if centers_by_day is not None:
-                centers_by_day.append(calculate_midprice(day.message_features).to_numpy(dtype=float))
+                centers_by_day.append(calculate_midprice(message_features).to_numpy(dtype=float))
         return values_by_day, centers_by_day, scale
 
     def _optimize_fast_stream_lambda(
@@ -555,6 +591,7 @@ class LobProcessingPipeline:
         *,
         kind: str,
     ) -> bool:
+        """Use daily GCV cache when --lambda-cache-dir is configured."""
         if self.lambda_cache_dir is None:
             return False
 
@@ -563,14 +600,15 @@ class LobProcessingPipeline:
         if not stream_config.enabled:
             return True
 
-        _, _, scale = self._stream_values_for_lambda_optimization(train_days, kind=kind)
+        scale = preprocessing.price_kinematic.tick_size if kind == "price" else 1.0
         cache_key = self._lambda_cache_key_for_stream(kind=kind, scale=scale)
 
         caches = []
         missing: list[Path] = []
 
         for day in train_days:
-            if len(day.message_features) < preprocessing.snapshot_window:
+            message_features = self._require_frame(day, "message_features", f"{kind} GCV cache lookup")
+            if len(message_features) < preprocessing.snapshot_window:
                 continue
 
             cache_path = daily_lambda_gcv_cache_path(
@@ -641,7 +679,7 @@ class LobProcessingPipeline:
         window = self.config.preprocessing.snapshot_window
         train_values: list[pd.Series] = []
         for day in train_days:
-            df = day.message_features
+            df = self._require_frame(day, "message_features", "price static PLGS fitting")
             if len(df) < window:
                 continue
             columns = self.snapshot_processor.window_processor._resolve_stream_columns(
@@ -689,7 +727,7 @@ class LobProcessingPipeline:
         window = self.config.preprocessing.snapshot_window
         train_values: list[pd.Series] = []
         for day in train_days:
-            df = day.message_features
+            df = self._require_frame(day, "message_features", "volume static scaling fitting")
             if len(df) < window:
                 continue
             columns = self.snapshot_processor.window_processor._resolve_stream_columns(
@@ -726,10 +764,12 @@ class LobProcessingPipeline:
         return result
 
     def build_snapshot_features(self, processed_splits: dict[str, list[ProcessedDay]]) -> None:
+        """Legacy eager snapshot construction for in-memory split payloads."""
         print("Starting snapshot feature construction for all splits.")
         for split_days in processed_splits.values():
             for day in split_days:
-                day.processed = self.snapshot_processor.transform(day.message_features, source_label=day.pair.label)
+                message_features = self._require_frame(day, "message_features", "snapshot feature construction")
+                day.processed = self.snapshot_processor.transform(message_features, source_label=day.pair.label)
                 print(
                     f"Finished preprocessing for {day.pair.label}: "
                     f"{day.processed.shape[0]} rows, {day.processed.shape[1]} columns."
@@ -748,11 +788,11 @@ class LobProcessingPipeline:
 
     def _label_distribution_for_days(self, days: list[ProcessedDay]) -> dict[str, object]:
         label_column = self.config.data.label_column
-        label_values = [
-            day.labeled[label_column]
-            for day in days
-            if label_column in day.labeled.columns
-        ]
+        label_values = []
+        for day in days:
+            labeled = self._require_frame(day, "labeled", "label distribution")
+            if label_column in labeled.columns:
+                label_values.append(labeled[label_column])
         labels = pd.concat(label_values, ignore_index=True) if label_values else pd.Series(dtype=int)
         total = int(len(labels))
         distribution: dict[str, object] = {"total": total}
@@ -794,6 +834,57 @@ class LobProcessingPipeline:
             distribution["adaptive_threshold_floor_comparison"] = floor_comparison
         return distribution
 
+    def _new_label_distribution_accumulator(self) -> dict[str, dict[str, int]]:
+        """Create split label counters for adaptive method-C metadata."""
+        return {split: {"total": 0, "-1": 0, "0": 0, "1": 0} for split in SPLIT_NAMES}
+
+    def _accumulate_label_distribution(
+        self,
+        accumulator: dict[str, dict[str, int]],
+        split: str,
+        day: ProcessedDay,
+    ) -> None:
+        """Accumulate one labeled day without keeping labels in memory."""
+        labeled = self._require_frame(day, "labeled", "streaming label distribution")
+        label_column = self.config.data.label_column
+        if label_column not in labeled.columns:
+            return
+
+        labels = labeled[label_column]
+        split_counts = accumulator[split]
+        split_counts["total"] += int(len(labels))
+        for class_value in (-1, 0, 1):
+            split_counts[str(class_value)] += int((labels == class_value).sum())
+
+    @staticmethod
+    def _finalize_split_label_distribution(counts: dict[str, int]) -> dict[str, object]:
+        """Convert accumulated label counts to metadata format."""
+        total = int(counts["total"])
+        distribution: dict[str, object] = {"total": total}
+        for class_value in ("-1", "0", "1"):
+            count = int(counts[class_value])
+            distribution[class_value] = {
+                "count": count,
+                "percentage": 0.0 if total == 0 else float(100.0 * count / total),
+            }
+        return distribution
+
+    def _finalize_label_distribution(
+        self,
+        accumulator: dict[str, dict[str, int]] | None,
+        floor_comparison: dict[str, object] | None,
+    ) -> dict[str, object] | None:
+        """Build final adaptive label metadata after streaming all splits."""
+        if accumulator is None:
+            return None
+
+        distribution: dict[str, object] = {"method": "smoothing_C_adaptive"}
+        for split in SPLIT_NAMES:
+            distribution[split] = self._finalize_split_label_distribution(accumulator[split])
+        if floor_comparison is not None:
+            distribution["adaptive_threshold_floor_comparison"] = floor_comparison
+        return distribution
+
     def adaptive_threshold_floor_comparison(self, train_days: list[ProcessedDay]) -> dict[str, object] | None:
         smoothing_config = self.config.preprocessing.labels.smoothing
         adaptive_config = smoothing_config.adaptive_threshold
@@ -805,14 +896,15 @@ class LobProcessingPipeline:
         volatility_greater = 0
         equal = 0
         for day in train_days:
+            joined = self._require_frame(day, "joined", "adaptive threshold floor comparison")
             midprices = calculate_midprice(
-                day.joined,
+                joined,
                 bid_col=smoothing_config.bid_column,
                 ask_col=smoothing_config.ask_column,
             )
             pct_changes = SmoothingMethodC(k=smoothing_config.k, h=smoothing_config.h)(midprices)
             components = calculate_adaptive_method_c_threshold_components(
-                day.joined,
+                joined,
                 midprices,
                 k=smoothing_config.k,
                 h=smoothing_config.h,
@@ -889,6 +981,7 @@ class LobProcessingPipeline:
         return self.sequence_dir / fold_id / FEATURE_SCHEMA_FILENAME
 
     def fit_train_normalizer(self, train_days: list[ProcessedDay], stats_path: Path | None = None) -> DerivativeNormalizer:
+        """Legacy in-memory normalizer fit; RAM-safe run_fold uses streaming fit."""
         print(f"Fitting derivative normalizer on {len(train_days)} training day(s).")
         target_stats_path = stats_path or (self.derivatives_stats_dir / DERIVATIVES_STATS_FILENAME)
         if target_stats_path.exists():
@@ -896,57 +989,23 @@ class LobProcessingPipeline:
             print(f"Removed previous derivative statistics: {target_stats_path}")
         processed_train_days = []
         for day in train_days:
-            if day.processed is None:
-                raise ValueError(f"{day.pair.label} has not been snapshot-processed yet.")
-            processed_train_days.append(day.processed)
+            processed_train_days.append(self._require_frame(day, "processed", "normalizer fitting"))
         normalizer = DerivativeNormalizer(target_stats_path)
         normalizer.fit(processed_train_days)
         print("Derivative normalizer fitted.")
         return normalizer
 
     def apply_normalization(self, processed_splits: dict[str, list[ProcessedDay]], normalizer: DerivativeNormalizer) -> None:
+        """Legacy in-memory normalization; RAM-safe run_fold normalizes one day at a time."""
         print("Starting normalization for all splits.")
         for split_days in processed_splits.values():
             for day in split_days:
-                if day.processed is None:
-                    raise ValueError(f"{day.pair.label} has not been snapshot-processed yet.")
-                day.normalized = normalizer.transform(day.processed)
+                processed = self._require_frame(day, "processed", "normalization")
+                day.normalized = normalizer.transform(processed)
         print("Finished normalization for all splits.")
 
-    def apply_feature_schema(self, processed_splits: dict[str, list[ProcessedDay]], schema_path: Path) -> list[str]:
-        train_days = processed_splits.get("train", [])
-        if not train_days:
-            raise ValueError("Cannot build feature schema: no training day is available.")
-        if train_days[0].normalized is None:
-            raise ValueError(f"{train_days[0].pair.label} has not been normalized yet.")
-
-        ordered_feature_columns = self.sequence_builder.feature_columns(train_days[0].normalized)
-        if not ordered_feature_columns:
-            raise ValueError("Cannot build feature schema: the first training day has no feature columns.")
-
-        expected_features = set(ordered_feature_columns)
-        excluded_columns = {
-            self.config.data.time_column,
-            self.config.data.label_column,
-            *self.config.data.feature_exclude_columns,
-        }
-        for split in SPLIT_NAMES:
-            for day in processed_splits.get(split, []):
-                if day.normalized is None:
-                    raise ValueError(f"{day.pair.label} in split {split} has not been normalized yet.")
-                current_feature_columns = self.sequence_builder.feature_columns(day.normalized)
-                current_features = set(current_feature_columns)
-                missing = sorted(expected_features - current_features)
-                extra = sorted(current_features - expected_features)
-                if missing or extra:
-                    raise ValueError(
-                        f"Feature schema mismatch for {day.pair.label} ({split}): "
-                        f"missing columns={missing}, extra columns={extra}."
-                    )
-
-                non_feature_columns = [column for column in day.normalized.columns if column in excluded_columns]
-                day.normalized = day.normalized.loc[:, non_feature_columns + ordered_feature_columns]
-
+    def _save_feature_schema(self, ordered_feature_columns: list[str], schema_path: Path) -> None:
+        """Persist the fold feature order used by all saved arrays."""
         schema_path.parent.mkdir(parents=True, exist_ok=True)
         schema_path.write_text(
             yaml.safe_dump(
@@ -957,7 +1016,98 @@ class LobProcessingPipeline:
             encoding="utf-8",
         )
         print(f"Saved feature schema with {len(ordered_feature_columns)} columns to {schema_path}.")
+
+    def _build_feature_schema_from_day(self, day: ProcessedDay, schema_path: Path) -> list[str]:
+        """Build the fold feature schema from the first normalized train day."""
+        normalized = self._require_frame(day, "normalized", "feature schema construction")
+        ordered_feature_columns = self.sequence_builder.feature_columns(normalized)
+        if not ordered_feature_columns:
+            raise ValueError("Cannot build feature schema: the first training day has no feature columns.")
+        self._save_feature_schema(ordered_feature_columns, schema_path)
         return ordered_feature_columns
+
+    def _align_day_to_feature_schema(self, day: ProcessedDay, ordered_feature_columns: list[str]) -> None:
+        """Validate and reorder one normalized day to the fold feature schema."""
+        normalized = self._require_frame(day, "normalized", "feature schema alignment")
+        expected_features = set(ordered_feature_columns)
+        current_feature_columns = self.sequence_builder.feature_columns(normalized)
+        current_features = set(current_feature_columns)
+        missing = sorted(expected_features - current_features)
+        extra = sorted(current_features - expected_features)
+        if missing or extra:
+            raise ValueError(
+                f"Feature schema mismatch for {day.pair.label} ({day.split}): "
+                f"missing columns={missing}, extra columns={extra}."
+            )
+
+        excluded_columns = {
+            self.config.data.time_column,
+            self.config.data.label_column,
+            *self.config.data.feature_exclude_columns,
+        }
+        non_feature_columns = [column for column in normalized.columns if column in excluded_columns]
+        day.normalized = normalized.loc[:, non_feature_columns + ordered_feature_columns]
+
+    def apply_feature_schema(self, processed_splits: dict[str, list[ProcessedDay]], schema_path: Path) -> list[str]:
+        """Legacy in-memory schema validation; RAM-safe run_fold validates per day."""
+        train_days = processed_splits.get("train", [])
+        if not train_days:
+            raise ValueError("Cannot build feature schema: no training day is available.")
+        ordered_feature_columns = self._build_feature_schema_from_day(train_days[0], schema_path)
+        for split in SPLIT_NAMES:
+            for day in processed_splits.get(split, []):
+                day.split = split
+                self._align_day_to_feature_schema(day, ordered_feature_columns)
+        return ordered_feature_columns
+
+    def _fit_train_normalizer_streaming(
+        self,
+        train_days: list[ProcessedDay],
+        *,
+        stats_path: Path,
+        schema_path: Path,
+    ) -> tuple[DerivativeNormalizer, list[str]]:
+        """Fit derivative stats from train snapshots while retaining only one full day."""
+        print(f"Fitting derivative normalizer on {len(train_days)} training day(s).")
+        if stats_path.exists():
+            stats_path.unlink()
+            print(f"Removed previous derivative statistics: {stats_path}")
+
+        normalizer = DerivativeNormalizer(stats_path)
+        derivative_frames: list[pd.DataFrame] = []
+        first_schema_day: ProcessedDay | None = None
+
+        for day in train_days:
+            message_features = self._require_frame(day, "message_features", "train snapshot fitting")
+            day.processed = self.snapshot_processor.transform(message_features, source_label=day.pair.label)
+            processed = self._require_frame(day, "processed", "train normalizer fitting")
+            print(
+                f"Finished preprocessing for {day.pair.label}: "
+                f"{processed.shape[0]} rows, {processed.shape[1]} columns."
+            )
+
+            derivative_columns = derivative_feature_columns(processed)
+            derivative_frames.append(processed.loc[:, derivative_columns].copy())
+            if first_schema_day is None:
+                first_schema_day = day
+            else:
+                day.processed = None
+            gc.collect()
+
+        if first_schema_day is None:
+            raise ValueError("Cannot fit derivative normalizer: no training day is available.")
+
+        normalizer.fit(derivative_frames)
+        first_processed = self._require_frame(first_schema_day, "processed", "feature schema bootstrap")
+        first_schema_day.normalized = normalizer.transform(first_processed)
+        ordered_feature_columns = self._build_feature_schema_from_day(first_schema_day, schema_path)
+        first_schema_day.processed = None
+        first_schema_day.normalized = None
+        derivative_frames.clear()
+        gc.collect()
+
+        print("Derivative normalizer fitted.")
+        return normalizer, ordered_feature_columns
 
     def save_split_outputs(
         self,
@@ -966,6 +1116,7 @@ class LobProcessingPipeline:
         processed_dir: Path | None = None,
         sequence_dir: Path | None = None,
     ) -> None:
+        """Legacy in-memory output writer; RAM-safe run_fold writes per day."""
         print("Saving processed CSV and sequence outputs.")
         target_processed_dir = processed_dir or self.processed_dir
         target_sequence_dir = sequence_dir or self.sequence_dir
@@ -979,45 +1130,115 @@ class LobProcessingPipeline:
             sequence_split_dir.mkdir(parents=True, exist_ok=True)
 
             for day in days:
-                if day.normalized is None:
-                    raise ValueError(f"{day.pair.label} in split {split} has not been normalized yet.")
+                normalized = self._require_frame(day, "normalized", "output saving")
 
                 csv_path = processed_split_dir / f"{day.pair.output_stem}_processed.csv"
-                day.normalized.to_csv(csv_path, index=False)
+                normalized.to_csv(csv_path, index=False)
                 day.processed_csv_path = csv_path
 
                 prefix = sequence_split_dir / day.pair.output_stem
-                day.sequence_paths = self.sequence_builder.save(day.normalized, prefix)
+                day.sequence_paths = self.sequence_builder.save(normalized, prefix)
                 print(f"Saved outputs for {day.pair.label} ({split}).")
+
+    def _build_and_save_one_day(
+        self,
+        day: ProcessedDay,
+        *,
+        split: str,
+        normalizer: DerivativeNormalizer,
+        ordered_feature_columns: list[str],
+        processed_dir: Path,
+        sequence_dir: Path,
+    ) -> tuple[int, int]:
+        """Build snapshots, normalize, align, and save one day."""
+        day.split = split
+        message_features = self._require_frame(day, "message_features", "single-day snapshot construction")
+        day.processed = self.snapshot_processor.transform(message_features, source_label=day.pair.label)
+        processed = self._require_frame(day, "processed", "single-day normalization")
+        print(
+            f"Finished preprocessing for {day.pair.label}: "
+            f"{processed.shape[0]} rows, {processed.shape[1]} columns."
+        )
+        day.normalized = normalizer.transform(processed)
+        self._align_day_to_feature_schema(day, ordered_feature_columns)
+        normalized = self._require_frame(day, "normalized", "single-day output saving")
+
+        processed_split_dir = processed_dir / split
+        sequence_split_dir = sequence_dir / split
+        processed_split_dir.mkdir(parents=True, exist_ok=True)
+        sequence_split_dir.mkdir(parents=True, exist_ok=True)
+
+        csv_path = processed_split_dir / f"{day.pair.output_stem}_processed.csv"
+        normalized.to_csv(csv_path, index=False)
+        day.processed_csv_path = csv_path
+
+        prefix = sequence_split_dir / day.pair.output_stem
+        day.sequence_paths = self.sequence_builder.save(normalized, prefix)
+        print(f"Saved outputs for {day.pair.label} ({split}).")
+        return normalized.shape
 
     def run_fold(
         self,
         fold: FoldConfig,
         split_pairs: dict[str, list[LobFilePair]],
-        prepared_days: dict[str, ProcessedDay],
     ) -> dict[str, dict[str, tuple[int, int]]]:
         fold_start = perf_counter()
         print(f"Starting fold {fold.id}.")
         self.reset_fold_state()
-        processed_splits = self.prepared_splits_for_fold(fold, split_pairs, prepared_days)
-        label_distribution = self.label_distribution(processed_splits)
-        self.print_label_distribution(fold.id, label_distribution)
-        plgs_parameters = self.fit_price_static_plgs_parameters(processed_splits["train"])
-        volume_static_exp = self.fit_volume_static_exp_parameters(processed_splits["train"])
-        self.optimize_fast_smoothing_lambdas(processed_splits["train"])
-        self.build_snapshot_features(processed_splits)
-        stats_path = self.fold_derivatives_stats_path(fold.id)
-        normalizer = self.fit_train_normalizer(processed_splits["train"], stats_path=stats_path)
-        self.apply_normalization(processed_splits, normalizer)
 
+        train_days: list[ProcessedDay] = []
+        train_pairs = split_pairs.get("train", [])
+        for pair in train_pairs:
+            train_days.append(self.prepare_pair(pair, "train"))
+
+        label_accumulator = self._new_label_distribution_accumulator() if self.uses_adaptive_method_c_labels() else None
+        floor_comparison: dict[str, object] | None = None
+        stats_path = self.fold_derivatives_stats_path(fold.id)
         fold_processed_dir = self.processed_dir / fold.id
         fold_sequence_dir = self.sequence_dir / fold.id
-        self.apply_feature_schema(processed_splits, self.fold_feature_schema_path(fold.id))
-        self.save_split_outputs(
-            processed_splits,
-            processed_dir=fold_processed_dir,
-            sequence_dir=fold_sequence_dir,
-        )
+        try:
+            floor_comparison = self.adaptive_threshold_floor_comparison(train_days)
+            for day in train_days:
+                day.release_raw_frames()
+            gc.collect()
+
+            plgs_parameters = self.fit_price_static_plgs_parameters(train_days)
+            volume_static_exp = self.fit_volume_static_exp_parameters(train_days)
+            self.optimize_fast_smoothing_lambdas(train_days)
+            normalizer, ordered_feature_columns = self._fit_train_normalizer_streaming(
+                train_days,
+                stats_path=stats_path,
+                schema_path=self.fold_feature_schema_path(fold.id),
+            )
+        finally:
+            for day in train_days:
+                day.release_all_frames()
+            train_days.clear()
+            gc.collect()
+
+        summary: dict[str, dict[str, tuple[int, int]]] = {split: {} for split in SPLIT_NAMES}
+        for split in SPLIT_NAMES:
+            print(f"Starting streaming preprocessing split '{split}' with {len(split_pairs.get(split, []))} day(s).")
+            for pair in split_pairs.get(split, []):
+                day = self.prepare_pair(pair, split)
+                try:
+                    if label_accumulator is not None:
+                        self._accumulate_label_distribution(label_accumulator, split, day)
+                    summary[split][day.pair.output_stem] = self._build_and_save_one_day(
+                        day,
+                        split=split,
+                        normalizer=normalizer,
+                        ordered_feature_columns=ordered_feature_columns,
+                        processed_dir=fold_processed_dir,
+                        sequence_dir=fold_sequence_dir,
+                    )
+                finally:
+                    day.release_all_frames()
+                    gc.collect()
+            print(f"Finished streaming preprocessing split '{split}'.")
+
+        label_distribution = self._finalize_label_distribution(label_accumulator, floor_comparison)
+        self.print_label_distribution(fold.id, label_distribution)
         fold_duration_seconds = perf_counter() - fold_start
         metadata_path = save_preprocessing_metadata(
             self.config,
@@ -1033,13 +1254,7 @@ class LobProcessingPipeline:
         )
         print(f"Saved preprocessing metadata for fold {fold.id} to {metadata_path}.")
         print(f"Finished fold {fold.id} ({format_duration(fold_duration_seconds)}).")
-        return {
-            split: {
-                day.pair.output_stem: day.normalized.shape if day.normalized is not None else day.processed.shape
-                for day in days
-            }
-            for split, days in processed_splits.items()
-        }
+        return summary
 
     def run(
         self,
@@ -1062,12 +1277,9 @@ class LobProcessingPipeline:
                 raise ValueError(f"Unknown fold id(s): {missing}")
             print(f"Selected {len(selected_folds)} fold(s): {', '.join(fold.id for fold in selected_folds)}.")
 
-        prepare_start = perf_counter()
-        prepared_days = self.prepare_required_days(pairs, folds=selected_folds)
-        print(f"Prepared required trading days ({format_duration(perf_counter() - prepare_start)}).")
         summary: dict[str, dict[str, dict[str, tuple[int, int]]]] = {}
         for fold in selected_folds:
             split_pairs = self.split_pairs_for_fold(pairs, fold)
-            summary[fold.id] = self.run_fold(fold, split_pairs, prepared_days)
+            summary[fold.id] = self.run_fold(fold, split_pairs)
         print(f"LOB processing pipeline finished ({format_duration(perf_counter() - pipeline_start)}).")
         return summary
