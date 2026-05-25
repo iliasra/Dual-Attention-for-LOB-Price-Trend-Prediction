@@ -52,10 +52,10 @@ fi
 
 FOLD_COUNT="$(awk 'NF && $1 !~ /^#/ { count++ } END { print count + 0 }' "$FOLDS_FILE")"
 FOLD_ID="$(
-  awk -v index="$PBS_ARRAY_INDEX" '
+  awk -v fold_index="$PBS_ARRAY_INDEX" '
     NF && $1 !~ /^#/ {
       count++
-      if (count == index) {
+      if (count == fold_index) {
         print $1
         exit
       }

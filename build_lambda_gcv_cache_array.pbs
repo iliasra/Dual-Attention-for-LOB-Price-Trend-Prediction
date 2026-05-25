@@ -45,10 +45,10 @@ if [ ! -f "$TASK_FILE" ]; then
 fi
 
 TASK_LINE="$(
-  awk -v index="$PBS_ARRAY_INDEX" '
+  awk -v task_index="$PBS_ARRAY_INDEX" '
     NF && $1 !~ /^#/ {
       count++
-      if (count == index) {
+      if (count == task_index) {
         print
         exit
       }

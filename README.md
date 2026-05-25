@@ -220,6 +220,9 @@ non-empty, non-comment lines in `configs/folds.txt`.
 From the project root:
 
 ```bash
+eval "$($HOME/miniforge3/bin/conda shell.bash hook)"
+conda activate transformer
+
 cd $HOME/Dual-Attention-for-LOB-Price-Trend-Prediction
 
 PYTHONPATH="$PWD/src:${PYTHONPATH:-}" \
