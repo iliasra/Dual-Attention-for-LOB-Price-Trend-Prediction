@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N dry-run
 #PBS -l walltime=00:10:00
-#PBS -l select=1:ncpus=8:mem=24gb:ngpus=1:gpu_type=A100
+#PBS -l select=1:ncpus=8:mem=24gb:ngpus=1
 
 set -eo pipefail
 SCRIPT_START_EPOCH="$(date +%s)"
@@ -126,9 +126,9 @@ PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python -c "import yaml; from configur
 echo
 echo "===== RUNNING VRAM DRY RUN ====="
 PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python scripts/vram_dry_run.py \
-  --batch-size 32 \
+  --batch-size 128 \
   --sequence-length 100 \
-  --num-features 240 \
+  --num-features 214 \
   --steps 5
 
 echo

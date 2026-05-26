@@ -1,6 +1,10 @@
 # Misc
 *.env
 
+# PBS stdout/stderr logs
+*.o[0-9]*
+*.e[0-9]*
+
 # Data
 data/*
 !data/.gitkeep 
