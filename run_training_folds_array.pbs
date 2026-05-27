@@ -37,9 +37,9 @@ if [ -z "$FOLD_ID" ]; then
 fi
 
 RUN_OUTPUT_DIR="$HOME/run_outputs/$RUN_STEM/$FOLD_ID"
-PROJECT_JOB_LOG_DIR="$PROJECT_DIR/logs/pbs/$RUN_STEM/$FOLD_ID"
+PROJECT_JOB_LOG_DIR="$PROJECT_DIR/logs/$RUN_STEM/$FOLD_ID"
 LOG_FILE="run_logs.txt"
-LOG_PATH="$TMPDIR/$LOG_FILE"
+LOG_PATH="$PROJECT_JOB_LOG_DIR/$LOG_FILE"
 LOG_FIFO="$TMPDIR/run_log_fifo.$$"
 RUN_MARKER="$TMPDIR/run_output_marker.$$"
 
@@ -57,6 +57,21 @@ format_duration() {
   fi
 }
 
+same_file() {
+  left_path="$1"
+  right_path="$2"
+
+  if [ ! -e "$left_path" ] || [ ! -e "$right_path" ]; then
+    return 1
+  fi
+
+  left_real="$(readlink -f "$left_path" 2>/dev/null || true)"
+  right_real="$(readlink -f "$right_path" 2>/dev/null || true)"
+
+  [ -n "$left_real" ] && [ "$left_real" = "$right_real" ]
+}
+
+mkdir -p "$PROJECT_JOB_LOG_DIR"
 : > "$LOG_PATH"
 mkfifo "$LOG_FIFO"
 tee -a "$LOG_PATH" < "$LOG_FIFO" &
@@ -77,6 +92,9 @@ copy_file_to_project() {
   source_path="$1"
   relative_path="${source_path#$WORK_DIR/}"
   target_path="$PROJECT_DIR/$relative_path"
+  if same_file "$source_path" "$target_path"; then
+    return 0
+  fi
   mkdir -p "$(dirname "$target_path")"
   cp -p "$source_path" "$target_path"
 }
@@ -87,23 +105,32 @@ copy_generated_file() {
   copy_file_to_outputs "$source_path"
 }
 
+copy_newer_files_from_dir() {
+  output_dir="$1"
+  if [ -d "$output_dir" ]; then
+    while IFS= read -r -d '' output_file; do
+      copy_generated_file "$output_file"
+    done < <(find -L "$output_dir" -type f -newer "$RUN_MARKER" -print0)
+  fi
+}
+
 copy_run_outputs() {
   mkdir -p "$RUN_OUTPUT_DIR"
   mkdir -p "$PROJECT_JOB_LOG_DIR"
 
   if [ -f "$LOG_PATH" ]; then
     cp "$LOG_PATH" "$RUN_OUTPUT_DIR/$LOG_FILE"
-    cp "$LOG_PATH" "$PROJECT_JOB_LOG_DIR/$LOG_FILE"
   fi
 
   if [ -f "$RUN_MARKER" ] && [ -d "$WORK_DIR" ]; then
-    for output_dir in "$WORK_DIR/logs" "$WORK_DIR/results"; do
-      if [ -d "$output_dir" ]; then
-        while IFS= read -r -d '' output_file; do
-          copy_generated_file "$output_file"
-        done < <(find "$output_dir" -type f -newer "$RUN_MARKER" -print0)
-      fi
+    for output_dir in "$WORK_DIR/logs/$RUN_STEM/$FOLD_ID" "$WORK_DIR/results/$RUN_STEM/$FOLD_ID"; do
+      copy_newer_files_from_dir "$output_dir"
     done
+
+    summary_file="$WORK_DIR/logs/$RUN_STEM/summary_$FOLD_ID.yaml"
+    if [ -f "$summary_file" ] && [ "$summary_file" -newer "$RUN_MARKER" ]; then
+      copy_generated_file "$summary_file"
+    fi
   fi
 }
 
@@ -166,6 +193,7 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
 
 echo
 echo "===== GPU INFO ====="
@@ -187,6 +215,13 @@ rsync -a \
   --exclude="logs" \
   --exclude="results" \
   "$PROJECT_DIR/" "$WORK_DIR/"
+
+echo
+echo "===== LINKING PERSISTENT OUTPUT DIRECTORIES ====="
+mkdir -p "$PROJECT_DIR/logs" "$PROJECT_DIR/results"
+rm -rf "${WORK_DIR:?}/logs" "${WORK_DIR:?}/results"
+ln -s "$PROJECT_DIR/logs" "$WORK_DIR/logs"
+ln -s "$PROJECT_DIR/results" "$WORK_DIR/results"
 
 echo
 echo "===== STAGING SEQUENCE DATA FOR $FOLD_ID ====="
