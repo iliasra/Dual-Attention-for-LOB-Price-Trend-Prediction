@@ -170,7 +170,13 @@ training:
   persistent_workers: true
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
-  focal_gamma: 2.0 # to fit accordingly to how imbalanced classes are.
+  focal_gamma: 1.0
+  class_weight_beta: 0.25
+  class_weight_min: 0.5
+  class_weight_max: 3.0
   grad_clip_norm: 1.0
   model_dir: ../results
   use_amp: true
+  deterministic_torch: false
+  sampling:
+    neutral_to_directional_ratio: 2.0 # downsampling of neutral class

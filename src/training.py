@@ -45,20 +45,47 @@ class FocalLoss(nn.Module):
 def class_weights_from_sequence_labels(
     y: np.ndarray,
     num_classes: int = 3,
-    gamma_mode: bool = True,
+    beta: float = 0.25,
+    min_weight: float = 0.5,
+    max_weight: float = 3.0,
 ) -> tuple[list[float], list[int]]:
     """Compute clipped balanced class weights from sequence-level train labels."""
     labels = np.asarray(y, dtype=np.int64)
     counts = np.bincount(labels, minlength=num_classes)[:num_classes]
+    return class_weights_from_class_counts(
+        counts,
+        beta=beta,
+        min_weight=min_weight,
+        max_weight=max_weight,
+    )
+
+
+def class_weights_from_class_counts(
+    counts: np.ndarray | list[int],
+    beta: float = 0.25,
+    min_weight: float = 0.5,
+    max_weight: float = 3.0,
+) -> tuple[list[float], list[int]]:
+    """Compute clipped balanced class weights from per-class counts."""
+    counts = np.asarray(counts, dtype=np.int64)
+    beta = float(beta)
+    min_weight = float(min_weight)
+    max_weight = float(max_weight)
+    if beta < 0.0:
+        raise ValueError("class weight beta must be >= 0.")
+    if min_weight <= 0.0:
+        raise ValueError("class weight minimum must be > 0.")
+    if max_weight < min_weight:
+        raise ValueError("class weight maximum must be >= minimum.")
+
     total = int(counts.sum())
     if total <= 0:
-        raise ValueError("Cannot compute class weights from an empty label array.")
+        raise ValueError("Cannot compute class weights from empty class counts.")
 
-    weights = total / (num_classes * np.maximum(counts, 1))
-    if gamma_mode:
-        weights = np.sqrt(weights) # the sqrt allows the weights to be "less agressive" when focal loss already deals with imbalanced classes
+    weights = total / (counts.size * np.maximum(counts, 1))
+    weights = weights ** beta
     weights = weights / weights.mean()
-    weights = np.clip(weights, 0.5, 3.0)
+    weights = np.clip(weights, min_weight, max_weight)
     return weights.astype(float).tolist(), counts.astype(int).tolist()
 
 
@@ -263,6 +290,13 @@ class LobTrainer:
     def _amp_context(self):
         return torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled)
 
+    @staticmethod
+    def _set_epoch(data_loader: Iterable, epoch: int) -> None:
+        """Notify epoch-aware samplers before iterating a loader."""
+        sampler = getattr(data_loader, "sampler", None)
+        if hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
+
     def fit(
         self,
         model: nn.Module,
@@ -290,6 +324,7 @@ class LobTrainer:
 
         print(f"Starting training for {self.config.epochs} epoch(s) on {self.device}.")
         for epoch in range(self.config.epochs):
+            self._set_epoch(train_loader, epoch)
             print(f"Starting epoch {epoch + 1}/{self.config.epochs}.")
             train_result = self._run_epoch(
                 model=model,

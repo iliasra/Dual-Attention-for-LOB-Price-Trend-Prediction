@@ -212,6 +212,7 @@ def save_run_config_snapshot(
     fold_id: str | None = None,
     model_parameters: dict[str, int] | None = None,
     preprocessing_metadata: dict[str, Any] | None = None,
+    sampling_summary: dict[str, Any] | None = None,
 ) -> None:
     payload = load_config_snapshot(config)
     payload.setdefault("run_metadata", {})
@@ -227,6 +228,7 @@ def save_run_config_snapshot(
                 "resolved_max_dt": config.model.max_dt,
             },
             "class_weights": config.training.class_weights,
+            "training_sampling": sampling_summary or {"enabled": False},
             "model_parameters": model_parameters or {},
             "fast_smoothing_lambdas": fast_smoothing_lambda_summary(config, preprocessing_metadata),
         }
@@ -404,6 +406,24 @@ def _write_best_epoch_summary(handle: Any, history: list[Any]) -> None:
         handle.write(f"{split}_ece: {metrics.expected_calibration_error:.10g}\n")
 
 
+def _write_sampling_summary(handle: Any, summary: dict[str, Any]) -> None:
+    handle.write(f"enabled: {summary.get('enabled', False)}\n")
+    if not summary.get("enabled"):
+        return
+    handle.write(f"method: {summary.get('method')}\n")
+    handle.write(f"neutral_to_directional_ratio: {summary.get('neutral_to_directional_ratio')}\n")
+    handle.write(f"base_seed: {summary.get('base_seed')}\n")
+    handle.write(f"epoch_seed_rule: {summary.get('epoch_seed_rule')}\n")
+    handle.write(
+        "train_metric_scope: train_* metrics are computed on the sampled train windows for each epoch; "
+        "validation/test metrics use complete splits.\n"
+    )
+    for section in ("full_counts", "sampled_counts_per_epoch"):
+        values = summary.get(section)
+        if isinstance(values, dict):
+            handle.write(f"{section}: {values}\n")
+
+
 def save_run_log(
     *,
     target: Path,
@@ -417,6 +437,7 @@ def save_run_log(
     config_snapshot_path: Path,
     model_parameters: dict[str, int],
     preprocessing_metadata: dict[str, Any] | None = None,
+    sampling_summary: dict[str, Any] | None = None,
     timing: dict[str, Any] | None = None,
     fold: str = "single",
 ) -> None:
@@ -441,6 +462,8 @@ def save_run_log(
         handle.write(f"resolved_max_dt: {config.model.max_dt}\n")
         handle.write("\nTraining class weights\n")
         handle.write(f"class_weights: {config.training.class_weights}\n")
+        handle.write("\nTraining sampling\n")
+        _write_sampling_summary(handle, sampling_summary or {"enabled": False})
         handle.write("\nModel parameters\n")
         for key, value in model_parameters.items():
             handle.write(f"{key}: {value}\n")

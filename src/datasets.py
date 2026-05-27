@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 try:
     from configuration import DataConfig
@@ -152,3 +153,116 @@ class LOBDataset(Dataset):
         y_label = torch.tensor(int(self.y_data[day_idx][end_idx - 1]), dtype=torch.long)
 
         return x_seq, t_seq, y_label
+
+
+def sequence_window_labels(dataset: LOBDataset) -> np.ndarray:
+    """Return one label per sliding sequence window."""
+    labels_by_day = [
+        np.asarray(labels, dtype=np.int64)[dataset.sequence_window - 1 :]
+        for labels in dataset.y_data
+        if len(labels) >= dataset.sequence_window
+    ]
+    return np.concatenate(labels_by_day) if labels_by_day else np.asarray([], dtype=np.int64)
+
+
+class EpochNeutralDownsamplingSampler(Sampler[int]):
+    """Keep all directional windows and resample neutral windows each epoch."""
+
+    def __init__(
+        self,
+        dataset: LOBDataset,
+        *,
+        label_mapping: dict[int, int],
+        neutral_to_directional_ratio: float,
+        base_seed: int,
+    ) -> None:
+        if neutral_to_directional_ratio <= 0.0:
+            raise ValueError("neutral_to_directional_ratio must be > 0 when sampling is enabled.")
+        missing_raw_labels = [label for label in (-1, 0, 1) if label not in label_mapping]
+        if missing_raw_labels:
+            raise ValueError(f"label_mapping must define -1, 0, and 1 for sampling; missing {missing_raw_labels}.")
+
+        self.dataset = dataset
+        self.neutral_to_directional_ratio = float(neutral_to_directional_ratio)
+        self.base_seed = int(base_seed)
+        self.epoch = 0
+        self.down_class = int(label_mapping[-1])
+        self.neutral_class = int(label_mapping[0])
+        self.up_class = int(label_mapping[1])
+
+        labels = sequence_window_labels(dataset)
+        self.labels = labels
+        self.down_indices = np.flatnonzero(labels == self.down_class).astype(np.int64)
+        self.neutral_indices = np.flatnonzero(labels == self.neutral_class).astype(np.int64)
+        self.up_indices = np.flatnonzero(labels == self.up_class).astype(np.int64)
+        self.directional_indices = np.concatenate([self.down_indices, self.up_indices])
+        if self.directional_indices.size == 0:
+            raise ValueError("Cannot downsample neutral windows because the train split has no up/down windows.")
+
+        self.sampled_neutral_count = min(
+            int(self.neutral_indices.size),
+            math.floor(self.neutral_to_directional_ratio * int(self.directional_indices.size)),
+        )
+        self.sampled_length = int(self.directional_indices.size + self.sampled_neutral_count)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set the epoch used to seed deterministic neutral resampling."""
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.base_seed + self.epoch)
+        if self.sampled_neutral_count < self.neutral_indices.size:
+            neutral_indices = rng.choice(
+                self.neutral_indices,
+                size=self.sampled_neutral_count,
+                replace=False,
+            )
+        else:
+            neutral_indices = self.neutral_indices.copy()
+
+        indices = np.concatenate([self.directional_indices, neutral_indices.astype(np.int64, copy=False)])
+        rng.shuffle(indices)
+        return iter(indices.astype(int).tolist())
+
+    def __len__(self) -> int:
+        return self.sampled_length
+
+    def sampled_class_counts(self, num_classes: int) -> list[int]:
+        """Return expected per-class counts after one epoch of sampling."""
+        counts = np.bincount(self.labels, minlength=num_classes)[:num_classes].astype(int)
+        counts[self.neutral_class] = self.sampled_neutral_count
+        return counts.tolist()
+
+    def summary(self, num_classes: int) -> dict[str, object]:
+        """Return stable metadata describing the sampler configuration."""
+        full_counts = np.bincount(self.labels, minlength=num_classes)[:num_classes].astype(int)
+        sampled_counts = np.asarray(self.sampled_class_counts(num_classes), dtype=int)
+        directional_count = int(self.directional_indices.size)
+        return {
+            "enabled": True,
+            "method": "epoch_neutral_downsampling",
+            "neutral_to_directional_ratio": self.neutral_to_directional_ratio,
+            "base_seed": self.base_seed,
+            "epoch_seed_rule": "base_seed + epoch",
+            "labels": {
+                "down": self.down_class,
+                "neutral": self.neutral_class,
+                "up": self.up_class,
+            },
+            "full_counts": {
+                "total": int(full_counts.sum()),
+                "down": int(full_counts[self.down_class]),
+                "neutral": int(full_counts[self.neutral_class]),
+                "up": int(full_counts[self.up_class]),
+                "directional": directional_count,
+                "by_class": full_counts.tolist(),
+            },
+            "sampled_counts_per_epoch": {
+                "total": int(sampled_counts.sum()),
+                "down": int(sampled_counts[self.down_class]),
+                "neutral": int(sampled_counts[self.neutral_class]),
+                "up": int(sampled_counts[self.up_class]),
+                "directional": directional_count,
+                "by_class": sampled_counts.tolist(),
+            },
+        }

@@ -12,6 +12,7 @@ from training import (
     ClassificationMetricAccumulator,
     EvaluationResult,
     LobTrainer,
+    class_weights_from_class_counts,
     class_weights_from_sequence_labels,
 )
 
@@ -89,17 +90,87 @@ def test_lob_trainer_fit_uses_only_train_and_validation_loaders(
     assert [result.test_loss for result in history] == [None, None, None]
 
 
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_sets_epoch_on_train_sampler(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummySampler:
+        def __init__(self) -> None:
+            self.epochs: list[int] = []
+
+        def set_epoch(self, epoch: int) -> None:
+            self.epochs.append(epoch)
+
+    class DummyLoader:
+        def __init__(self) -> None:
+            self.sampler = DummySampler()
+
+    config = load_config().training
+    config.epochs = 3
+    config.early_stopping_patience = 0
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_losses = iter([1.0, 0.9, 0.8])
+    train_loader = DummyLoader()
+
+    def fake_train_epoch(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=0.25, metrics=metrics)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=next(validation_losses), metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_run_epoch", fake_train_epoch)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    trainer.fit(nn.Linear(1, 3), train_loader=train_loader, val_loader=[])
+
+    assert train_loader.sampler.epochs == [0, 1, 2]
+
+
 def test_class_weights_from_sequence_labels_uses_balanced_clipped_weights() -> None:
     weights, counts = class_weights_from_sequence_labels(
         np.asarray([0, 0, 0, 0, 1, 1, 2]),
         num_classes=3,
-        gamma_mode=True,
+        beta=0.25,
+        min_weight=0.5,
+        max_weight=3.0,
     )
 
     raw = 7 / (3 * np.asarray([4, 2, 1], dtype=float))
-    expected = np.sqrt(raw)
+    expected = raw ** 0.25
     expected = expected / expected.mean()
     expected = np.clip(expected, 0.5, 3.0)
 
     assert counts == [4, 2, 1]
     assert weights == pytest.approx(expected.tolist())
+
+
+def test_class_weights_from_class_counts_uses_sampled_counts() -> None:
+    weights, counts = class_weights_from_class_counts(
+        [2, 4, 2],
+        beta=0.25,
+        min_weight=0.5,
+        max_weight=3.0,
+    )
+
+    raw = 8 / (3 * np.asarray([2, 4, 2], dtype=float))
+    expected = raw ** 0.25
+    expected = expected / expected.mean()
+    expected = np.clip(expected, 0.5, 3.0)
+
+    assert counts == [2, 4, 2]
+    assert weights == pytest.approx(expected.tolist())
+
+
+def test_class_weights_from_class_counts_uses_configurable_clip_bounds() -> None:
+    weights, _ = class_weights_from_class_counts(
+        [100, 1, 1],
+        beta=1.0,
+        min_weight=0.8,
+        max_weight=1.5,
+    )
+
+    assert min(weights) >= 0.8
+    assert max(weights) <= 1.5

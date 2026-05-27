@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from configuration import DataConfig
-from datasets import DailySequenceBuilder, LOBDataset
+from datasets import DailySequenceBuilder, EpochNeutralDownsamplingSampler, LOBDataset
 
 
 def make_data_config(
@@ -138,3 +138,74 @@ def test_build_rejects_unknown_labels() -> None:
 
     with pytest.raises(ValueError, match="label_mapping"):
         DailySequenceBuilder(config).build(df)
+
+
+def save_compact_arrays(artifact_dir: Path, labels: list[int]) -> tuple[Path, Path, Path]:
+    x_path = artifact_dir / "sample_features.npy"
+    t_path = artifact_dir / "sample_times.npy"
+    y_path = artifact_dir / "sample_labels.npy"
+    np.save(x_path, np.arange(len(labels), dtype=np.float32).reshape(-1, 1))
+    np.save(t_path, np.arange(len(labels), dtype=np.float32))
+    np.save(y_path, np.asarray(labels, dtype=np.int64))
+    return x_path, t_path, y_path
+
+
+def test_epoch_neutral_downsampling_sampler_keeps_directional_and_limits_neutral(
+    artifact_dir: Path,
+) -> None:
+    labels = [0, 1, 1, 1, 1, 1, 2, 1]
+    x_path, t_path, y_path = save_compact_arrays(artifact_dir, labels)
+    dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=1)
+    sampler = EpochNeutralDownsamplingSampler(
+        dataset,
+        label_mapping={-1: 0, 0: 1, 1: 2},
+        neutral_to_directional_ratio=2.0,
+        base_seed=7,
+    )
+
+    sampled_indices = list(sampler)
+
+    assert {0, 6}.issubset(set(sampled_indices))
+    assert sum(labels[index] == 1 for index in sampled_indices) == 4
+    assert len(sampled_indices) == 6
+
+
+def test_epoch_neutral_downsampling_sampler_changes_neutrals_by_epoch(
+    artifact_dir: Path,
+) -> None:
+    labels = [0, 2, *([1] * 20)]
+    x_path, t_path, y_path = save_compact_arrays(artifact_dir, labels)
+    dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=1)
+    sampler = EpochNeutralDownsamplingSampler(
+        dataset,
+        label_mapping={-1: 0, 0: 1, 1: 2},
+        neutral_to_directional_ratio=1.0,
+        base_seed=11,
+    )
+
+    sampler.set_epoch(0)
+    epoch_0_neutrals = {index for index in sampler if labels[index] == 1}
+    sampler.set_epoch(1)
+    epoch_1_neutrals = {index for index in sampler if labels[index] == 1}
+
+    assert epoch_0_neutrals != epoch_1_neutrals
+
+
+def test_epoch_neutral_downsampling_sampler_is_reproducible_for_same_epoch(
+    artifact_dir: Path,
+) -> None:
+    labels = [0, 2, *([1] * 10)]
+    x_path, t_path, y_path = save_compact_arrays(artifact_dir, labels)
+    dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=1)
+    kwargs = {
+        "label_mapping": {-1: 0, 0: 1, 1: 2},
+        "neutral_to_directional_ratio": 1.0,
+        "base_seed": 13,
+    }
+    sampler_a = EpochNeutralDownsamplingSampler(dataset, **kwargs)
+    sampler_b = EpochNeutralDownsamplingSampler(dataset, **kwargs)
+
+    sampler_a.set_epoch(3)
+    sampler_b.set_epoch(3)
+
+    assert list(sampler_a) == list(sampler_b)

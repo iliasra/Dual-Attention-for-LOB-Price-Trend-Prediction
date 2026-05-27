@@ -65,6 +65,67 @@ def test_config_loader_reports_negative_seed(artifact_dir: Path) -> None:
         ExperimentConfig.from_yaml(broken_config_path)
 
 
+def test_training_sampling_ratio_is_loaded() -> None:
+    config = load_config()
+
+    assert config.training.sampling.enabled
+    assert config.training.sampling.neutral_to_directional_ratio == 2.0
+
+
+def test_training_class_weight_parameters_are_loaded() -> None:
+    config = load_config()
+
+    assert config.training.class_weight_beta == 0.25
+    assert config.training.class_weight_min == 0.5
+    assert config.training.class_weight_max == 3.0
+    assert config.training.deterministic_torch is False
+
+
+def test_training_class_weight_parameters_are_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["class_weight_beta"] = -0.1
+
+    broken_config_path = artifact_dir / "bad_class_weight_beta.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="class_weight_beta"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+    payload["training"]["class_weight_beta"] = 0.25
+    payload["training"]["class_weight_min"] = 2.0
+    payload["training"]["class_weight_max"] = 1.0
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="class_weight_max"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+
+def test_training_sampling_rejects_non_positive_ratio(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["sampling"]["neutral_to_directional_ratio"] = 0
+
+    broken_config_path = artifact_dir / "bad_sampling_ratio.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="neutral_to_directional_ratio"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+
+def test_training_sampling_null_disables_sampler(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["sampling"]["neutral_to_directional_ratio"] = None
+
+    config_path = artifact_dir / "disabled_sampling.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert not loaded.training.sampling.enabled
+    assert loaded.training.sampling.neutral_to_directional_ratio is None
+
+
 def test_fast_kinematic_config_values_are_loaded() -> None:
     config = load_config()
 

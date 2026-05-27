@@ -154,9 +154,16 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "learning_rate": None,
         "weight_decay": None,
         "focal_gamma": None,
+        "class_weight_beta": None,
+        "class_weight_min": None,
+        "class_weight_max": None,
         "grad_clip_norm": None,
         "model_dir": None,
         "use_amp": None,
+        "deterministic_torch": None,
+        "sampling": {
+            "neutral_to_directional_ratio": None,
+        },
     },
 }
 
@@ -165,6 +172,7 @@ OPTIONAL_CONFIG_KEYS = {
     "preprocessing.labels.smoothing.adaptive_threshold",
     "preprocessing.price_static.tau_clip",
     "preprocessing.price_static.tau_max",
+    "training.sampling",
 }
 
 
@@ -1027,6 +1035,30 @@ class ModelConfig:
 
 
 @dataclass(slots=True)
+class TrainingSamplingConfig:
+    neutral_to_directional_ratio: float | None
+
+    def __post_init__(self) -> None:
+        """Check optional train-time sampling settings."""
+        if self.neutral_to_directional_ratio is not None and self.neutral_to_directional_ratio <= 0.0:
+            raise ValueError("training.sampling.neutral_to_directional_ratio must be > 0 or null.")
+
+    @property
+    def enabled(self) -> bool:
+        """Whether neutral downsampling should be applied to train batches."""
+        return self.neutral_to_directional_ratio is not None
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingSamplingConfig":
+        """Build training sampling settings from a YAML subsection."""
+        if payload is None:
+            return cls(neutral_to_directional_ratio=None)
+        return cls(
+            neutral_to_directional_ratio=_optional_float(payload.get("neutral_to_directional_ratio")),
+        )
+
+
+@dataclass(slots=True)
 class TrainingConfig:
     device: str
     epochs: int
@@ -1037,9 +1069,14 @@ class TrainingConfig:
     learning_rate: float
     weight_decay: float
     focal_gamma: float
+    class_weight_beta: float
+    class_weight_min: float
+    class_weight_max: float
     grad_clip_norm: float
     model_dir: str
     use_amp: bool
+    deterministic_torch: bool
+    sampling: TrainingSamplingConfig
     class_weights: list[float] | None = None
 
     def __post_init__(self) -> None:
@@ -1050,6 +1087,12 @@ class TrainingConfig:
             raise ValueError("training.early_stopping_patience must be >= 0.")
         if self.persistent_workers and self.num_workers == 0:
             raise ValueError("training.persistent_workers requires training.num_workers > 0.")
+        if self.class_weight_beta < 0.0:
+            raise ValueError("training.class_weight_beta must be >= 0.")
+        if self.class_weight_min <= 0.0:
+            raise ValueError("training.class_weight_min must be > 0.")
+        if self.class_weight_max < self.class_weight_min:
+            raise ValueError("training.class_weight_max must be >= training.class_weight_min.")
 
     @property
     def pin_memory(self) -> bool:
@@ -1094,9 +1137,14 @@ class TrainingConfig:
             learning_rate=float(payload["learning_rate"]),
             weight_decay=float(payload["weight_decay"]),
             focal_gamma=float(payload["focal_gamma"]),
+            class_weight_beta=float(payload["class_weight_beta"]),
+            class_weight_min=float(payload["class_weight_min"]),
+            class_weight_max=float(payload["class_weight_max"]),
             grad_clip_norm=float(payload["grad_clip_norm"]),
             model_dir=str(payload["model_dir"]),
             use_amp=bool(payload["use_amp"]),
+            deterministic_torch=bool(payload["deterministic_torch"]),
+            sampling=TrainingSamplingConfig.from_dict(payload.get("sampling")),
         )
 
 

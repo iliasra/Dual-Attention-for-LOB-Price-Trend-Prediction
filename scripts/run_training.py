@@ -17,7 +17,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from configuration import ExperimentConfig, load_config
-from datasets import LOBDataset
+from datasets import EpochNeutralDownsamplingSampler, LOBDataset, sequence_window_labels
 from model import build_model
 from run_logging import (
     class_distribution,
@@ -32,7 +32,7 @@ from run_logging import (
     save_run_log,
     save_run_summary,
 )
-from training import EpochResult, LobTrainer, class_weights_from_sequence_labels
+from training import EpochResult, LobTrainer, class_weights_from_class_counts, class_weights_from_sequence_labels
 from utils import seed_torch_worker, set_global_seed, torch_generator_from_seed
 
 def parse_args() -> argparse.Namespace:
@@ -125,27 +125,78 @@ def resolve_model_max_dt(config: ExperimentConfig, train_dataset: LOBDataset) ->
 
 def sequence_label_values(dataset: LOBDataset) -> np.ndarray:
     """Return the label attached to each sequence window in a compact LOBDataset."""
-    labels_by_day = [
-        np.asarray(labels, dtype=np.int64)[dataset.sequence_window - 1 :]
-        for labels in dataset.y_data
-        if len(labels) >= dataset.sequence_window
-    ]
-    return np.concatenate(labels_by_day) if labels_by_day else np.asarray([], dtype=np.int64)
+    return sequence_window_labels(dataset)
 
 
-def resolve_class_weights(config: ExperimentConfig, train_dataset: LOBDataset) -> dict[str, list[float] | list[int] | bool]:
-    """Fit runtime loss class weights from train sequence labels for one fold."""
-    labels = sequence_label_values(train_dataset)
-    weights, counts = class_weights_from_sequence_labels(
-        labels,
-        num_classes=config.model.num_classes,
-        gamma_mode=config.training.focal_gamma > 0.0,
+def class_distribution_from_counts(counts: list[int]) -> dict[str, Any]:
+    """Format per-class counts like dataset class distributions."""
+    counts_array = np.asarray(counts, dtype=np.int64)
+    total = int(counts_array.sum())
+    return {
+        "total": total,
+        "classes": {
+            str(class_id): {
+                "count": int(count),
+                "percentage": 0.0 if total == 0 else float(100.0 * count / total),
+            }
+            for class_id, count in enumerate(counts_array)
+        },
+    }
+
+
+def build_train_sampler(
+    config: ExperimentConfig,
+    train_dataset: LOBDataset,
+    *,
+    seed: int,
+) -> tuple[EpochNeutralDownsamplingSampler | None, dict[str, Any]]:
+    """Create the optional train-only neutral downsampling sampler."""
+    ratio = config.training.sampling.neutral_to_directional_ratio
+    if ratio is None:
+        return None, {"enabled": False, "neutral_to_directional_ratio": None}
+
+    sampler = EpochNeutralDownsamplingSampler(
+        train_dataset,
+        label_mapping=config.data.label_mapping,
+        neutral_to_directional_ratio=ratio,
+        base_seed=seed,
     )
+    return sampler, sampler.summary(config.model.num_classes)
+
+
+def resolve_class_weights(
+    config: ExperimentConfig,
+    train_dataset: LOBDataset,
+    *,
+    sampled_class_counts: list[int] | None = None,
+) -> dict[str, list[float] | list[int] | bool | str]:
+    """Fit runtime loss class weights from train sequence labels for one fold."""
+    if sampled_class_counts is None:
+        labels = sequence_label_values(train_dataset)
+        weights, counts = class_weights_from_sequence_labels(
+            labels,
+            num_classes=config.model.num_classes,
+            beta=config.training.class_weight_beta,
+            min_weight=config.training.class_weight_min,
+            max_weight=config.training.class_weight_max,
+        )
+        source = "full_train"
+    else:
+        weights, counts = class_weights_from_class_counts(
+            sampled_class_counts,
+            beta=config.training.class_weight_beta,
+            min_weight=config.training.class_weight_min,
+            max_weight=config.training.class_weight_max,
+        )
+        source = "sampled_train_per_epoch"
     config.training.class_weights = weights
     return {
         "weights": weights,
         "counts": counts,
-        "gamma_mode": config.training.focal_gamma > 0.0,
+        "beta": config.training.class_weight_beta,
+        "min": config.training.class_weight_min,
+        "max": config.training.class_weight_max,
+        "source": source,
     }
 
 
@@ -211,7 +262,7 @@ def train_fold(
 ) -> dict:
     fold_start = perf_counter()
     fold_seed = config.seed if seed is None else int(seed)
-    set_global_seed(fold_seed)
+    set_global_seed(fold_seed, deterministic_torch=config.training.deterministic_torch)
     print(f"Starting training fold '{fold_id}'.")
     print(f"Fold '{fold_id}' global seed: {fold_seed}.")
     print(f"Fold '{fold_id}' sequence directory: {fold_sequence_dir}")
@@ -254,21 +305,53 @@ def train_fold(
         f"q{max_dt_summary['quantile']:.4g}={max_dt_summary['max_dt']:.10g} "
         f"over {max_dt_summary['n_windows']} windows."
     )
-    class_weight_summary = resolve_class_weights(config, train_dataset)
+    train_sampler, sampling_summary = build_train_sampler(config, train_dataset, seed=fold_seed)
+    if sampling_summary.get("enabled"):
+        sampled_counts = sampling_summary["sampled_counts_per_epoch"]
+        full_counts = sampling_summary["full_counts"]
+        print(
+            f"Fold '{fold_id}' train sampling enabled: "
+            f"neutral_to_directional_ratio={sampling_summary['neutral_to_directional_ratio']}, "
+            f"full_counts={full_counts}, sampled_counts_per_epoch={sampled_counts}."
+        )
+    else:
+        print(f"Fold '{fold_id}' train sampling disabled.")
+
+    sampled_class_counts = (
+        None
+        if train_sampler is None
+        else train_sampler.sampled_class_counts(config.model.num_classes)
+    )
+    class_weight_summary = resolve_class_weights(
+        config,
+        train_dataset,
+        sampled_class_counts=sampled_class_counts,
+    )
     print(
-        f"Fold '{fold_id}' class weights selected from train sequence labels: "
-        f"counts={class_weight_summary['counts']}, weights={class_weight_summary['weights']}."
+        f"Fold '{fold_id}' class weights selected for loss: "
+        f"source={class_weight_summary['source']}, counts={class_weight_summary['counts']}, "
+        f"weights={class_weight_summary['weights']}."
     )
 
     loader_kwargs = config.training.data_loader_kwargs()
     loader_kwargs["worker_init_fn"] = seed_torch_worker
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.training.batch_size,
-        shuffle=True,
-        generator=torch_generator_from_seed(fold_seed),
-        **loader_kwargs,
-    )
+    if train_sampler is None:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.training.batch_size,
+            shuffle=True,
+            generator=torch_generator_from_seed(fold_seed),
+            **loader_kwargs,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.training.batch_size,
+            sampler=train_sampler,
+            shuffle=False,
+            generator=torch_generator_from_seed(fold_seed),
+            **loader_kwargs,
+        )
     validation_loader = DataLoader(
         validation_dataset,
         batch_size=config.training.batch_size,
@@ -290,11 +373,15 @@ def train_fold(
         "validation": class_distribution(validation_dataset, config.model.num_classes),
         "test": class_distribution(test_dataset, config.model.num_classes),
     }
+    if sampled_class_counts is not None:
+        class_distributions["train_sampled_per_epoch"] = class_distribution_from_counts(sampled_class_counts)
     dataset_sizes = {
         "train": len(train_dataset),
         "validation": len(validation_dataset),
         "test": len(test_dataset),
     }
+    if train_sampler is not None:
+        dataset_sizes["train_sampled_per_epoch"] = len(train_sampler)
     print(
         f"Fold '{fold_id}' dataset sizes: "
         f"train={dataset_sizes['train']}, "
@@ -307,6 +394,7 @@ def train_fold(
         fold_id=fold_id,
         model_parameters=model_parameters,
         preprocessing_metadata=preprocessing_metadata,
+        sampling_summary=sampling_summary,
     )
     trainer = LobTrainer(config.training)
     fit_start = perf_counter()
@@ -342,6 +430,7 @@ def train_fold(
         config_snapshot_path=run_config_path,
         model_parameters=model_parameters,
         preprocessing_metadata=preprocessing_metadata,
+        sampling_summary=sampling_summary,
         timing=timing,
         fold=fold_id,
     )
@@ -371,6 +460,7 @@ def train_fold(
         "best_model_path": str(config.training.best_model_path),
         "model_max_dt": max_dt_summary,
         "class_weights": class_weight_summary,
+        "sampling": sampling_summary,
         "dataset_sizes": dataset_sizes,
         "timing": timing,
         "logs": {
@@ -389,7 +479,7 @@ def main() -> None:
 
     training_start = perf_counter()
     config = load_config(args.config)
-    set_global_seed(config.seed)
+    set_global_seed(config.seed, deterministic_torch=config.training.deterministic_torch)
     print(f"Global seed set to {config.seed}.")
 
     selected_folds = config.folds

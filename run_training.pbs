@@ -3,6 +3,9 @@
 #PBS -l walltime=10:00:00
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=1:gpu_type=A100
 
+# UNCOMMENT FOLLOWING TO ENABLE DETERMINISTIC BEHAVIOR
+# export CUBLAS_WORKSPACE_CONFIG=:4096:8
+
 set -eo pipefail
 SCRIPT_START_EPOCH="$(date +%s)"
 
