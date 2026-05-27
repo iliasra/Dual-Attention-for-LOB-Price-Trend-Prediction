@@ -164,7 +164,7 @@ model:
 training:
   device: cuda # allowed: cpu, cuda
   epochs: 20
-  batch_size: 32
+  batch_size: 128 # tuned with the dry-run
   num_workers: 8
   early_stopping_patience: 5
   persistent_workers: true

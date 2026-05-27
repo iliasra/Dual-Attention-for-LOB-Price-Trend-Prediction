@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+import argparse
+import copy
+import os
 
 import numpy as np
 from torch.utils.data import DataLoader
@@ -32,6 +35,18 @@ from run_logging import (
 from training import EpochResult, LobTrainer, class_weights_from_sequence_labels
 from utils import seed_torch_worker, set_global_seed, torch_generator_from_seed
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train LOB model on one or more folds.")
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--fold-id", type=str, default=None)
+    parser.add_argument("--fold-index", type=int, default=None)
+    parser.add_argument(
+        "--run-stem",
+        type=str,
+        default=None,
+        help="Shared run directory name. Useful for PBS array jobs.",
+    )
+    return parser.parse_args()
 
 def sequence_paths(sequence_dir: Path, split: str) -> tuple[list[str], list[str], list[str]]:
     split_dir = sequence_dir / split
@@ -368,13 +383,34 @@ def train_fold(
 
 
 def main() -> None:
+    args = parse_args()
+    if args.fold_id is not None and args.fold_index is not None:
+        raise ValueError("Use either --fold-id or --fold-index, not both.")
+
     training_start = perf_counter()
-    config = load_config()
+    config = load_config(args.config)
     set_global_seed(config.seed)
     print(f"Global seed set to {config.seed}.")
+
+    selected_folds = config.folds
+    if args.fold_id is not None:
+        selected_folds = [fold for fold in config.folds if fold.id == args.fold_id]
+        if not selected_folds:
+            raise ValueError(f"Unknown fold id: {args.fold_id}")
+    elif args.fold_index is not None:
+        if args.fold_index < 1 or args.fold_index > len(config.folds):
+            raise ValueError(f"--fold-index must be in [1, {len(config.folds)}].")
+        selected_folds = [config.folds[args.fold_index - 1]]
+
     sequence_dir = resolve_config_path(config, config.data.sequence_data_dir)
     logs_dir = resolve_config_path(config, config.data.logs_dir)
-    run_stem = next_run_stem(logs_dir)
+
+    run_stem = (
+        args.run_stem
+        or os.environ.get("TRAINING_RUN_STEM")
+        or next_run_stem(logs_dir)
+    )
+
     run_log_dir = logs_dir / run_stem
     resolved_model_dir = resolve_config_path(config, config.training.model_dir)
     run_result_dir = resolved_model_dir / run_stem
@@ -387,23 +423,27 @@ def main() -> None:
         "result_dir": str(run_result_dir),
         "folds": {},
     }
-    total_folds = len(config.folds)
-    for fold_index, fold in enumerate(config.folds, start=1):
-        print(f"Starting fold {fold_index}/{total_folds}: {fold.id}")
+    total_folds = len(selected_folds)
+    for fold_index, fold in enumerate(selected_folds, start=1):
+        print(f"Starting selected fold {fold_index}/{total_folds}: {fold.id}")
+
+        fold_config = copy.deepcopy(config)
+
         paths = fold_artifact_paths(
             sequence_dir=sequence_dir,
             run_log_dir=run_log_dir,
             run_result_dir=run_result_dir,
             fold_id=fold.id,
         )
+
         fold_summary = train_fold(
-            config=config,
+            config=fold_config,
             fold_id=fold.id,
             fold_sequence_dir=paths["sequence_dir"],
             fold_log_dir=paths["log_dir"],
             fold_result_dir=paths["result_dir"],
             run_stem=run_stem,
-            seed=config.seed,
+            seed=fold_config.seed,
         )
         summary["folds"][fold.id] = fold_summary
 
@@ -412,7 +452,12 @@ def main() -> None:
         "training_pipeline_seconds": round(training_duration_seconds, 6),
         "training_pipeline_duration": format_duration(training_duration_seconds),
     }
-    summary_path = run_log_dir / "summary.yaml"
+
+    if len(selected_folds) == 1:
+        summary_path = run_log_dir / f"summary_{selected_folds[0].id}.yaml"
+    else:
+        summary_path = run_log_dir / "summary.yaml"
+
     save_run_summary(summary, summary_path)
     print(f"Run summary saved to: {summary_path}")
     print(f"Training pipeline finished ({format_duration(training_duration_seconds)}).")
