@@ -148,6 +148,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "device": None,
         "epochs": None,
         "batch_size": None,
+        "eval_batch_size": None,
         "num_workers": None,
         "early_stopping_patience": None,
         "monitor": None,
@@ -1067,6 +1068,7 @@ class TrainingConfig:
     device: str
     epochs: int
     batch_size: int
+    eval_batch_size: int
     num_workers: int
     early_stopping_patience: int
     monitor: str
@@ -1087,6 +1089,10 @@ class TrainingConfig:
 
     def __post_init__(self) -> None:
         """Check training worker settings."""
+        if self.batch_size <= 0:
+            raise ValueError("training.batch_size must be > 0.")
+        if self.eval_batch_size <= 0:
+            raise ValueError("training.eval_batch_size must be > 0.")
         if self.num_workers < 0:
             raise ValueError("training.num_workers must be >= 0.")
         if self.early_stopping_patience < 0:
@@ -1143,6 +1149,7 @@ class TrainingConfig:
             device=str(payload["device"]).lower(),
             epochs=int(payload["epochs"]),
             batch_size=int(payload["batch_size"]),
+            eval_batch_size=int(payload["eval_batch_size"]),
             num_workers=int(payload["num_workers"]),
             early_stopping_patience=int(payload["early_stopping_patience"]),
             monitor=str(payload["monitor"]),

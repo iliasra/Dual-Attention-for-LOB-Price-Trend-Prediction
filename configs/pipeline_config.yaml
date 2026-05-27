@@ -165,8 +165,9 @@ training:
   device: cuda # allowed: cpu, cuda
   epochs: 20
   batch_size: 128 # tuned with the dry-run
+  eval_batch_size: 256 # evaluation only; no backward pass
   num_workers: 8
-  early_stopping_patience: 5
+  early_stopping_patience: 3
   monitor: val_directional_macro_f1 # allowed: val_loss, val_macro_f1, val_directional_macro_f1
   monitor_mode: max # allowed: min, max
   persistent_workers: true

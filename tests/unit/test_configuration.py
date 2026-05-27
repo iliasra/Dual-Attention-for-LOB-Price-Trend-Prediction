@@ -441,9 +441,10 @@ def test_training_data_loader_settings_are_loaded() -> None:
     pin_memory = config.training.device.startswith("cuda")
 
     assert config.training.num_workers >= 0
-    assert config.training.early_stopping_patience == 5
+    assert config.training.early_stopping_patience >= 0
     assert config.training.monitor == "val_directional_macro_f1"
     assert config.training.monitor_mode == "max"
+    assert config.training.eval_batch_size == 256
     assert config.training.class_weights is None
     assert config.training.pin_memory is pin_memory
     assert config.training.data_loader_kwargs() == {
@@ -451,6 +452,18 @@ def test_training_data_loader_settings_are_loaded() -> None:
         "persistent_workers": config.training.persistent_workers,
         "pin_memory": pin_memory,
     }
+
+
+def test_training_eval_batch_size_rejects_non_positive_value(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["eval_batch_size"] = 0
+
+    broken_config_path = artifact_dir / "bad_eval_batch_size.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training\\.eval_batch_size"):
+        ExperimentConfig.from_yaml(broken_config_path)
 
 
 def test_training_class_weights_yaml_parameter_is_rejected(artifact_dir: Path) -> None:

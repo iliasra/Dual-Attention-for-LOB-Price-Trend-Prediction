@@ -380,13 +380,13 @@ def train_fold(
         )
     validation_loader = DataLoader(
         validation_dataset,
-        batch_size=config.training.batch_size,
+        batch_size=config.training.eval_batch_size,
         shuffle=False,
         **loader_kwargs,
     )
     test_loader = DataLoader(
         test_dataset,
-        batch_size=config.training.batch_size,
+        batch_size=config.training.eval_batch_size,
         shuffle=False,
         **loader_kwargs,
     )
