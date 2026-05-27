@@ -200,21 +200,46 @@ def resolve_class_weights(
     }
 
 
+def epoch_monitor_value(result: EpochResult, monitor: str) -> float:
+    """Return a saved epoch's validation monitor value."""
+    if monitor == "val_loss":
+        return result.val_loss
+    if result.val_metrics is None:
+        raise ValueError(f"Cannot compute {monitor} because validation metrics are unavailable.")
+    if monitor == "val_macro_f1":
+        return result.val_metrics.macro_f1
+    if monitor == "val_directional_macro_f1":
+        return result.val_metrics.directional_macro_f1
+    raise ValueError(f"Unsupported monitor: {monitor}")
+
+
+def best_epoch_from_history(config: ExperimentConfig, history: list[EpochResult]) -> tuple[int, EpochResult, float]:
+    """Select the best epoch using the configured validation monitor."""
+    if not history:
+        raise ValueError("Cannot select a best epoch because training produced no epoch history.")
+    reverse = config.training.monitor_mode == "max"
+    best_epoch, best_history = sorted(
+        enumerate(history, start=1),
+        key=lambda item: epoch_monitor_value(item[1], config.training.monitor),
+        reverse=reverse,
+    )[0]
+    return best_epoch, best_history, epoch_monitor_value(best_history, config.training.monitor)
+
+
 def evaluate_best_model_on_test_split(
     *,
+    config: ExperimentConfig,
     trainer: LobTrainer,
     model: Any,
     test_loader: DataLoader,
     history: list[EpochResult],
 ) -> float:
     """Evaluate the validation-selected model once on the held-out test split."""
-    if not history:
-        raise ValueError("Cannot evaluate the test split because training produced no epoch history.")
-
-    best_epoch, best_history = min(enumerate(history, start=1), key=lambda item: item[1].val_loss)
+    best_epoch, best_history, best_monitor_value = best_epoch_from_history(config, history)
     print(
         "Training uses train/validation splits only. "
-        f"Evaluating best validation epoch {best_epoch} on the held-out test split."
+        f"Evaluating best validation epoch {best_epoch} "
+        f"({config.training.monitor}={best_monitor_value:.6f}) on the held-out test split."
     )
     evaluation_start = perf_counter()
     test_result = trainer.evaluate(
@@ -230,6 +255,7 @@ def evaluate_best_model_on_test_split(
         f"test_loss={test_result.loss:.6f}, "
         f"test_acc={test_result.metrics.accuracy:.4f}, "
         f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
+        f"test_directional_macro_f1={test_result.metrics.directional_macro_f1:.4f}, "
         f"test_ece={test_result.metrics.expected_calibration_error:.4f} "
         f"({format_duration(evaluation_duration_seconds)})."
     )
@@ -348,7 +374,7 @@ def train_fold(
             train_dataset,
             batch_size=config.training.batch_size,
             sampler=train_sampler,
-            shuffle=False,
+            shuffle=False, # already shuffled during sampling
             generator=torch_generator_from_seed(fold_seed),
             **loader_kwargs,
         )
@@ -402,6 +428,7 @@ def train_fold(
     fit_duration_seconds = perf_counter() - fit_start
     test_evaluation_duration_seconds = evaluate_best_model_on_test_split(
         trainer=trainer,
+        config=config,
         model=model,
         test_loader=test_loader,
         history=history,
@@ -446,6 +473,7 @@ def train_fold(
         val_metrics = result.val_metrics
         metric_suffix = "" if val_metrics is None else (
             f", val_acc={val_metrics.accuracy:.4f}, val_macro_f1={val_metrics.macro_f1:.4f}, "
+            f"val_directional_macro_f1={val_metrics.directional_macro_f1:.4f}, "
             f"val_ece={val_metrics.expected_calibration_error:.4f}"
         )
         print(

@@ -95,6 +95,7 @@ class ClassificationMetrics:
     macro_precision: float
     macro_recall: float
     macro_f1: float
+    directional_macro_f1: float
     weighted_f1: float
     balanced_accuracy: float
     expected_calibration_error: float
@@ -128,6 +129,7 @@ class ClassificationMetricAccumulator:
             macro_precision=0.0,
             macro_recall=0.0,
             macro_f1=0.0,
+            directional_macro_f1=0.0,
             weighted_f1=0.0,
             balanced_accuracy=0.0,
             expected_calibration_error=0.0,
@@ -219,6 +221,12 @@ class ClassificationMetricAccumulator:
         macro_precision = precision.mean()
         macro_recall = recall.mean()
         macro_f1 = f1.mean()
+        directional_class_indices = [index for index in (0, 2) if index < len(f1)]
+        directional_macro_f1 = (
+            f1[directional_class_indices].mean()
+            if directional_class_indices
+            else torch.zeros((), dtype=torch.float64, device=self.device)
+        )
         weighted_f1 = (f1 * support).sum() / support.sum().clamp_min(1.0)
         accuracy = true_positives.sum() / total
         normalized_confusion = confusion / support.clamp_min(1.0).unsqueeze(1)
@@ -247,6 +255,7 @@ class ClassificationMetricAccumulator:
             macro_precision=float(macro_precision.item()),
             macro_recall=float(macro_recall.item()),
             macro_f1=float(macro_f1.item()),
+            directional_macro_f1=float(directional_macro_f1.item()),
             weighted_f1=float(weighted_f1.item()),
             balanced_accuracy=float(macro_recall.item()),
             expected_calibration_error=float(expected_calibration_error.item()),
@@ -297,6 +306,20 @@ class LobTrainer:
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
 
+    def _monitor_value(self, result: EvaluationResult) -> float:
+        """Return the configured validation monitor value."""
+        if self.config.monitor == "val_loss":
+            return result.loss
+        if self.config.monitor == "val_macro_f1":
+            return result.metrics.macro_f1
+        if self.config.monitor == "val_directional_macro_f1":
+            return result.metrics.directional_macro_f1
+        raise ValueError(f"Unsupported monitor: {self.config.monitor}")
+
+    def _is_improvement(self, value: float, best_value: float) -> bool:
+        """Compare a monitor value against the current best value."""
+        return value < best_value if self.config.monitor_mode == "min" else value > best_value
+
     def fit(
         self,
         model: nn.Module,
@@ -317,12 +340,15 @@ class LobTrainer:
             weight_decay=self.config.weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config.epochs)
-        best_val_loss = float("inf")
+        best_monitor_value = float("inf") if self.config.monitor_mode == "min" else -float("inf")
         best_epoch = 0
         epochs_without_improvement = 0
         history: list[EpochResult] = []
 
-        print(f"Starting training for {self.config.epochs} epoch(s) on {self.device}.")
+        print(
+            f"Starting training for {self.config.epochs} epoch(s) on {self.device}. "
+            f"Monitoring {self.config.monitor} ({self.config.monitor_mode})."
+        )
         for epoch in range(self.config.epochs):
             self._set_epoch(train_loader, epoch)
             print(f"Starting epoch {epoch + 1}/{self.config.epochs}.")
@@ -349,8 +375,9 @@ class LobTrainer:
                 )
             )
 
-            if val_result.loss < best_val_loss:
-                best_val_loss = val_result.loss
+            monitor_value = self._monitor_value(val_result)
+            if self._is_improvement(monitor_value, best_monitor_value):
+                best_monitor_value = monitor_value
                 best_epoch = epoch + 1
                 epochs_without_improvement = 0
                 best_path = Path(self.config.best_model_path)
@@ -358,7 +385,7 @@ class LobTrainer:
                 torch.save(model.state_dict(), best_path)
                 print(
                     f"Saved new best model to {best_path} from epoch {best_epoch} "
-                    f"with val_loss={best_val_loss:.6f}."
+                    f"with {self.config.monitor}={best_monitor_value:.6f}."
                 )
             else:
                 epochs_without_improvement += 1
@@ -369,6 +396,7 @@ class LobTrainer:
                 f"train_acc={train_result.metrics.accuracy:.4f}, "
                 f"val_acc={val_result.metrics.accuracy:.4f}, "
                 f"val_macro_f1={val_result.metrics.macro_f1:.4f}, "
+                f"val_directional_macro_f1={val_result.metrics.directional_macro_f1:.4f}, "
                 f"val_ece={val_result.metrics.expected_calibration_error:.4f}."
             )
             if (
@@ -377,8 +405,8 @@ class LobTrainer:
             ):
                 print(
                     "Early stopping triggered after "
-                    f"{epochs_without_improvement} epoch(s) without validation loss improvement. "
-                    f"Best val_loss={best_val_loss:.6f}."
+                    f"{epochs_without_improvement} epoch(s) without {self.config.monitor} improvement. "
+                    f"Best {self.config.monitor}={best_monitor_value:.6f}."
                 )
                 break
 
@@ -387,7 +415,7 @@ class LobTrainer:
             model.load_state_dict(torch.load(best_path, map_location=self.device, weights_only=True))
             print(
                 f"Best model selected from epoch {best_epoch}: "
-                f"val_loss={best_val_loss:.6f}."
+                f"{self.config.monitor}={best_monitor_value:.6f}."
             )
         print(f"Training finished ({format_duration(perf_counter() - fit_start)}).")
         return model, history

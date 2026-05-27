@@ -167,6 +167,8 @@ training:
   batch_size: 128 # tuned with the dry-run
   num_workers: 8
   early_stopping_patience: 5
+  monitor: val_directional_macro_f1 # allowed: val_loss, val_macro_f1, val_directional_macro_f1
+  monitor_mode: max # allowed: min, max
   persistent_workers: true
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4

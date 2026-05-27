@@ -150,6 +150,8 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "batch_size": None,
         "num_workers": None,
         "early_stopping_patience": None,
+        "monitor": None,
+        "monitor_mode": None,
         "persistent_workers": None,
         "learning_rate": None,
         "weight_decay": None,
@@ -184,6 +186,8 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.price_kinematic.reference": {"tick", "time"},
     "preprocessing.volume_kinematic.reference": {"tick", "time"},
     "model.rope_type": {"crope", "hybrid_crope", "hybrid-crope", "hybrid"},
+    "training.monitor": {"val_loss", "val_macro_f1", "val_directional_macro_f1"},
+    "training.monitor_mode": {"min", "max"},
 }
 
 
@@ -1065,6 +1069,8 @@ class TrainingConfig:
     batch_size: int
     num_workers: int
     early_stopping_patience: int
+    monitor: str
+    monitor_mode: str
     persistent_workers: bool
     learning_rate: float
     weight_decay: float
@@ -1085,6 +1091,12 @@ class TrainingConfig:
             raise ValueError("training.num_workers must be >= 0.")
         if self.early_stopping_patience < 0:
             raise ValueError("training.early_stopping_patience must be >= 0.")
+        self.monitor = self.monitor.lower()
+        self.monitor_mode = self.monitor_mode.lower()
+        if self.monitor not in {"val_loss", "val_macro_f1", "val_directional_macro_f1"}:
+            raise ValueError("training.monitor must be one of val_loss, val_macro_f1, val_directional_macro_f1.")
+        if self.monitor_mode not in {"min", "max"}:
+            raise ValueError("training.monitor_mode must be 'min' or 'max'.")
         if self.persistent_workers and self.num_workers == 0:
             raise ValueError("training.persistent_workers requires training.num_workers > 0.")
         if self.class_weight_beta < 0.0:
@@ -1133,6 +1145,8 @@ class TrainingConfig:
             batch_size=int(payload["batch_size"]),
             num_workers=int(payload["num_workers"]),
             early_stopping_patience=int(payload["early_stopping_patience"]),
+            monitor=str(payload["monitor"]),
+            monitor_mode=str(payload["monitor_mode"]),
             persistent_workers=bool(payload["persistent_workers"]),
             learning_rate=float(payload["learning_rate"]),
             weight_decay=float(payload["weight_decay"]),

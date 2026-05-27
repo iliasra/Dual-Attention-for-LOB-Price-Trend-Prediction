@@ -442,6 +442,8 @@ def test_training_data_loader_settings_are_loaded() -> None:
 
     assert config.training.num_workers >= 0
     assert config.training.early_stopping_patience == 5
+    assert config.training.monitor == "val_directional_macro_f1"
+    assert config.training.monitor_mode == "max"
     assert config.training.class_weights is None
     assert config.training.pin_memory is pin_memory
     assert config.training.data_loader_kwargs() == {
@@ -460,6 +462,25 @@ def test_training_class_weights_yaml_parameter_is_rejected(artifact_dir: Path) -
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="training\\.class_weights"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_training_monitor_values_are_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["monitor"] = "not_a_metric"
+
+    config_path = artifact_dir / "bad_monitor.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training\\.monitor"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["monitor"] = "val_loss"
+    payload["training"]["monitor_mode"] = "middle"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training\\.monitor_mode"):
         ExperimentConfig.from_yaml(config_path)
 
 

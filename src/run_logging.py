@@ -22,6 +22,7 @@ METRIC_NAMES = (
     "macro_precision",
     "macro_recall",
     "macro_f1",
+    "directional_macro_f1",
     "weighted_f1",
     "balanced_accuracy",
     "expected_calibration_error",
@@ -228,6 +229,10 @@ def save_run_config_snapshot(
                 "resolved_max_dt": config.model.max_dt,
             },
             "class_weights": config.training.class_weights,
+            "monitor": {
+                "name": config.training.monitor,
+                "mode": config.training.monitor_mode,
+            },
             "training_sampling": sampling_summary or {"enabled": False},
             "model_parameters": model_parameters or {},
             "fast_smoothing_lambdas": fast_smoothing_lambda_summary(config, preprocessing_metadata),
@@ -383,12 +388,34 @@ def _write_lambda_summary(handle: Any, summary: dict[str, Any]) -> None:
         handle.write("\n")
 
 
-def _write_best_epoch_summary(handle: Any, history: list[Any]) -> None:
+def _monitor_value(result: Any, monitor: str) -> float:
+    if monitor == "val_loss":
+        return float(result.val_loss)
+    metrics = getattr(result, "val_metrics", None)
+    if metrics is None:
+        raise ValueError(f"Cannot compute {monitor} because validation metrics are unavailable.")
+    if monitor == "val_macro_f1":
+        return float(metrics.macro_f1)
+    if monitor == "val_directional_macro_f1":
+        return float(metrics.directional_macro_f1)
+    raise ValueError(f"Unsupported monitor: {monitor}")
+
+
+def _write_best_epoch_summary(handle: Any, history: list[Any], config: ExperimentConfig) -> None:
     handle.write("\nBest epoch\n")
     if not history:
         handle.write("status: unavailable\n")
         return
-    best_index, best_result = min(enumerate(history, start=1), key=lambda item: item[1].val_loss)
+    reverse = config.training.monitor_mode == "max"
+    best_index, best_result = sorted(
+        enumerate(history, start=1),
+        key=lambda item: _monitor_value(item[1], config.training.monitor),
+        reverse=reverse,
+    )[0]
+    best_monitor_value = _monitor_value(best_result, config.training.monitor)
+    handle.write(f"monitor: {config.training.monitor}\n")
+    handle.write(f"monitor_mode: {config.training.monitor_mode}\n")
+    handle.write(f"monitor_value: {best_monitor_value:.10g}\n")
     handle.write(f"epoch: {best_index}\n")
     handle.write(f"train_loss: {best_result.train_loss:.10g}\n")
     handle.write(f"val_loss: {best_result.val_loss:.10g}\n")
@@ -403,6 +430,7 @@ def _write_best_epoch_summary(handle: Any, history: list[Any]) -> None:
             continue
         handle.write(f"{split}_accuracy: {metrics.accuracy:.10g}\n")
         handle.write(f"{split}_macro_f1: {metrics.macro_f1:.10g}\n")
+        handle.write(f"{split}_directional_macro_f1: {metrics.directional_macro_f1:.10g}\n")
         handle.write(f"{split}_ece: {metrics.expected_calibration_error:.10g}\n")
 
 
@@ -462,6 +490,9 @@ def save_run_log(
         handle.write(f"resolved_max_dt: {config.model.max_dt}\n")
         handle.write("\nTraining class weights\n")
         handle.write(f"class_weights: {config.training.class_weights}\n")
+        handle.write("\nTraining monitor\n")
+        handle.write(f"monitor: {config.training.monitor}\n")
+        handle.write(f"monitor_mode: {config.training.monitor_mode}\n")
         handle.write("\nTraining sampling\n")
         _write_sampling_summary(handle, sampling_summary or {"enabled": False})
         handle.write("\nModel parameters\n")
@@ -478,7 +509,7 @@ def save_run_log(
         for split, distribution in class_distributions.items():
             _write_class_distribution(handle, split, distribution)
 
-        _write_best_epoch_summary(handle, history)
+        _write_best_epoch_summary(handle, history, config)
 
         handle.write("\nEpoch history\n")
         handle.write(",".join(_epoch_fieldnames(config)) + "\n" if history else "")
