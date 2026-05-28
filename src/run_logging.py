@@ -356,6 +356,53 @@ def save_confusion_matrices(
         yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
 
 
+def _class_label_names(config: ExperimentConfig) -> dict[str, str]:
+    raw_label_names = {-1: "down", 0: "neutral", 1: "up"}
+    labels = {str(class_id): f"class_{class_id}" for class_id in range(config.model.num_classes)}
+    for raw_label, mapped_label in config.data.label_mapping.items():
+        mapped_id = int(mapped_label)
+        if 0 <= mapped_id < config.model.num_classes:
+            labels[str(mapped_id)] = raw_label_names.get(int(raw_label), f"raw_{raw_label}")
+    return labels
+
+
+def _expert_usage_payload(usage: Any) -> dict[str, Any] | None:
+    if usage is None:
+        return None
+    if not isinstance(usage, dict):
+        return None
+    return usage
+
+
+def save_expert_usage(
+    history: list[Any],
+    target: Path,
+    *,
+    config: ExperimentConfig,
+    fold: str = "single",
+) -> None:
+    payload = {
+        "description": (
+            "MoE routing usage. selected_* counts include every top-k assignment; "
+            "primary_* counts include only the first/top expert per token. "
+            "by_true_class applies each sequence label to all tokens in that sequence."
+        ),
+        "class_labels": _class_label_names(config),
+        "folds": {
+            fold: {
+                f"epoch_{epoch_index}": {
+                    "train": _expert_usage_payload(getattr(result, "train_expert_usage", None)),
+                    "validation": _expert_usage_payload(getattr(result, "val_expert_usage", None)),
+                    "test": _expert_usage_payload(getattr(result, "test_expert_usage", None)),
+                }
+                for epoch_index, result in enumerate(history, start=1)
+            }
+        },
+    }
+    with target.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
+
+
 def _write_class_distribution(handle: Any, split: str, distribution: dict[str, Any]) -> None:
     handle.write(f"{split}_total: {distribution['total']}\n")
     for class_id, values in distribution["classes"].items():
@@ -462,6 +509,7 @@ def save_run_log(
     history: list[Any],
     losses_path: Path,
     confusion_matrices_path: Path,
+    expert_usage_path: Path,
     config_snapshot_path: Path,
     model_parameters: dict[str, int],
     preprocessing_metadata: dict[str, Any] | None = None,
@@ -479,6 +527,7 @@ def save_run_log(
         handle.write(f"Config snapshot: {config_snapshot_path}\n")
         handle.write(f"Loss and metrics CSV: {losses_path}\n")
         handle.write(f"Confusion matrices: {confusion_matrices_path}\n")
+        handle.write(f"Expert usage: {expert_usage_path}\n")
         handle.write(f"Model directory: {config.training.model_dir}\n")
         handle.write(f"Best model path: {config.training.best_model_path}\n")
         if timing:

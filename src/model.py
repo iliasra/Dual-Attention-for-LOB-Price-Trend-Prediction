@@ -181,6 +181,7 @@ class MoE(nn.Module):
         self.router_noise = config.moe_router_noise  # routing noise for MoE training
         self.load_balancing_weight = config.moe_load_balancing_weight  # load-balancing coefficient for MoE training
         self.load_balancing_loss: torch.Tensor | None = None  # expose MoE auxiliary loss to the trainer
+        self.last_routing: dict[str, torch.Tensor | int] | None = None
         self.gate = nn.Linear(config.d_model, config.num_experts)
         self.experts = nn.ModuleList(
             [
@@ -212,6 +213,13 @@ class MoE(nn.Module):
         topk_weights, topk_indices = torch.topk(weights, self.top_k, dim=-1)
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(topk_weights.dtype).eps)  # renormalize selected MoE expert weights
         self.load_balancing_loss = self._load_balancing_loss(weights, topk_indices) if self.training else weights.new_zeros(())  # load-balancing for MoE training
+        self.last_routing = {
+            "topk_indices": topk_indices.detach(),
+            "topk_weights": topk_weights.detach(),
+            "router_probabilities": weights.detach(),
+            "num_experts": self.num_experts,
+            "top_k": self.top_k,
+        }
 
         x_flat = x.reshape(-1, hidden_size)
         topk_indices_flat = topk_indices.reshape(-1, self.top_k)
@@ -306,10 +314,12 @@ class LobTrendTransformer(nn.Module):
         self.encoder = DualAttentionEncoder(resolved_config)
         self.classifier = TrendClassifier(resolved_config)
         self.moe_load_balancing_loss: torch.Tensor | None = None  # expose MoE auxiliary loss to training
+        self.moe_routing: dict[str, torch.Tensor | int] | None = None
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         encoded = self.encoder(x, t)
         self.moe_load_balancing_loss = self.encoder.moe.load_balancing_loss  # load-balancing for MoE training
+        self.moe_routing = self.encoder.moe.last_routing
         return self.classifier(encoded)
 
 

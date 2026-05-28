@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import torch
@@ -110,6 +110,207 @@ class ClassificationMetrics:
 class EvaluationResult:
     loss: float
     metrics: ClassificationMetrics
+    expert_usage: dict[str, Any] | None = None
+
+
+class ExpertUsageAccumulator:
+    def __init__(self, num_classes: int | None = None) -> None:
+        self.num_classes = num_classes
+        self.num_experts: int | None = None
+        self.top_k: int | None = None
+        self.total_sequences = 0
+        self.total_tokens = 0
+        self.total_assignments = 0
+        self.selected_counts: torch.Tensor | None = None
+        self.primary_counts: torch.Tensor | None = None
+        self.router_probability_sums: torch.Tensor | None = None
+        self.selected_weight_sums: torch.Tensor | None = None
+        self.class_sequence_counts: torch.Tensor | None = None
+        self.class_token_counts: torch.Tensor | None = None
+        self.class_assignment_counts: torch.Tensor | None = None
+        self.class_selected_counts: torch.Tensor | None = None
+        self.class_primary_counts: torch.Tensor | None = None
+        self.class_router_probability_sums: torch.Tensor | None = None
+        self.class_selected_weight_sums: torch.Tensor | None = None
+
+    def _ensure_initialized(self, num_experts: int, top_k: int, num_classes: int) -> None:
+        if self.num_experts is None:
+            self.num_experts = int(num_experts)
+            self.top_k = int(top_k)
+            self.num_classes = int(num_classes)
+            self.selected_counts = torch.zeros(self.num_experts, dtype=torch.long)
+            self.primary_counts = torch.zeros(self.num_experts, dtype=torch.long)
+            self.router_probability_sums = torch.zeros(self.num_experts, dtype=torch.float64)
+            self.selected_weight_sums = torch.zeros(self.num_experts, dtype=torch.float64)
+            self.class_sequence_counts = torch.zeros(self.num_classes, dtype=torch.long)
+            self.class_token_counts = torch.zeros(self.num_classes, dtype=torch.long)
+            self.class_assignment_counts = torch.zeros(self.num_classes, dtype=torch.long)
+            self.class_selected_counts = torch.zeros((self.num_classes, self.num_experts), dtype=torch.long)
+            self.class_primary_counts = torch.zeros((self.num_classes, self.num_experts), dtype=torch.long)
+            self.class_router_probability_sums = torch.zeros(
+                (self.num_classes, self.num_experts),
+                dtype=torch.float64,
+            )
+            self.class_selected_weight_sums = torch.zeros(
+                (self.num_classes, self.num_experts),
+                dtype=torch.float64,
+            )
+            return
+
+        if self.num_experts != int(num_experts) or self.top_k != int(top_k):
+            raise ValueError("MoE routing shape changed during accumulation.")
+
+    @staticmethod
+    def _counts(values: torch.Tensor, num_experts: int) -> torch.Tensor:
+        return torch.bincount(values.reshape(-1), minlength=num_experts)[:num_experts]
+
+    def update(
+        self,
+        routing: dict[str, Any] | None,
+        targets: torch.Tensor,
+        *,
+        num_classes: int,
+    ) -> None:
+        if not routing:
+            return
+        topk_indices = routing.get("topk_indices")
+        topk_weights = routing.get("topk_weights")
+        router_probabilities = routing.get("router_probabilities")
+        if not isinstance(topk_indices, torch.Tensor):
+            return
+        if not isinstance(topk_weights, torch.Tensor) or not isinstance(router_probabilities, torch.Tensor):
+            return
+
+        indices = topk_indices.detach().to("cpu", dtype=torch.long)
+        selected_weights = topk_weights.detach().to("cpu", dtype=torch.float64)
+        probabilities = router_probabilities.detach().to("cpu", dtype=torch.float64)
+        batch_size, sequence_length, top_k = indices.shape
+        num_experts = int(routing.get("num_experts", probabilities.shape[-1]))
+        self._ensure_initialized(num_experts, int(routing.get("top_k", top_k)), num_classes)
+
+        if (
+            self.selected_counts is None
+            or self.primary_counts is None
+            or self.router_probability_sums is None
+            or self.selected_weight_sums is None
+            or self.class_sequence_counts is None
+            or self.class_token_counts is None
+            or self.class_assignment_counts is None
+            or self.class_selected_counts is None
+            or self.class_primary_counts is None
+            or self.class_router_probability_sums is None
+            or self.class_selected_weight_sums is None
+        ):
+            raise RuntimeError("Expert usage accumulator was not initialized.")
+
+        flat_indices = indices.reshape(-1)
+        flat_weights = selected_weights.reshape(-1)
+        self.total_sequences += int(batch_size)
+        self.total_tokens += int(batch_size * sequence_length)
+        self.total_assignments += int(batch_size * sequence_length * top_k)
+        self.selected_counts += self._counts(flat_indices, num_experts)
+        self.primary_counts += self._counts(indices[:, :, 0], num_experts)
+        self.router_probability_sums += probabilities.sum(dim=(0, 1))
+        self.selected_weight_sums.scatter_add_(0, flat_indices, flat_weights)
+
+        targets_cpu = targets.detach().to("cpu", dtype=torch.long)
+        for class_id in range(num_classes):
+            class_mask = targets_cpu == class_id
+            class_sequences = int(class_mask.sum().item())
+            if class_sequences == 0:
+                continue
+            class_indices = indices[class_mask]
+            class_weights = selected_weights[class_mask]
+            class_probabilities = probabilities[class_mask]
+            self.class_sequence_counts[class_id] += class_sequences
+            self.class_token_counts[class_id] += class_sequences * sequence_length
+            self.class_assignment_counts[class_id] += class_sequences * sequence_length * top_k
+            self.class_selected_counts[class_id] += self._counts(class_indices, num_experts)
+            self.class_primary_counts[class_id] += self._counts(class_indices[:, :, 0], num_experts)
+            self.class_router_probability_sums[class_id] += class_probabilities.sum(dim=(0, 1))
+            self.class_selected_weight_sums[class_id].scatter_add_(
+                0,
+                class_indices.reshape(-1),
+                class_weights.reshape(-1),
+            )
+
+    @staticmethod
+    def _percentages(counts: torch.Tensor, total: int) -> list[float]:
+        if total <= 0:
+            return [0.0 for _ in counts.tolist()]
+        return [float(100.0 * value / total) for value in counts.tolist()]
+
+    @staticmethod
+    def _means(sums: torch.Tensor, counts: torch.Tensor) -> list[float]:
+        denominators = counts.to(torch.float64).clamp_min(1.0)
+        return [float(value) for value in (sums / denominators).tolist()]
+
+    @staticmethod
+    def _averages(sums: torch.Tensor, total: int) -> list[float]:
+        if total <= 0:
+            return [0.0 for _ in sums.tolist()]
+        return [float(value / total) for value in sums.tolist()]
+
+    def compute(self) -> dict[str, Any] | None:
+        if self.num_experts is None or self.top_k is None:
+            return None
+        if (
+            self.selected_counts is None
+            or self.primary_counts is None
+            or self.router_probability_sums is None
+            or self.selected_weight_sums is None
+            or self.class_sequence_counts is None
+            or self.class_token_counts is None
+            or self.class_assignment_counts is None
+            or self.class_selected_counts is None
+            or self.class_primary_counts is None
+            or self.class_router_probability_sums is None
+            or self.class_selected_weight_sums is None
+        ):
+            raise RuntimeError("Expert usage accumulator was not initialized.")
+
+        by_class: dict[str, Any] = {}
+        for class_id in range(int(self.num_classes or 0)):
+            token_count = int(self.class_token_counts[class_id].item())
+            assignment_count = int(self.class_assignment_counts[class_id].item())
+            selected_counts = self.class_selected_counts[class_id]
+            primary_counts = self.class_primary_counts[class_id]
+            by_class[str(class_id)] = {
+                "sequences": int(self.class_sequence_counts[class_id].item()),
+                "tokens": token_count,
+                "assignments": assignment_count,
+                "selected_counts": [int(value) for value in selected_counts.tolist()],
+                "selected_percentages": self._percentages(selected_counts, assignment_count),
+                "primary_counts": [int(value) for value in primary_counts.tolist()],
+                "primary_percentages": self._percentages(primary_counts, token_count),
+                "mean_router_probability": self._averages(
+                    self.class_router_probability_sums[class_id],
+                    token_count,
+                ),
+                "selected_weight_sums": [
+                    float(value) for value in self.class_selected_weight_sums[class_id].tolist()
+                ],
+                "mean_selected_weight": self._means(
+                    self.class_selected_weight_sums[class_id],
+                    selected_counts,
+                ),
+            }
+
+        return {
+            "num_experts": self.num_experts,
+            "top_k": self.top_k,
+            "sequences": self.total_sequences,
+            "tokens": self.total_tokens,
+            "assignments": self.total_assignments,
+            "selected_counts": [int(value) for value in self.selected_counts.tolist()],
+            "selected_percentages": self._percentages(self.selected_counts, self.total_assignments),
+            "primary_counts": [int(value) for value in self.primary_counts.tolist()],
+            "primary_percentages": self._percentages(self.primary_counts, self.total_tokens),
+            "mean_router_probability": self._averages(self.router_probability_sums, self.total_tokens),
+            "selected_weight_sums": [float(value) for value in self.selected_weight_sums.tolist()],
+            "mean_selected_weight": self._means(self.selected_weight_sums, self.selected_counts),
+            "by_true_class": by_class,
+        }
 
 
 class ClassificationMetricAccumulator:
@@ -281,6 +482,9 @@ class EpochResult:
     train_metrics: ClassificationMetrics | None = None
     val_metrics: ClassificationMetrics | None = None
     test_metrics: ClassificationMetrics | None = None
+    train_expert_usage: dict[str, Any] | None = None
+    val_expert_usage: dict[str, Any] | None = None
+    test_expert_usage: dict[str, Any] | None = None
 
 
 class LobTrainer:
@@ -372,6 +576,8 @@ class LobTrainer:
                     val_loss=val_result.loss,
                     train_metrics=train_result.metrics,
                     val_metrics=val_result.metrics,
+                    train_expert_usage=train_result.expert_usage,
+                    val_expert_usage=val_result.expert_usage,
                 )
             )
 
@@ -470,6 +676,7 @@ class LobTrainer:
         total_loss = 0.0
         batch_count = 0
         metrics = ClassificationMetricAccumulator(device=self.device)
+        expert_usage = ExpertUsageAccumulator()
 
         with torch.no_grad():
             for x_batch, t_batch, y_batch in tqdm(data_loader, desc=description):
@@ -480,9 +687,18 @@ class LobTrainer:
                 logits = model(x_batch, t_batch)
                 total_loss += float(criterion(logits, y_batch).item())
                 metrics.update(logits, y_batch)
+                expert_usage.update(
+                    getattr(model, "moe_routing", None),
+                    y_batch,
+                    num_classes=int(logits.shape[-1]),
+                )
                 batch_count += 1
 
-        return EvaluationResult(loss=total_loss / max(batch_count, 1), metrics=metrics.compute())
+        return EvaluationResult(
+            loss=total_loss / max(batch_count, 1),
+            metrics=metrics.compute(),
+            expert_usage=expert_usage.compute(),
+        )
 
 
 def train_lob_transformer(

@@ -236,3 +236,60 @@ def test_class_weights_from_class_counts_uses_configurable_clip_bounds() -> None
 
     assert min(weights) >= 0.8
     assert max(weights) <= 1.5
+
+
+def test_lob_trainer_evaluate_collects_moe_expert_usage() -> None:
+    class RoutingModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = nn.Parameter(torch.zeros(()))
+            self.moe_routing = None
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            del t
+            batch_size, sequence_length, _ = x.shape
+            self.moe_routing = {
+                "topk_indices": torch.tensor(
+                    [
+                        [[0, 1], [1, 2]],
+                        [[2, 1], [0, 2]],
+                    ],
+                    device=x.device,
+                ),
+                "topk_weights": torch.full((batch_size, sequence_length, 2), 0.5, device=x.device),
+                "router_probabilities": torch.full((batch_size, sequence_length, 3), 1.0 / 3.0, device=x.device),
+                "num_experts": 3,
+                "top_k": 2,
+            }
+            return torch.tensor(
+                [
+                    [4.0, 0.0, 0.0],
+                    [0.0, 0.0, 4.0],
+                ],
+                device=x.device,
+            )
+
+    config = load_config().training
+    config.device = "cpu"
+    config.class_weights = None
+    trainer = LobTrainer(config)
+    data_loader = [
+        (
+            torch.zeros((2, 2, 1)),
+            torch.zeros((2, 2)),
+            torch.tensor([0, 2]),
+        )
+    ]
+
+    result = trainer.evaluate(RoutingModel(), data_loader, description="Expert usage test")
+    usage = result.expert_usage
+
+    assert usage is not None
+    assert usage["num_experts"] == 3
+    assert usage["top_k"] == 2
+    assert usage["tokens"] == 4
+    assert usage["assignments"] == 8
+    assert usage["selected_counts"] == [2, 3, 3]
+    assert usage["primary_counts"] == [2, 1, 1]
+    assert usage["by_true_class"]["0"]["selected_counts"] == [1, 2, 1]
+    assert usage["by_true_class"]["2"]["selected_counts"] == [1, 1, 2]

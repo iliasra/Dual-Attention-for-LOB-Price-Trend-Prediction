@@ -28,6 +28,7 @@ from run_logging import (
     resolve_config_path,
     save_confusion_matrices,
     save_epoch_history,
+    save_expert_usage,
     save_run_config_snapshot,
     save_run_log,
     save_run_summary,
@@ -250,6 +251,7 @@ def evaluate_best_model_on_test_split(
     evaluation_duration_seconds = perf_counter() - evaluation_start
     best_history.test_loss = test_result.loss
     best_history.test_metrics = test_result.metrics
+    best_history.test_expert_usage = test_result.expert_usage
     print(
         f"Best epoch {best_epoch} test evaluation: "
         f"test_loss={test_result.loss:.6f}, "
@@ -301,6 +303,7 @@ def train_fold(
     run_config_path = fold_log_dir / "config.yaml"
     run_losses_path = fold_log_dir / "metrics.csv"
     run_confusion_matrices_path = fold_log_dir / "confusion_matrices.yaml"
+    run_expert_usage_path = fold_log_dir / "expert_usage.yaml"
     config.training.model_dir = str(fold_result_dir)
     preprocessing_metadata = load_preprocessing_metadata(fold_sequence_dir)
 
@@ -445,6 +448,7 @@ def train_fold(
 
     save_epoch_history(history, run_losses_path, config=config, fold=fold_id)
     save_confusion_matrices(history, run_confusion_matrices_path, fold=fold_id)
+    save_expert_usage(history, run_expert_usage_path, config=config, fold=fold_id)
     save_run_log(
         target=run_log_path,
         config=config,
@@ -454,6 +458,7 @@ def train_fold(
         history=history,
         losses_path=run_losses_path,
         confusion_matrices_path=run_confusion_matrices_path,
+        expert_usage_path=run_expert_usage_path,
         config_snapshot_path=run_config_path,
         model_parameters=model_parameters,
         preprocessing_metadata=preprocessing_metadata,
@@ -496,6 +501,7 @@ def train_fold(
             "config": str(run_config_path),
             "metrics": str(run_losses_path),
             "confusion_matrices": str(run_confusion_matrices_path),
+            "expert_usage": str(run_expert_usage_path),
         },
     }
 
