@@ -113,7 +113,10 @@ def main() -> None:
     labeler = TargetLabelPipeline(config.preprocessing.labels)
     message_processor = MessageFeatureProcessor(config.data.time_column, config.preprocessing.message)
     snapshot_processor = SnapshotBatchProcessor(config.data, config.preprocessing)
-    normalizer = DerivativeNormalizer(smoke_dir / "derivatives_stats.yaml")
+    normalizer = DerivativeNormalizer(
+        smoke_dir / "derivatives_stats.yaml",
+        method=config.preprocessing.normalization.derivative_scaling_method,
+    )
 
     joined = joiner.transform(message_df, orderbook_df)
     labeled = labeler.transform(joined)

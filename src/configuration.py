@@ -78,6 +78,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "normalization": {
             "derivatives_stats_dir": None,
             "scope": None,
+            "derivative_scaling_method": None,
         },
         "kinematic_tokenization": {
             "method": None,
@@ -183,6 +184,7 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.labels.strategy": {"smoothing", "triple_barrier"},
     "preprocessing.labels.smoothing.method": {"A", "B", "C"},
     "preprocessing.normalization.scope": {"train_only"},
+    "preprocessing.normalization.derivative_scaling_method": {"zscore", "robust_mad"},
     "preprocessing.kinematic_tokenization.method": {"basis", "fast"},
     "preprocessing.price_kinematic.reference": {"tick", "time"},
     "preprocessing.volume_kinematic.reference": {"tick", "time"},
@@ -747,6 +749,7 @@ class TemporalFeaturesConfig:
 class NormalizationConfig:
     derivatives_stats_dir: str
     scope: str
+    derivative_scaling_method: str = "zscore"
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "NormalizationConfig":
@@ -754,6 +757,7 @@ class NormalizationConfig:
         return cls(
             derivatives_stats_dir=str(payload["derivatives_stats_dir"]),
             scope=str(payload["scope"]),
+            derivative_scaling_method=str(payload["derivative_scaling_method"]),
         )
 
 

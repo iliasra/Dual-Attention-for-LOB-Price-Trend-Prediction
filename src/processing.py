@@ -990,7 +990,10 @@ class LobProcessingPipeline:
         processed_train_days = []
         for day in train_days:
             processed_train_days.append(self._require_frame(day, "processed", "normalizer fitting"))
-        normalizer = DerivativeNormalizer(target_stats_path)
+        normalizer = DerivativeNormalizer(
+            target_stats_path,
+            method=self.config.preprocessing.normalization.derivative_scaling_method,
+        )
         normalizer.fit(processed_train_days)
         print("Derivative normalizer fitted.")
         return normalizer
@@ -1073,7 +1076,10 @@ class LobProcessingPipeline:
             stats_path.unlink()
             print(f"Removed previous derivative statistics: {stats_path}")
 
-        normalizer = DerivativeNormalizer(stats_path)
+        normalizer = DerivativeNormalizer(
+            stats_path,
+            method=self.config.preprocessing.normalization.derivative_scaling_method,
+        )
         derivative_frames: list[pd.DataFrame] = []
         first_schema_day: ProcessedDay | None = None
 

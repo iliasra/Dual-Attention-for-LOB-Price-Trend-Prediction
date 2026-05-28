@@ -66,6 +66,7 @@ preprocessing:
   normalization:
     derivatives_stats_dir: .smoke
     scope: train_only
+    derivative_scaling_method: robust_mad
   kinematic_tokenization:
     method: basis
     chunk_size: 100000

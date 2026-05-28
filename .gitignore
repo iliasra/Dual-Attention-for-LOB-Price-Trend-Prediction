@@ -5,10 +5,14 @@
 *.o[0-9]*
 *.e[0-9]*
 
+# Scripts
+scripts/plot_confusion_matrices.py
+
 # Data
 data/*
 !data/.gitkeep 
 old/ 
+output/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

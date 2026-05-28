@@ -30,7 +30,10 @@ except ImportError:  # pragma: no cover
     from .utils import save_yaml
 
 ArrayLike = Union[float, int, np.ndarray, pd.Series]
+DerivativeScalingMethod = Literal["zscore", "robust_mad"]
 DUMMY_PRICE_VALUES = [9999999999, -9999999999, 9999999999.0, -9999999999.0]
+DERIVATIVE_SCALING_EPS = 1e-8
+MAD_NORMAL_CONSISTENCY = 1.4826
 
 
 def _normalize_row_mask(row_mask: pd.Series | np.ndarray | list[bool], length: int) -> np.ndarray:
@@ -109,29 +112,80 @@ class ZScoreResult(NamedTuple):
 class DerivativeStats(NamedTuple):
     mean: float
     std: float
+    median: float
+    mad: float
+    scale: float
+    scale_source: str
     q001: float
     q999: float
     n_nan: int
     n_inf: int
 
 def _zscore(series: pd.Series) -> ZScoreResult:
-    mean = float(series.mean())
-    std = float(series.std(ddof=0))
-    return ZScoreResult((series - mean) / (std + 1e-8), mean, std)
+    with np.errstate(invalid="ignore"):
+        mean = float(series.mean())
+        std = float(series.std(ddof=0))
+    return ZScoreResult((series - mean) / (std + DERIVATIVE_SCALING_EPS), mean, std)
 
 def _derivative_stats(series: pd.Series) -> DerivativeStats:
     values = pd.to_numeric(series, errors="coerce")
     finite_mask = np.isfinite(values)
     finite_values = values[finite_mask]
     zscore_result = _zscore(series)
+    if finite_values.empty:
+        median = 0.0
+        mad = 0.0
+        scale = 1.0
+        scale_source = "empty"
+    else:
+        finite = finite_values.to_numpy(dtype=float, copy=False)
+        median = float(np.median(finite))
+        mad = float(np.median(np.abs(finite - median)))
+        scale = float(MAD_NORMAL_CONSISTENCY * mad)
+        scale_source = "mad"
+        if scale < DERIVATIVE_SCALING_EPS:
+            scale = float(np.std(finite))
+            scale_source = "std"
+        if scale < DERIVATIVE_SCALING_EPS:
+            scale = 1.0
+            scale_source = "unit"
     return DerivativeStats(
         mean=zscore_result.mean,
         std=zscore_result.std,
+        median=median,
+        mad=mad,
+        scale=scale,
+        scale_source=scale_source,
         q001=float(finite_values.quantile(0.001)),
         q999=float(finite_values.quantile(0.999)),
         n_nan=int(values.isna().sum()),
         n_inf=int(np.isinf(values).sum()),
     )
+
+
+def _validate_derivative_scaling_method(method: str) -> DerivativeScalingMethod:
+    if method not in {"zscore", "robust_mad"}:
+        raise ValueError("Derivative scaling method must be 'zscore' or 'robust_mad'.")
+    return method  # type: ignore[return-value]
+
+
+def _scale_derivative_series(
+    series: pd.Series,
+    stats: dict[str, float | int | str],
+    *,
+    method: DerivativeScalingMethod,
+    column: str,
+) -> pd.Series:
+    if method == "zscore":
+        return (series - float(stats["mean"])) / (float(stats["std"]) + DERIVATIVE_SCALING_EPS)
+
+    if "median" not in stats or "scale" not in stats:
+        raise ValueError(
+            f"Derivative stats for column '{column}' do not contain robust_mad fields; "
+            "rerun preprocessing to refit derivative statistics."
+        )
+    scale = max(float(stats["scale"]), DERIVATIVE_SCALING_EPS)
+    return (series - float(stats["median"])) / scale
 
 def _log1p(x: ArrayLike) -> pd.Series:
     return np.log1p(x)
@@ -1086,10 +1140,14 @@ class TradingSessionFilter:
 @dataclass(slots=True)
 class DerivativeNormalizer:
     output_path: str | Path
-    stats_: dict[str, dict[str, float | int]] = field(default_factory=dict)
+    method: DerivativeScalingMethod = "zscore"
+    stats_: dict[str, dict[str, float | int | str]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.method = _validate_derivative_scaling_method(self.method)
 
     def fit(self, dataframes: list[pd.DataFrame]) -> "DerivativeNormalizer":
-        """Fit exact train-only derivative stats; transform uses mean/std only."""
+        """Fit exact train-only derivative stats for the selected scaling method."""
         if not dataframes:
             raise ValueError("Cannot fit derivative normalizer on an empty list of dataframes.")
 
@@ -1104,6 +1162,10 @@ class DerivativeNormalizer:
             self.stats_[column] = {
                 "mean": stats.mean,
                 "std": stats.std,
+                "median": stats.median,
+                "mad": stats.mad,
+                "scale": stats.scale,
+                "scale_source": stats.scale_source,
                 "q001": stats.q001,
                 "q999": stats.q999,
                 "n_nan": stats.n_nan,
@@ -1114,7 +1176,7 @@ class DerivativeNormalizer:
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply fitted derivative z-scores to a processed dataframe."""
+        """Apply fitted derivative scaling to a processed dataframe."""
         if not self.stats_:
             self.stats_ = self.load_stats(self.output_path)
         if not self.stats_:
@@ -1124,13 +1186,16 @@ class DerivativeNormalizer:
         for column, stats in self.stats_.items():
             if column not in normalized.columns:
                 continue
-            mean = stats["mean"]
-            std = stats["std"]
-            normalized[column] = (normalized[column] - mean) / (std + 1e-8)
+            normalized[column] = _scale_derivative_series(
+                normalized[column],
+                stats,
+                method=self.method,
+                column=column,
+            )
         return normalized
 
     @staticmethod
-    def load_stats(path: str | Path) -> dict[str, dict[str, float | int]]:
+    def load_stats(path: str | Path) -> dict[str, dict[str, float | int | str]]:
         stats_path = Path(path)
         if not stats_path.exists():
             return {}
@@ -1139,7 +1204,7 @@ class DerivativeNormalizer:
 
         with stats_path.open("r", encoding="utf-8") as handle:
             payload = yaml.safe_load(handle) or {}
-        loaded: dict[str, dict[str, float | int]] = {}
+        loaded: dict[str, dict[str, float | int | str]] = {}
         for column, values in payload.items():
             if not isinstance(values, dict) or not {"mean", "std"} <= set(values):
                 continue
@@ -1147,9 +1212,11 @@ class DerivativeNormalizer:
                 "mean": float(values["mean"]),
                 "std": float(values["std"]),
             }
-            for optional_float in ("q001", "q999"):
+            for optional_float in ("median", "mad", "scale", "q001", "q999"):
                 if optional_float in values:
                     loaded[str(column)][optional_float] = float(values[optional_float])
+            if "scale_source" in values:
+                loaded[str(column)]["scale_source"] = str(values["scale_source"])
             for optional_count in ("n_nan", "n_inf"):
                 if optional_count in values:
                     loaded[str(column)][optional_count] = int(values[optional_count])
@@ -1158,14 +1225,23 @@ class DerivativeNormalizer:
 
 @dataclass(slots=True)
 class FittedDerivativeNormalizer:
-    stats: dict[str, dict[str, float | int]]
+    stats: dict[str, dict[str, float | int | str]]
+    method: DerivativeScalingMethod = "zscore"
+
+    def __post_init__(self) -> None:
+        self.method = _validate_derivative_scaling_method(self.method)
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         normalized = df.copy()
         for column, values in self.stats.items():
             if column not in normalized.columns:
                 continue
-            normalized[column] = (normalized[column] - values["mean"]) / (values["std"] + 1e-8)
+            normalized[column] = _scale_derivative_series(
+                normalized[column],
+                values,
+                method=self.method,
+                column=column,
+            )
         return normalized
 
 # ---------------------------------------------------------------------------
@@ -1348,5 +1424,5 @@ def process_message_col(message_df: pd.DataFrame, tick: float) -> pd.DataFrame:
 
 def z_score_derivatives(df: pd.DataFrame, filepath: str) -> pd.DataFrame:
     """Legacy wrapper"""
-    normalizer = DerivativeNormalizer(filepath).fit([df])
+    normalizer = DerivativeNormalizer(filepath, method="zscore").fit([df])
     return normalizer.transform(df)

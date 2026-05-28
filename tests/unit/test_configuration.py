@@ -48,6 +48,7 @@ def test_tick_size_is_inherited_from_data_config() -> None:
     assert config.seed == 42
     assert config.data.tick_size == 100.0
     assert config.data.logs_dir == "../logs"
+    assert config.preprocessing.normalization.derivative_scaling_method == "robust_mad"
     assert config.preprocessing.message.tick_size == config.data.tick_size
     assert config.preprocessing.price_kinematic.tick_size == config.data.tick_size
     assert config.preprocessing.price_static.tick_size == config.data.tick_size
@@ -62,6 +63,30 @@ def test_config_loader_reports_negative_seed(artifact_dir: Path) -> None:
     broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="seed"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+
+def test_config_loader_accepts_zscore_derivative_scaling(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["normalization"]["derivative_scaling_method"] = "zscore"
+
+    config_path = artifact_dir / "zscore_derivative_scaling.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.preprocessing.normalization.derivative_scaling_method == "zscore"
+
+
+def test_config_loader_rejects_unknown_derivative_scaling(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["normalization"]["derivative_scaling_method"] = "made_up"
+
+    broken_config_path = artifact_dir / "bad_derivative_scaling.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="preprocessing\\.normalization\\.derivative_scaling_method"):
         ExperimentConfig.from_yaml(broken_config_path)
 
 

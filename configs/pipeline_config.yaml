@@ -95,6 +95,7 @@ preprocessing:
   normalization:
     derivatives_stats_dir: ../data/derivatives_z_scores
     scope: train_only # allowed: train_only (used for readiness only)
+    derivative_scaling_method: robust_mad # allowed: zscore, robust_mad
   kinematic_tokenization:
     method: fast # allowed: basis, fast
     chunk_size: 100000 # shared by fast price and volume tokenization
