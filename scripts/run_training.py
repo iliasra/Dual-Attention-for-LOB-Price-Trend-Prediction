@@ -214,6 +214,23 @@ def epoch_monitor_value(result: EpochResult, monitor: str) -> float:
     raise ValueError(f"Unsupported monitor: {monitor}")
 
 
+def mapped_class_metric(config: ExperimentConfig, metrics: Any, raw_label: int, metric_name: str) -> float | None:
+    """Return a per-class metric using the configured raw-to-class label mapping."""
+    mapped_label = config.data.label_mapping.get(raw_label)
+    if mapped_label is None:
+        return None
+    values = getattr(metrics, metric_name, None)
+    class_id = int(mapped_label)
+    if values is None or class_id < 0 or class_id >= len(values):
+        return None
+    return float(values[class_id])
+
+
+def format_optional_metric(value: float | None) -> str:
+    """Format optional metrics for console logs."""
+    return "nan" if value is None else f"{value:.4f}"
+
+
 def best_epoch_from_history(config: ExperimentConfig, history: list[EpochResult]) -> tuple[int, EpochResult, float]:
     """Select the best epoch using the configured validation monitor."""
     if not history:
@@ -252,13 +269,34 @@ def evaluate_best_model_on_test_split(
     best_history.test_loss = test_result.loss
     best_history.test_metrics = test_result.metrics
     best_history.test_expert_usage = test_result.expert_usage
+    test_ece_down = mapped_class_metric(
+        config,
+        test_result.metrics,
+        -1,
+        "per_class_expected_calibration_error",
+    )
+    test_ece_neutral = mapped_class_metric(
+        config,
+        test_result.metrics,
+        0,
+        "per_class_expected_calibration_error",
+    )
+    test_ece_up = mapped_class_metric(
+        config,
+        test_result.metrics,
+        1,
+        "per_class_expected_calibration_error",
+    )
     print(
         f"Best epoch {best_epoch} test evaluation: "
         f"test_loss={test_result.loss:.6f}, "
         f"test_acc={test_result.metrics.accuracy:.4f}, "
         f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
         f"test_directional_macro_f1={test_result.metrics.directional_macro_f1:.4f}, "
-        f"test_ece={test_result.metrics.expected_calibration_error:.4f} "
+        f"test_ece={test_result.metrics.expected_calibration_error:.4f}, "
+        f"test_ece_down={format_optional_metric(test_ece_down)}, "
+        f"test_ece_neutral={format_optional_metric(test_ece_neutral)}, "
+        f"test_ece_up={format_optional_metric(test_ece_up)} "
         f"({format_duration(evaluation_duration_seconds)})."
     )
     return evaluation_duration_seconds
@@ -476,11 +514,34 @@ def train_fold(
     for epoch_index, result in enumerate(history, start=1):
         test_suffix = "" if result.test_loss is None else f", test_loss={result.test_loss:.6f}"
         val_metrics = result.val_metrics
-        metric_suffix = "" if val_metrics is None else (
-            f", val_acc={val_metrics.accuracy:.4f}, val_macro_f1={val_metrics.macro_f1:.4f}, "
-            f"val_directional_macro_f1={val_metrics.directional_macro_f1:.4f}, "
-            f"val_ece={val_metrics.expected_calibration_error:.4f}"
-        )
+        metric_suffix = ""
+        if val_metrics is not None:
+            val_ece_down = mapped_class_metric(
+                config,
+                val_metrics,
+                -1,
+                "per_class_expected_calibration_error",
+            )
+            val_ece_neutral = mapped_class_metric(
+                config,
+                val_metrics,
+                0,
+                "per_class_expected_calibration_error",
+            )
+            val_ece_up = mapped_class_metric(
+                config,
+                val_metrics,
+                1,
+                "per_class_expected_calibration_error",
+            )
+            metric_suffix = (
+                f", val_acc={val_metrics.accuracy:.4f}, val_macro_f1={val_metrics.macro_f1:.4f}, "
+                f"val_directional_macro_f1={val_metrics.directional_macro_f1:.4f}, "
+                f"val_ece={val_metrics.expected_calibration_error:.4f}, "
+                f"val_ece_down={format_optional_metric(val_ece_down)}, "
+                f"val_ece_neutral={format_optional_metric(val_ece_neutral)}, "
+                f"val_ece_up={format_optional_metric(val_ece_up)}"
+            )
         print(
             f"epoch {epoch_index}: train_loss={result.train_loss:.6f}, "
             f"val_loss={result.val_loss:.6f}{test_suffix}{metric_suffix}"

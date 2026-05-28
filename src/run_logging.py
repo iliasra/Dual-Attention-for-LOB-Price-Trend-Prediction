@@ -277,6 +277,7 @@ def _epoch_row(
         "test_loss": "" if result.test_loss is None else f"{result.test_loss:.10g}",
     }
     down_class_id = _mapped_class_id(config, -1)
+    neutral_class_id = _mapped_class_id(config, 0)
     up_class_id = _mapped_class_id(config, 1)
     for split, metrics in (
         ("train", getattr(result, "train_metrics", None)),
@@ -291,6 +292,21 @@ def _epoch_row(
         row[f"{split}_down_recall"] = _class_metric_value(metrics, "per_class_recall", down_class_id)
         row[f"{split}_up_precision"] = _class_metric_value(metrics, "per_class_precision", up_class_id)
         row[f"{split}_up_recall"] = _class_metric_value(metrics, "per_class_recall", up_class_id)
+        row[f"{split}_ece_down"] = _class_metric_value(
+            metrics,
+            "per_class_expected_calibration_error",
+            down_class_id,
+        )
+        row[f"{split}_ece_neutral"] = _class_metric_value(
+            metrics,
+            "per_class_expected_calibration_error",
+            neutral_class_id,
+        )
+        row[f"{split}_ece_up"] = _class_metric_value(
+            metrics,
+            "per_class_expected_calibration_error",
+            up_class_id,
+        )
     return row
 
 
@@ -305,6 +321,9 @@ def _epoch_fieldnames(config: ExperimentConfig) -> list[str]:
                 f"{split}_down_recall",
                 f"{split}_up_precision",
                 f"{split}_up_recall",
+                f"{split}_ece_down",
+                f"{split}_ece_neutral",
+                f"{split}_ece_up",
             ]
         )
     return fieldnames
@@ -479,6 +498,13 @@ def _write_best_epoch_summary(handle: Any, history: list[Any], config: Experimen
         handle.write(f"{split}_macro_f1: {metrics.macro_f1:.10g}\n")
         handle.write(f"{split}_directional_macro_f1: {metrics.directional_macro_f1:.10g}\n")
         handle.write(f"{split}_ece: {metrics.expected_calibration_error:.10g}\n")
+        down_class_id = _mapped_class_id(config, -1)
+        neutral_class_id = _mapped_class_id(config, 0)
+        up_class_id = _mapped_class_id(config, 1)
+        for label, class_id in (("down", down_class_id), ("neutral", neutral_class_id), ("up", up_class_id)):
+            value = _class_metric_value(metrics, "per_class_expected_calibration_error", class_id)
+            if value:
+                handle.write(f"{split}_ece_{label}: {value}\n")
 
 
 def _write_sampling_summary(handle: Any, summary: dict[str, Any]) -> None:

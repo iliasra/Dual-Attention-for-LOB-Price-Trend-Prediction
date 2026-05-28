@@ -209,6 +209,26 @@ def test_directional_macro_f1_averages_down_and_up_only() -> None:
     assert metrics.directional_macro_f1 != pytest.approx(metrics.macro_f1)
 
 
+def test_per_class_ece_uses_one_vs_rest_probabilities() -> None:
+    accumulator = ClassificationMetricAccumulator(device=torch.device("cpu"), num_calibration_bins=2)
+    probabilities = torch.tensor(
+        [
+            [0.2, 0.8],
+            [0.4, 0.6],
+            [0.6, 0.4],
+            [0.8, 0.2],
+        ],
+        dtype=torch.float32,
+    )
+    logits = torch.log(probabilities)
+    targets = torch.tensor([0, 1, 0, 1])
+
+    accumulator.update(logits, targets)
+    metrics = accumulator.compute()
+
+    assert metrics.per_class_expected_calibration_error == pytest.approx([0.2, 0.2])
+
+
 def test_class_weights_from_class_counts_uses_sampled_counts() -> None:
     weights, counts = class_weights_from_class_counts(
         [2, 4, 2],

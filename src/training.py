@@ -99,6 +99,7 @@ class ClassificationMetrics:
     weighted_f1: float
     balanced_accuracy: float
     expected_calibration_error: float
+    per_class_expected_calibration_error: list[float]
     per_class_precision: list[float]
     per_class_recall: list[float]
     per_class_f1: list[float]
@@ -322,6 +323,9 @@ class ClassificationMetricAccumulator:
         self.calibration_bin_counts: torch.Tensor | None = None
         self.calibration_confidence_sums: torch.Tensor | None = None
         self.calibration_correct_sums: torch.Tensor | None = None
+        self.class_calibration_bin_counts: torch.Tensor | None = None
+        self.class_calibration_confidence_sums: torch.Tensor | None = None
+        self.class_calibration_positive_sums: torch.Tensor | None = None
 
     @staticmethod
     def _zero_metrics(num_classes: int = 0) -> ClassificationMetrics:
@@ -334,6 +338,7 @@ class ClassificationMetricAccumulator:
             weighted_f1=0.0,
             balanced_accuracy=0.0,
             expected_calibration_error=0.0,
+            per_class_expected_calibration_error=[0.0] * num_classes,
             per_class_precision=[0.0] * num_classes,
             per_class_recall=[0.0] * num_classes,
             per_class_f1=[0.0] * num_classes,
@@ -356,12 +361,22 @@ class ClassificationMetricAccumulator:
             )
             self.calibration_confidence_sums = torch.zeros_like(self.calibration_bin_counts)
             self.calibration_correct_sums = torch.zeros_like(self.calibration_bin_counts)
+            self.class_calibration_bin_counts = torch.zeros(
+                (self.num_classes, self.num_calibration_bins),
+                dtype=torch.float64,
+                device=self.device,
+            )
+            self.class_calibration_confidence_sums = torch.zeros_like(self.class_calibration_bin_counts)
+            self.class_calibration_positive_sums = torch.zeros_like(self.class_calibration_bin_counts)
         if self.confusion_matrix is None:
             raise RuntimeError("Classification metric accumulator was not initialized.")
         if (
             self.calibration_bin_counts is None
             or self.calibration_confidence_sums is None
             or self.calibration_correct_sums is None
+            or self.class_calibration_bin_counts is None
+            or self.class_calibration_confidence_sums is None
+            or self.class_calibration_positive_sums is None
         ):
             raise RuntimeError("Calibration metric accumulator was not initialized.")
 
@@ -401,6 +416,31 @@ class ClassificationMetricAccumulator:
             weights=correctness,
             minlength=self.num_calibration_bins,
         )
+
+        valid_probabilities = probabilities[valid_mask].to(torch.float64)
+        valid_targets = targets[valid_mask].long()
+        class_bin_indices = torch.clamp(
+            (valid_probabilities * self.num_calibration_bins).long(),
+            max=self.num_calibration_bins - 1,
+        )
+        for class_id in range(self.num_classes):
+            class_bins = class_bin_indices[:, class_id]
+            class_confidences = valid_probabilities[:, class_id]
+            class_positives = (valid_targets == class_id).to(torch.float64)
+            self.class_calibration_bin_counts[class_id] += torch.bincount(
+                class_bins,
+                minlength=self.num_calibration_bins,
+            ).to(torch.float64)
+            self.class_calibration_confidence_sums[class_id] += torch.bincount(
+                class_bins,
+                weights=class_confidences,
+                minlength=self.num_calibration_bins,
+            )
+            self.class_calibration_positive_sums[class_id] += torch.bincount(
+                class_bins,
+                weights=class_positives,
+                minlength=self.num_calibration_bins,
+            )
 
     def compute(self) -> ClassificationMetrics:
         if self.confusion_matrix is None:
@@ -450,6 +490,35 @@ class ClassificationMetricAccumulator:
             )
             bin_weights = self.calibration_bin_counts / self.calibration_bin_counts.sum().clamp_min(1.0)
             expected_calibration_error = torch.sum(bin_weights * torch.abs(bin_accuracy - bin_confidence))
+        per_class_expected_calibration_error = torch.zeros(
+            int(confusion.shape[0]),
+            dtype=torch.float64,
+            device=self.device,
+        )
+        if (
+            self.class_calibration_bin_counts is not None
+            and self.class_calibration_confidence_sums is not None
+            and self.class_calibration_positive_sums is not None
+        ):
+            non_empty_class_bins = self.class_calibration_bin_counts > 0
+            class_bin_positive_rate = torch.zeros_like(self.class_calibration_bin_counts)
+            class_bin_confidence = torch.zeros_like(self.class_calibration_bin_counts)
+            class_bin_positive_rate[non_empty_class_bins] = (
+                self.class_calibration_positive_sums[non_empty_class_bins]
+                / self.class_calibration_bin_counts[non_empty_class_bins]
+            )
+            class_bin_confidence[non_empty_class_bins] = (
+                self.class_calibration_confidence_sums[non_empty_class_bins]
+                / self.class_calibration_bin_counts[non_empty_class_bins]
+            )
+            class_bin_weights = (
+                self.class_calibration_bin_counts
+                / self.class_calibration_bin_counts.sum(dim=1, keepdim=True).clamp_min(1.0)
+            )
+            per_class_expected_calibration_error = torch.sum(
+                class_bin_weights * torch.abs(class_bin_positive_rate - class_bin_confidence),
+                dim=1,
+            )
 
         return ClassificationMetrics(
             accuracy=float(accuracy.item()),
@@ -460,6 +529,9 @@ class ClassificationMetricAccumulator:
             weighted_f1=float(weighted_f1.item()),
             balanced_accuracy=float(macro_recall.item()),
             expected_calibration_error=float(expected_calibration_error.item()),
+            per_class_expected_calibration_error=[
+                float(value) for value in per_class_expected_calibration_error.detach().cpu().tolist()
+            ],
             per_class_precision=[float(value) for value in precision.detach().cpu().tolist()],
             per_class_recall=[float(value) for value in recall.detach().cpu().tolist()],
             per_class_f1=[float(value) for value in f1.detach().cpu().tolist()],
