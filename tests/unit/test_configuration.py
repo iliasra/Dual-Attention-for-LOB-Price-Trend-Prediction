@@ -543,8 +543,14 @@ def test_training_data_loader_settings_are_loaded() -> None:
 
     assert config.training.num_workers >= 0
     assert config.training.early_stopping_patience >= 0
-    assert config.training.monitor == "val_directional_macro_f1"
+    assert config.training.monitor == "tailored_score"
     assert config.training.monitor_mode == "max"
+    assert config.training.monitor_params.lambda_ece == 0.5
+    assert config.training.monitor_params.lambda_rate == 0.5
+    assert config.training.directional_thresholds.enabled is True
+    assert config.training.directional_thresholds.min_threshold == 0.05
+    assert config.training.directional_thresholds.max_threshold == 0.95
+    assert config.training.directional_thresholds.step == 0.05
     assert config.training.eval_batch_size == 256
     assert config.training.class_weights is None
     assert config.training.pin_memory is pin_memory
@@ -595,6 +601,105 @@ def test_training_monitor_values_are_validated(artifact_dir: Path) -> None:
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="training\\.monitor_mode"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_training_tailored_monitor_requires_params_and_max_mode(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["monitor"] = "tailored_score"
+    payload["training"]["monitor_mode"] = "min"
+
+    config_path = artifact_dir / "bad_tailored_mode.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="monitor_mode"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["monitor_mode"] = "max"
+    payload["training"].pop("monitor_params", None)
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="monitor_params"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["monitor_params"] = {"lambda_ece": -0.1, "lambda_rate": 0.5}
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="lambda_ece"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_legacy_monitors_do_not_require_monitor_params(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["monitor"] = "val_loss"
+    payload["training"]["monitor_mode"] = "min"
+    payload["training"].pop("monitor_params", None)
+
+    config_path = artifact_dir / "legacy_monitor_without_params.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.monitor == "val_loss"
+    assert not loaded.training.monitor_params.complete
+
+
+def test_directional_threshold_config_is_optional(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"].pop("directional_thresholds", None)
+
+    config_path = artifact_dir / "no_directional_thresholds.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.directional_thresholds.enabled is False
+    assert loaded.training.directional_thresholds.min_threshold == 0.05
+    assert loaded.training.directional_thresholds.max_threshold == 0.95
+    assert loaded.training.directional_thresholds.step == 0.05
+
+
+def test_directional_threshold_config_uses_grid_defaults(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["directional_thresholds"] = {"enabled": False}
+
+    config_path = artifact_dir / "directional_threshold_defaults.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.directional_thresholds.enabled is False
+    assert loaded.training.directional_thresholds.min_threshold == 0.05
+    assert loaded.training.directional_thresholds.max_threshold == 0.95
+    assert loaded.training.directional_thresholds.step == 0.05
+
+
+def test_directional_threshold_config_validates_grid(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["directional_thresholds"] = {
+        "enabled": True,
+        "min": 0.8,
+        "max": 0.2,
+        "step": 0.05,
+    }
+
+    config_path = artifact_dir / "bad_directional_threshold_grid.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="directional_thresholds\\.min"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["directional_thresholds"] = {
+        "enabled": True,
+        "min": 0.05,
+        "max": 0.95,
+        "step": 0.0,
+    }
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="directional_thresholds\\.step"):
         ExperimentConfig.from_yaml(config_path)
 
 

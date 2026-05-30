@@ -19,6 +19,7 @@ if str(SRC_DIR) not in sys.path:
 from configuration import ExperimentConfig, load_config
 from datasets import EpochNeutralDownsamplingSampler, LOBDataset, sequence_window_labels
 from model import build_model
+from monitoring import epoch_monitor_value as configured_epoch_monitor_value
 from run_logging import (
     class_distribution,
     format_duration,
@@ -27,6 +28,7 @@ from run_logging import (
     next_run_stem,
     resolve_config_path,
     save_confusion_matrices,
+    save_directional_threshold_artifact,
     save_epoch_history,
     save_expert_usage,
     save_best_pr_artifacts,
@@ -35,7 +37,20 @@ from run_logging import (
     save_run_log,
     save_run_summary,
 )
-from training import EpochResult, LobTrainer, class_weights_from_class_counts, class_weights_from_sequence_labels
+from thresholding import (
+    apply_directional_threshold_policy,
+    apply_thresholds_and_summarize,
+    optimize_directional_thresholds,
+    threshold_candidates,
+)
+from training import (
+    ClassificationMetrics,
+    EpochResult,
+    LobTrainer,
+    class_weights_from_class_counts,
+    class_weights_from_sequence_labels,
+    classification_metrics_from_predictions,
+)
 from utils import seed_torch_worker, set_global_seed, torch_generator_from_seed
 
 def parse_args() -> argparse.Namespace:
@@ -203,17 +218,14 @@ def resolve_class_weights(
     }
 
 
-def epoch_monitor_value(result: EpochResult, monitor: str) -> float:
+def epoch_monitor_value(config: ExperimentConfig, result: EpochResult) -> float:
     """Return a saved epoch's validation monitor value."""
-    if monitor == "val_loss":
-        return result.val_loss
-    if result.val_metrics is None:
-        raise ValueError(f"Cannot compute {monitor} because validation metrics are unavailable.")
-    if monitor == "val_macro_f1":
-        return result.val_metrics.macro_f1
-    if monitor == "val_directional_macro_f1":
-        return result.val_metrics.directional_macro_f1
-    raise ValueError(f"Unsupported monitor: {monitor}")
+    return configured_epoch_monitor_value(
+        result,
+        monitor=config.training.monitor,
+        monitor_params=config.training.monitor_params,
+        label_mapping=config.data.label_mapping,
+    )
 
 
 def mapped_class_metric(config: ExperimentConfig, metrics: Any, raw_label: int, metric_name: str) -> float | None:
@@ -263,6 +275,151 @@ def roc_auc_summary(config: ExperimentConfig, metrics: Any, prefix: str) -> str:
     return ", ".join(f"{prefix}_roc_auc_{label}={format_optional_metric(value)}" for label, value in values.items())
 
 
+def directional_threshold_class_ids(config: ExperimentConfig) -> tuple[int, int, int]:
+    """Resolve down/neutral/up class ids for thresholded decisions."""
+    required = {-1: "down", 0: "neutral", 1: "up"}
+    missing = [name for raw_label, name in required.items() if raw_label not in config.data.label_mapping]
+    if missing:
+        raise ValueError(f"Directional thresholds require label_mapping entries for: {', '.join(missing)}.")
+    return (
+        int(config.data.label_mapping[-1]),
+        int(config.data.label_mapping[0]),
+        int(config.data.label_mapping[1]),
+    )
+
+
+def prediction_outputs_with_decisions(outputs: dict[str, Any], predictions: np.ndarray) -> dict[str, Any]:
+    """Return collected outputs with replacement decisions and saved argmax decisions."""
+    updated = dict(outputs)
+    if "predictions" in outputs and "argmax_predictions" not in updated:
+        updated["argmax_predictions"] = np.asarray(outputs["predictions"], dtype=np.int64).reshape(-1)
+    updated["predictions"] = np.asarray(predictions, dtype=np.int64).reshape(-1)
+    return updated
+
+
+def metrics_from_prediction_outputs(
+    config: ExperimentConfig,
+    outputs: dict[str, Any],
+    predictions: np.ndarray,
+) -> ClassificationMetrics:
+    """Build full classification metrics for fixed predictions."""
+    return classification_metrics_from_predictions(
+        np.asarray(outputs["targets"], dtype=np.int64),
+        np.asarray(predictions, dtype=np.int64),
+        num_classes=config.model.num_classes,
+        probabilities=np.asarray(outputs["probabilities"], dtype=np.float32),
+    )
+
+
+def fit_and_apply_directional_thresholds(
+    *,
+    config: ExperimentConfig,
+    validation_outputs: dict[str, Any],
+    test_outputs: dict[str, Any] | None,
+    best_epoch: int,
+    fold: str,
+    target_path: Path,
+) -> tuple[
+    dict[str, Any],
+    ClassificationMetrics,
+    ClassificationMetrics | None,
+    dict[str, Any],
+    dict[str, Any] | None,
+]:
+    """Fit validation thresholds and return thresholded val/test artifacts."""
+    threshold_config = config.training.directional_thresholds
+    down_id, neutral_id, up_id = directional_threshold_class_ids(config)
+    down_candidates = threshold_candidates(
+        threshold_config.min_threshold,
+        threshold_config.max_threshold,
+        threshold_config.step,
+    )
+    up_candidates = threshold_candidates(
+        threshold_config.min_threshold,
+        threshold_config.max_threshold,
+        threshold_config.step,
+    )
+    selection = optimize_directional_thresholds(
+        np.asarray(validation_outputs["probabilities"], dtype=np.float32),
+        np.asarray(validation_outputs["targets"], dtype=np.int64),
+        down_candidates=down_candidates,
+        up_candidates=up_candidates,
+        down_id=down_id,
+        neutral_id=neutral_id,
+        up_id=up_id,
+    )
+    validation_predictions = apply_directional_threshold_policy(
+        np.asarray(validation_outputs["probabilities"], dtype=np.float32),
+        threshold_down=selection.threshold_down,
+        threshold_up=selection.threshold_up,
+        down_id=down_id,
+        neutral_id=neutral_id,
+        up_id=up_id,
+    )
+    validation_metrics = metrics_from_prediction_outputs(config, validation_outputs, validation_predictions)
+    validation_summary = apply_thresholds_and_summarize(
+        validation_outputs,
+        threshold_down=selection.threshold_down,
+        threshold_up=selection.threshold_up,
+        down_id=down_id,
+        neutral_id=neutral_id,
+        up_id=up_id,
+    )
+    validation_outputs_thresholded = prediction_outputs_with_decisions(validation_outputs, validation_predictions)
+    test_metrics = None
+    test_summary = None
+    test_outputs_thresholded = None
+    if test_outputs is not None:
+        test_predictions = apply_directional_threshold_policy(
+            np.asarray(test_outputs["probabilities"], dtype=np.float32),
+            threshold_down=selection.threshold_down,
+            threshold_up=selection.threshold_up,
+            down_id=down_id,
+            neutral_id=neutral_id,
+            up_id=up_id,
+        )
+        test_metrics = metrics_from_prediction_outputs(config, test_outputs, test_predictions)
+        test_summary = apply_thresholds_and_summarize(
+            test_outputs,
+            threshold_down=selection.threshold_down,
+            threshold_up=selection.threshold_up,
+            down_id=down_id,
+            neutral_id=neutral_id,
+            up_id=up_id,
+        )
+        test_outputs_thresholded = prediction_outputs_with_decisions(test_outputs, test_predictions)
+
+    payload: dict[str, Any] = {
+        "enabled": True,
+        "classification_mode": "directional_thresholds",
+        "decision_scope": (
+            "Validation/test decision metrics, saved pred_label values, and confusion matrices use thresholded "
+            "decisions. PR/ROC/AP remain probability-ranking metrics computed from softmax scores."
+        ),
+        "fold": fold,
+        "best_epoch": int(best_epoch),
+        "selection_split": "validation",
+        "selection_metric": "directional_macro_f1",
+        "threshold_down": float(selection.threshold_down),
+        "threshold_up": float(selection.threshold_up),
+        "score": float(selection.score),
+        "grid_min": float(threshold_config.min_threshold),
+        "grid_max": float(threshold_config.max_threshold),
+        "grid_step": float(threshold_config.step),
+        "n_candidates": int(selection.n_candidates),
+        "tie_break": "max_margin_over_threshold",
+        "class_ids": {
+            "down": int(down_id),
+            "neutral": int(neutral_id),
+            "up": int(up_id),
+        },
+        "validation_threshold_metrics": validation_summary,
+        "test_threshold_metrics": test_summary,
+    }
+    save_directional_threshold_artifact(payload, target_path)
+    return payload, validation_metrics, test_metrics, validation_outputs_thresholded, test_outputs_thresholded
+
+
 def best_epoch_from_history(config: ExperimentConfig, history: list[EpochResult]) -> tuple[int, EpochResult, float]:
     """Select the best epoch using the configured validation monitor."""
     if not history:
@@ -270,10 +427,10 @@ def best_epoch_from_history(config: ExperimentConfig, history: list[EpochResult]
     reverse = config.training.monitor_mode == "max"
     best_epoch, best_history = sorted(
         enumerate(history, start=1),
-        key=lambda item: epoch_monitor_value(item[1], config.training.monitor),
+        key=lambda item: epoch_monitor_value(config, item[1]),
         reverse=reverse,
     )[0]
-    return best_epoch, best_history, epoch_monitor_value(best_history, config.training.monitor)
+    return best_epoch, best_history, epoch_monitor_value(config, best_history)
 
 
 def evaluate_best_model_on_validation_and_test_splits(
@@ -425,6 +582,7 @@ def train_fold(
     run_confusion_matrices_path = fold_log_dir / "confusion_matrices.yaml"
     run_expert_usage_path = fold_log_dir / "expert_usage.yaml"
     run_pr_thresholds_path = fold_log_dir / "pr_thresholds.yaml"
+    run_directional_thresholds_path = fold_log_dir / "directional_thresholds.yaml"
     run_pr_curves_dir = fold_log_dir / "pr_curves"
     run_probabilities_dir = fold_log_dir / "probabilities"
     config.training.model_dir = str(fold_result_dir)
@@ -582,11 +740,44 @@ def train_fold(
     )
     if best_evaluation["validation_outputs"] is None:
         raise RuntimeError("Best model validation evaluation did not collect probability outputs.")
-    save_probability_outputs(best_evaluation["validation_outputs"], validation_probabilities_path, config)
-    if best_evaluation["test_outputs"] is not None and test_probabilities_path is not None:
-        save_probability_outputs(best_evaluation["test_outputs"], test_probabilities_path, config)
+    validation_outputs_for_artifacts = best_evaluation["validation_outputs"]
+    test_outputs_for_artifacts = best_evaluation["test_outputs"]
+    directional_threshold_summary: dict[str, Any] = {
+        "enabled": bool(config.training.directional_thresholds.enabled),
+    }
+    if config.training.directional_thresholds.enabled:
+        best_history = history[best_epoch - 1]
+        best_history.val_argmax_metrics = best_history.val_metrics
+        best_history.test_argmax_metrics = best_history.test_metrics
+        (
+            directional_threshold_summary,
+            val_threshold_metrics,
+            test_threshold_metrics,
+            validation_outputs_for_artifacts,
+            test_outputs_for_artifacts,
+        ) = fit_and_apply_directional_thresholds(
+            config=config,
+            validation_outputs=validation_outputs_for_artifacts,
+            test_outputs=test_outputs_for_artifacts,
+            best_epoch=best_epoch,
+            fold=fold_id,
+            target_path=run_directional_thresholds_path,
+        )
+        best_history.val_metrics = val_threshold_metrics
+        best_history.test_metrics = test_threshold_metrics
+        best_history.val_threshold_metrics = directional_threshold_summary["validation_threshold_metrics"]
+        best_history.test_threshold_metrics = directional_threshold_summary["test_threshold_metrics"]
+        print(
+            f"Fold {fold_id} directional thresholds selected on validation: "
+            f"down={directional_threshold_summary['threshold_down']:.4f}, "
+            f"up={directional_threshold_summary['threshold_up']:.4f}, "
+            f"val_threshold_directional_macro_f1={directional_threshold_summary['score']:.4f}."
+        )
+    save_probability_outputs(validation_outputs_for_artifacts, validation_probabilities_path, config)
+    if test_outputs_for_artifacts is not None and test_probabilities_path is not None:
+        save_probability_outputs(test_outputs_for_artifacts, test_probabilities_path, config)
     pr_artifacts = save_best_pr_artifacts(
-        best_evaluation["validation_outputs"],
+        validation_outputs_for_artifacts,
         curves_dir=run_pr_curves_dir,
         thresholds_path=run_pr_thresholds_path,
         config=config,
@@ -629,6 +820,12 @@ def train_fold(
         pr_thresholds_path=run_pr_thresholds_path,
         pr_curves_dir=run_pr_curves_dir,
         probabilities_dir=run_probabilities_dir,
+        directional_thresholds_path=(
+            run_directional_thresholds_path if directional_threshold_summary.get("enabled") else None
+        ),
+        directional_threshold_summary=directional_threshold_summary,
+        selected_best_epoch=best_epoch,
+        selected_monitor_value=float(best_evaluation["best_monitor_value"]),
         preprocessing_metadata=preprocessing_metadata,
         sampling_summary=sampling_summary,
         timing=timing,
@@ -642,6 +839,8 @@ def train_fold(
     )
     print(f"Fold {fold_id} run log saved to: {run_log_path}")
     print(f"Fold {fold_id} PR thresholds saved to: {run_pr_thresholds_path}")
+    if directional_threshold_summary.get("enabled"):
+        print(f"Fold {fold_id} directional thresholds saved to: {run_directional_thresholds_path}")
     if test_probabilities_path is None:
         print(f"Fold {fold_id} validation probability outputs saved to: {validation_probabilities_path}")
     else:
@@ -702,11 +901,15 @@ def train_fold(
             "confusion_matrices": str(run_confusion_matrices_path),
             "expert_usage": str(run_expert_usage_path),
             "pr_thresholds": str(run_pr_thresholds_path),
+            "directional_thresholds": (
+                str(run_directional_thresholds_path) if directional_threshold_summary.get("enabled") else None
+            ),
             "pr_curves_dir": str(run_pr_curves_dir),
             "validation_probabilities": str(validation_probabilities_path),
             "test_probabilities": None if test_probabilities_path is None else str(test_probabilities_path),
         },
         "pr_artifacts": pr_artifacts,
+        "directional_thresholds": directional_threshold_summary,
     }
 
 

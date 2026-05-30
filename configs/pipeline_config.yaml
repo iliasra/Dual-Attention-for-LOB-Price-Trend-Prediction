@@ -170,8 +170,11 @@ training:
   eval_batch_size: 256 # evaluation only; no backward pass
   num_workers: 8
   early_stopping_patience: 3
-  monitor: val_directional_macro_f1 # allowed: val_loss, val_macro_f1, val_directional_macro_f1
-  monitor_mode: max # allowed: min, max
+  monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
+  monitor_mode: max # allowed: min, max; tailored_score requires max
+  monitor_params:
+    lambda_ece: 0.5
+    lambda_rate: 0.5
   persistent_workers: true
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
@@ -183,5 +186,10 @@ training:
   model_dir: ../results
   use_amp: true
   deterministic_torch: false
+  directional_thresholds: #choose best probability thresholds to classify, based on the grid below
+    enabled: true
+    min: 0.05
+    max: 0.95
+    step: 0.05
   sampling:
     neutral_to_directional_ratio: 2.0 # downsampling of neutral class

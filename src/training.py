@@ -13,10 +13,12 @@ from tqdm import tqdm
 
 try:
     from configuration import TrainingConfig, load_config
+    from monitoring import monitor_value
     from pr_metrics import per_class_ranking_metrics
     from run_logging import format_duration
 except ImportError:  # pragma: no cover
     from .configuration import TrainingConfig, load_config
+    from .monitoring import monitor_value
     from .pr_metrics import per_class_ranking_metrics
     from .run_logging import format_duration
 
@@ -110,6 +112,158 @@ class ClassificationMetrics:
     per_class_f1: list[float]
     confusion_matrix: list[list[int]]
     normalized_confusion_matrix: list[list[float]]
+
+
+def classification_metrics_from_predictions(
+    targets: np.ndarray,
+    predictions: np.ndarray,
+    *,
+    num_classes: int,
+    probabilities: np.ndarray | None = None,
+    num_calibration_bins: int = 15,
+) -> ClassificationMetrics:
+    """Compute metrics from fixed predictions and optional class probabilities."""
+    target_array = np.asarray(targets, dtype=np.int64).reshape(-1)
+    prediction_array = np.asarray(predictions, dtype=np.int64).reshape(-1)
+    if target_array.shape[0] != prediction_array.shape[0]:
+        raise ValueError("targets and predictions must have the same length.")
+
+    probability_array = None
+    if probabilities is not None:
+        probability_array = np.asarray(probabilities, dtype=np.float32)
+        if probability_array.ndim == 1 and probability_array.size == 0:
+            probability_array = np.empty((0, int(num_classes)), dtype=np.float32)
+        if probability_array.ndim != 2:
+            raise ValueError("probabilities must be a 2D array.")
+        if probability_array.shape[0] != target_array.shape[0]:
+            raise ValueError("probabilities and targets must have the same number of rows.")
+        if probability_array.shape[1] < int(num_classes):
+            raise ValueError("probabilities has fewer columns than num_classes.")
+
+    num_classes = int(num_classes)
+    valid_mask = (
+        (target_array >= 0)
+        & (target_array < num_classes)
+        & (prediction_array >= 0)
+        & (prediction_array < num_classes)
+    )
+    if not bool(np.any(valid_mask)):
+        return ClassificationMetricAccumulator._zero_metrics(num_classes)
+
+    valid_targets = target_array[valid_mask]
+    valid_predictions = prediction_array[valid_mask]
+    flat_indices = valid_targets * num_classes + valid_predictions
+    confusion = np.bincount(flat_indices, minlength=num_classes * num_classes).reshape(
+        num_classes,
+        num_classes,
+    )
+    confusion_float = confusion.astype(np.float64, copy=False)
+    total = float(confusion_float.sum())
+    true_positives = np.diag(confusion_float)
+    support = confusion_float.sum(axis=1)
+    predicted = confusion_float.sum(axis=0)
+
+    precision = np.divide(true_positives, predicted, out=np.zeros(num_classes, dtype=np.float64), where=predicted > 0)
+    recall = np.divide(true_positives, support, out=np.zeros(num_classes, dtype=np.float64), where=support > 0)
+    f1 = np.divide(
+        2.0 * precision * recall,
+        precision + recall,
+        out=np.zeros(num_classes, dtype=np.float64),
+        where=(precision + recall) > 0,
+    )
+    normalized_confusion = np.divide(
+        confusion_float,
+        support[:, None],
+        out=np.zeros_like(confusion_float),
+        where=support[:, None] > 0,
+    )
+    directional_class_indices = [index for index in (0, 2) if index < num_classes]
+    directional_macro_f1 = float(np.mean(f1[directional_class_indices])) if directional_class_indices else 0.0
+
+    expected_calibration_error = 0.0
+    per_class_expected_calibration_error = [0.0] * num_classes
+    per_class_pr_ap = None
+    per_class_pr_auc = None
+    per_class_roc_auc = None
+    if probability_array is not None:
+        valid_probabilities = probability_array[valid_mask, :num_classes]
+        chosen_confidences = valid_probabilities[np.arange(valid_predictions.shape[0]), valid_predictions]
+        bin_indices = np.minimum((chosen_confidences * num_calibration_bins).astype(np.int64), num_calibration_bins - 1)
+        bin_counts = np.bincount(bin_indices, minlength=num_calibration_bins).astype(np.float64)
+        bin_confidence_sums = np.bincount(
+            bin_indices,
+            weights=chosen_confidences.astype(np.float64),
+            minlength=num_calibration_bins,
+        )
+        correctness = (valid_predictions == valid_targets).astype(np.float64)
+        bin_correct_sums = np.bincount(bin_indices, weights=correctness, minlength=num_calibration_bins)
+        non_empty_bins = bin_counts > 0
+        bin_accuracy = np.zeros(num_calibration_bins, dtype=np.float64)
+        bin_confidence = np.zeros(num_calibration_bins, dtype=np.float64)
+        bin_accuracy[non_empty_bins] = bin_correct_sums[non_empty_bins] / bin_counts[non_empty_bins]
+        bin_confidence[non_empty_bins] = bin_confidence_sums[non_empty_bins] / bin_counts[non_empty_bins]
+        expected_calibration_error = float(
+            np.sum((bin_counts / max(float(bin_counts.sum()), 1.0)) * np.abs(bin_accuracy - bin_confidence))
+        )
+
+        per_class_ece: list[float] = []
+        for class_id in range(num_classes):
+            class_scores = valid_probabilities[:, class_id]
+            class_bins = np.minimum((class_scores * num_calibration_bins).astype(np.int64), num_calibration_bins - 1)
+            class_bin_counts = np.bincount(class_bins, minlength=num_calibration_bins).astype(np.float64)
+            class_confidence_sums = np.bincount(
+                class_bins,
+                weights=class_scores.astype(np.float64),
+                minlength=num_calibration_bins,
+            )
+            class_positive_sums = np.bincount(
+                class_bins,
+                weights=(valid_targets == class_id).astype(np.float64),
+                minlength=num_calibration_bins,
+            )
+            class_non_empty = class_bin_counts > 0
+            class_positive_rate = np.zeros(num_calibration_bins, dtype=np.float64)
+            class_confidence = np.zeros(num_calibration_bins, dtype=np.float64)
+            class_positive_rate[class_non_empty] = (
+                class_positive_sums[class_non_empty] / class_bin_counts[class_non_empty]
+            )
+            class_confidence[class_non_empty] = class_confidence_sums[class_non_empty] / class_bin_counts[class_non_empty]
+            per_class_ece.append(
+                float(
+                    np.sum(
+                        (class_bin_counts / max(float(class_bin_counts.sum()), 1.0))
+                        * np.abs(class_positive_rate - class_confidence)
+                    )
+                )
+            )
+        per_class_expected_calibration_error = per_class_ece
+        ranking_metrics = per_class_ranking_metrics(valid_probabilities, valid_targets, num_classes)
+        per_class_pr_ap = ranking_metrics["pr_ap"]  # type: ignore[assignment]
+        per_class_pr_auc = ranking_metrics["pr_auc"]  # type: ignore[assignment]
+        per_class_roc_auc = ranking_metrics["roc_auc"]  # type: ignore[assignment]
+
+    return ClassificationMetrics(
+        accuracy=float(true_positives.sum() / max(total, 1.0)),
+        macro_precision=float(np.mean(precision)),
+        macro_recall=float(np.mean(recall)),
+        macro_f1=float(np.mean(f1)),
+        directional_macro_f1=directional_macro_f1,
+        weighted_f1=float(np.sum(f1 * support) / max(float(support.sum()), 1.0)),
+        balanced_accuracy=float(np.mean(recall)),
+        expected_calibration_error=expected_calibration_error,
+        per_class_expected_calibration_error=per_class_expected_calibration_error,
+        per_class_pr_ap=per_class_pr_ap,
+        per_class_pr_auc=per_class_pr_auc,
+        per_class_roc_auc=per_class_roc_auc,
+        per_class_precision=[float(value) for value in precision.tolist()],
+        per_class_recall=[float(value) for value in recall.tolist()],
+        per_class_f1=[float(value) for value in f1.tolist()],
+        confusion_matrix=[[int(value) for value in row] for row in confusion.tolist()],
+        normalized_confusion_matrix=[
+            [float(value) for value in row]
+            for row in normalized_confusion.tolist()
+        ],
+    )
 
 
 @dataclass(slots=True)
@@ -604,7 +758,7 @@ class PredictionOutputAccumulator:
                 "sample_index": np.asarray([], dtype=np.int64),
                 "targets": np.asarray([], dtype=np.int64),
                 "predictions": np.asarray([], dtype=np.int64),
-                "probabilities": np.empty((0, 0), dtype=np.float64),
+                "probabilities": np.empty((0, 0), dtype=np.float32),
             }
         probabilities = np.concatenate(self.probability_chunks, axis=0)
         targets = np.concatenate(self.target_chunks, axis=0).astype(np.int64, copy=False)
@@ -625,6 +779,10 @@ class EpochResult:
     train_metrics: ClassificationMetrics | None = None
     val_metrics: ClassificationMetrics | None = None
     test_metrics: ClassificationMetrics | None = None
+    val_threshold_metrics: dict[str, float] | None = None
+    test_threshold_metrics: dict[str, float] | None = None
+    val_argmax_metrics: ClassificationMetrics | None = None
+    test_argmax_metrics: ClassificationMetrics | None = None
     train_expert_usage: dict[str, Any] | None = None
     val_expert_usage: dict[str, Any] | None = None
     test_expert_usage: dict[str, Any] | None = None
@@ -655,13 +813,12 @@ class LobTrainer:
 
     def _monitor_value(self, result: EvaluationResult) -> float:
         """Return the configured validation monitor value."""
-        if self.config.monitor == "val_loss":
-            return result.loss
-        if self.config.monitor == "val_macro_f1":
-            return result.metrics.macro_f1
-        if self.config.monitor == "val_directional_macro_f1":
-            return result.metrics.directional_macro_f1
-        raise ValueError(f"Unsupported monitor: {self.config.monitor}")
+        return monitor_value(
+            loss=result.loss,
+            metrics=result.metrics,
+            monitor=self.config.monitor,
+            monitor_params=self.config.monitor_params,
+        )
 
     def _is_improvement(self, value: float, best_value: float) -> bool:
         """Compare a monitor value against the current best value."""

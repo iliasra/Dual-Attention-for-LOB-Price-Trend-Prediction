@@ -12,12 +12,14 @@ import yaml
 
 try:
     from configuration import ExperimentConfig
+    from monitoring import epoch_monitor_value, tailored_score_from_params
     from pr_metrics import (
         best_f1_threshold,
         per_class_ranking_metrics,
     )
 except ImportError:  # pragma: no cover
     from .configuration import ExperimentConfig
+    from .monitoring import epoch_monitor_value, tailored_score_from_params
     from .pr_metrics import (
         best_f1_threshold,
         per_class_ranking_metrics,
@@ -241,8 +243,18 @@ def save_run_config_snapshot(
             "monitor": {
                 "name": config.training.monitor,
                 "mode": config.training.monitor_mode,
+                "params": {
+                    "lambda_ece": config.training.monitor_params.lambda_ece,
+                    "lambda_rate": config.training.monitor_params.lambda_rate,
+                },
             },
             "training_sampling": sampling_summary or {"enabled": False},
+            "directional_thresholds": {
+                "enabled": config.training.directional_thresholds.enabled,
+                "min": config.training.directional_thresholds.min_threshold,
+                "max": config.training.directional_thresholds.max_threshold,
+                "step": config.training.directional_thresholds.step,
+            },
             "model_parameters": model_parameters or {},
             "fast_smoothing_lambdas": fast_smoothing_lambda_summary(config, preprocessing_metadata),
         }
@@ -270,6 +282,127 @@ def _class_metric_value(metrics: Any, metric_name: str, class_id: int | None) ->
     if values is None or class_id < 0 or class_id >= len(values):
         return ""
     return f"{float(values[class_id]):.10g}"
+
+
+def _tailored_metric_values(metrics: Any, config: ExperimentConfig, prefix: str) -> dict[str, str]:
+    """Return tailored monitor audit fields for one split."""
+    keys = (
+        "tailored_score",
+        "tailored_ece_dir",
+        "tailored_rate_penalty",
+        "pred_rate_down",
+        "true_rate_down",
+        "pred_rate_up",
+        "true_rate_up",
+    )
+    empty = {f"{prefix}_{key}": "" for key in keys}
+    if metrics is None or not config.training.monitor_params.complete:
+        return empty
+    try:
+        components = tailored_score_from_params(
+            metrics,
+            config.training.monitor_params,
+            label_mapping=config.data.label_mapping,
+        )
+    except ValueError:
+        return empty
+    return {
+        key: f"{float(value):.10g}"
+        for key, value in components.prefixed(prefix).items()
+    }
+
+
+THRESHOLD_METRIC_KEYS = (
+    "directional_macro_f1",
+    "macro_f1",
+    "accuracy",
+    "down_precision",
+    "down_recall",
+    "down_f1",
+    "up_precision",
+    "up_recall",
+    "up_f1",
+    "pred_rate_down",
+    "pred_rate_up",
+    "pred_rate_neutral",
+    "true_rate_down",
+    "true_rate_up",
+    "true_rate_neutral",
+)
+
+
+ARGMAX_ABLATION_METRIC_KEYS = (
+    "accuracy",
+    "macro_f1",
+    "directional_macro_f1",
+    "expected_calibration_error",
+    "down_precision",
+    "down_recall",
+    "down_f1",
+    "up_precision",
+    "up_recall",
+    "up_f1",
+    "pred_rate_down",
+    "pred_rate_up",
+    "pred_rate_neutral",
+    "true_rate_down",
+    "true_rate_up",
+    "true_rate_neutral",
+)
+
+
+def _threshold_metric_values(values: Any, prefix: str) -> dict[str, str]:
+    """Return thresholded metric fields for CSV/log output."""
+    empty = {f"{prefix}_threshold_{key}": "" for key in THRESHOLD_METRIC_KEYS}
+    if not isinstance(values, dict):
+        return empty
+    return {
+        f"{prefix}_threshold_{key}": "" if values.get(key) is None else f"{float(values[key]):.10g}"
+        for key in THRESHOLD_METRIC_KEYS
+    }
+
+
+def _argmax_ablation_metric_values(
+    metrics: Any,
+    prefix: str,
+    *,
+    down_class_id: int | None,
+    neutral_class_id: int | None,
+    up_class_id: int | None,
+) -> dict[str, str]:
+    """Return argmax ablation metric fields for CSV/log output."""
+    empty = {f"{prefix}_argmax_{key}": "" for key in ARGMAX_ABLATION_METRIC_KEYS}
+    if metrics is None:
+        return empty
+    values = {
+        "accuracy": _metric_value(metrics, "accuracy"),
+        "macro_f1": _metric_value(metrics, "macro_f1"),
+        "directional_macro_f1": _metric_value(metrics, "directional_macro_f1"),
+        "expected_calibration_error": _metric_value(metrics, "expected_calibration_error"),
+        "down_precision": _class_metric_value(metrics, "per_class_precision", down_class_id),
+        "down_recall": _class_metric_value(metrics, "per_class_recall", down_class_id),
+        "down_f1": _class_metric_value(metrics, "per_class_f1", down_class_id),
+        "up_precision": _class_metric_value(metrics, "per_class_precision", up_class_id),
+        "up_recall": _class_metric_value(metrics, "per_class_recall", up_class_id),
+        "up_f1": _class_metric_value(metrics, "per_class_f1", up_class_id),
+    }
+    confusion = getattr(metrics, "confusion_matrix", None)
+    if isinstance(confusion, list):
+        matrix = np.asarray(confusion, dtype=np.float64)
+        total = float(matrix.sum())
+        if matrix.ndim == 2 and total > 0.0:
+            for label, class_id in (
+                ("down", down_class_id),
+                ("up", up_class_id),
+                ("neutral", neutral_class_id),
+            ):
+                if class_id is None or not 0 <= int(class_id) < matrix.shape[0]:
+                    values[f"pred_rate_{label}"] = ""
+                    values[f"true_rate_{label}"] = ""
+                    continue
+                values[f"pred_rate_{label}"] = f"{float(matrix[:, int(class_id)].sum() / total):.10g}"
+                values[f"true_rate_{label}"] = f"{float(matrix[int(class_id), :].sum() / total):.10g}"
+    return {f"{prefix}_argmax_{key}": values.get(key, "") for key in ARGMAX_ABLATION_METRIC_KEYS}
 
 
 def _epoch_row(
@@ -325,6 +458,29 @@ def _epoch_row(
         row[f"{split}_roc_auc_down"] = _class_metric_value(metrics, "per_class_roc_auc", down_class_id)
         row[f"{split}_roc_auc_neutral"] = _class_metric_value(metrics, "per_class_roc_auc", neutral_class_id)
         row[f"{split}_roc_auc_up"] = _class_metric_value(metrics, "per_class_roc_auc", up_class_id)
+        if split == "val":
+            row.update(_tailored_metric_values(metrics, config, "val"))
+            row.update(_threshold_metric_values(getattr(result, "val_threshold_metrics", None), "val"))
+            row.update(
+                _argmax_ablation_metric_values(
+                    getattr(result, "val_argmax_metrics", None),
+                    "val",
+                    down_class_id=down_class_id,
+                    neutral_class_id=neutral_class_id,
+                    up_class_id=up_class_id,
+                )
+            )
+        if split == "test":
+            row.update(_threshold_metric_values(getattr(result, "test_threshold_metrics", None), "test"))
+            row.update(
+                _argmax_ablation_metric_values(
+                    getattr(result, "test_argmax_metrics", None),
+                    "test",
+                    down_class_id=down_class_id,
+                    neutral_class_id=neutral_class_id,
+                    up_class_id=up_class_id,
+                )
+            )
     return row
 
 
@@ -353,6 +509,21 @@ def _epoch_fieldnames(config: ExperimentConfig) -> list[str]:
                 f"{split}_roc_auc_up",
             ]
         )
+        if split == "val":
+            fieldnames.extend(
+                [
+                    "val_tailored_score",
+                    "val_tailored_ece_dir",
+                    "val_tailored_rate_penalty",
+                    "val_pred_rate_down",
+                    "val_true_rate_down",
+                    "val_pred_rate_up",
+                    "val_true_rate_up",
+                ]
+            )
+        if split in {"val", "test"}:
+            fieldnames.extend(f"{split}_threshold_{key}" for key in THRESHOLD_METRIC_KEYS)
+            fieldnames.extend(f"{split}_argmax_{key}" for key in ARGMAX_ABLATION_METRIC_KEYS)
     return fieldnames
 
 
@@ -386,13 +557,23 @@ def save_confusion_matrices(
     fold: str = "single",
 ) -> None:
     payload = {
-        "normalization": "Rows are true classes; columns are predicted classes. Normalized rows sum to 1 when support > 0.",
+        "normalization": (
+            "Rows are true classes; columns are predicted classes. Normalized rows sum to 1 when support > 0. "
+            "When directional thresholds are enabled, validation/test entries for the best epoch use thresholded "
+            "decisions; *_argmax_ablation entries keep the original softmax argmax decisions for comparison."
+        ),
         "folds": {
             fold: {
                 f"epoch_{epoch_index}": {
                     "train": _confusion_payload(getattr(result, "train_metrics", None)),
                     "validation": _confusion_payload(getattr(result, "val_metrics", None)),
                     "test": _confusion_payload(getattr(result, "test_metrics", None)),
+                    "validation_argmax_ablation": _confusion_payload(
+                        getattr(result, "val_argmax_metrics", None),
+                    ),
+                    "test_argmax_ablation": _confusion_payload(
+                        getattr(result, "test_argmax_metrics", None),
+                    ),
                 }
                 for epoch_index, result in enumerate(history, start=1)
             }
@@ -454,6 +635,15 @@ def prediction_outputs_to_frame(outputs: dict[str, Any], config: ExperimentConfi
             for class_id in predictions
         ],
     }
+    argmax_predictions = outputs.get("argmax_predictions")
+    if argmax_predictions is not None:
+        argmax_predictions_array = np.asarray(argmax_predictions, dtype=np.int64).reshape(-1)
+        if argmax_predictions_array.shape[0] != targets.shape[0]:
+            raise ValueError("argmax predictions and targets have inconsistent row counts.")
+        frame_payload["argmax_pred_label"] = [
+            labels[class_id] if 0 <= class_id < len(labels) else f"class_{class_id}"
+            for class_id in argmax_predictions_array
+        ]
     for class_id, label in enumerate(labels):
         column = f"p_{_safe_artifact_label(label)}"
         values = probabilities[:, class_id] if class_id < probabilities.shape[1] else np.zeros(targets.shape[0])
@@ -537,6 +727,16 @@ def save_best_pr_artifacts(
     }
 
 
+def save_directional_threshold_artifact(
+    payload: dict[str, Any],
+    target: Path,
+) -> None:
+    """Write selected directional thresholds to YAML."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
+
+
 def _expert_usage_payload(usage: Any) -> dict[str, Any] | None:
     if usage is None:
         return None
@@ -606,34 +806,62 @@ def _write_lambda_summary(handle: Any, summary: dict[str, Any]) -> None:
         handle.write("\n")
 
 
-def _monitor_value(result: Any, monitor: str) -> float:
-    if monitor == "val_loss":
-        return float(result.val_loss)
-    metrics = getattr(result, "val_metrics", None)
-    if metrics is None:
-        raise ValueError(f"Cannot compute {monitor} because validation metrics are unavailable.")
-    if monitor == "val_macro_f1":
-        return float(metrics.macro_f1)
-    if monitor == "val_directional_macro_f1":
-        return float(metrics.directional_macro_f1)
-    raise ValueError(f"Unsupported monitor: {monitor}")
+def _monitor_value(result: Any, config: ExperimentConfig) -> float:
+    return epoch_monitor_value(
+        result,
+        monitor=config.training.monitor,
+        monitor_params=config.training.monitor_params,
+        label_mapping=config.data.label_mapping,
+    )
 
 
-def _write_best_epoch_summary(handle: Any, history: list[Any], config: ExperimentConfig) -> None:
+def _write_best_epoch_summary(
+    handle: Any,
+    history: list[Any],
+    config: ExperimentConfig,
+    *,
+    selected_epoch: int | None = None,
+    selected_monitor_value: float | None = None,
+) -> None:
     handle.write("\nBest epoch\n")
     if not history:
         handle.write("status: unavailable\n")
         return
-    reverse = config.training.monitor_mode == "max"
-    best_index, best_result = sorted(
-        enumerate(history, start=1),
-        key=lambda item: _monitor_value(item[1], config.training.monitor),
-        reverse=reverse,
-    )[0]
-    best_monitor_value = _monitor_value(best_result, config.training.monitor)
+    if selected_epoch is None:
+        reverse = config.training.monitor_mode == "max"
+        best_index, best_result = sorted(
+            enumerate(history, start=1),
+            key=lambda item: _monitor_value(item[1], config),
+            reverse=reverse,
+        )[0]
+        best_monitor_value = _monitor_value(best_result, config)
+    else:
+        best_index = int(selected_epoch)
+        if not 1 <= best_index <= len(history):
+            raise ValueError("selected best epoch is outside the epoch history.")
+        best_result = history[best_index - 1]
+        best_monitor_value = (
+            float(selected_monitor_value)
+            if selected_monitor_value is not None
+            else _monitor_value(best_result, config)
+        )
     handle.write(f"monitor: {config.training.monitor}\n")
     handle.write(f"monitor_mode: {config.training.monitor_mode}\n")
+    if config.training.monitor_params.complete:
+        handle.write(f"monitor_lambda_ece: {config.training.monitor_params.lambda_ece:.10g}\n")
+        handle.write(f"monitor_lambda_rate: {config.training.monitor_params.lambda_rate:.10g}\n")
     handle.write(f"monitor_value: {best_monitor_value:.10g}\n")
+    monitor_metrics = getattr(best_result, "val_argmax_metrics", None) or getattr(best_result, "val_metrics", None)
+    if getattr(best_result, "val_argmax_metrics", None) is not None:
+        handle.write("monitor_metric_source: validation_argmax_before_thresholding\n")
+    if config.training.monitor == "tailored_score" and monitor_metrics is not None:
+        components = tailored_score_from_params(
+            monitor_metrics,
+            config.training.monitor_params,
+            label_mapping=config.data.label_mapping,
+        )
+        for key, value in components.prefixed("val").items():
+            handle.write(f"{key}: {value:.10g}\n")
     handle.write(f"epoch: {best_index}\n")
     handle.write(f"train_loss: {best_result.train_loss:.10g}\n")
     handle.write(f"val_loss: {best_result.val_loss:.10g}\n")
@@ -702,6 +930,10 @@ def save_run_log(
     pr_thresholds_path: Path | None = None,
     pr_curves_dir: Path | None = None,
     probabilities_dir: Path | None = None,
+    directional_thresholds_path: Path | None = None,
+    directional_threshold_summary: dict[str, Any] | None = None,
+    selected_best_epoch: int | None = None,
+    selected_monitor_value: float | None = None,
     preprocessing_metadata: dict[str, Any] | None = None,
     sampling_summary: dict[str, Any] | None = None,
     timing: dict[str, Any] | None = None,
@@ -724,6 +956,8 @@ def save_run_log(
             handle.write(f"PR curves directory: {pr_curves_dir}\n")
         if probabilities_dir is not None:
             handle.write(f"Probability outputs directory: {probabilities_dir}\n")
+        if directional_thresholds_path is not None:
+            handle.write(f"Directional thresholds: {directional_thresholds_path}\n")
         handle.write(f"Model directory: {config.training.model_dir}\n")
         handle.write(f"Best model path: {config.training.best_model_path}\n")
         if timing:
@@ -738,6 +972,35 @@ def save_run_log(
         handle.write("\nTraining monitor\n")
         handle.write(f"monitor: {config.training.monitor}\n")
         handle.write(f"monitor_mode: {config.training.monitor_mode}\n")
+        if config.training.monitor_params.complete:
+            handle.write(f"monitor_lambda_ece: {config.training.monitor_params.lambda_ece:.10g}\n")
+            handle.write(f"monitor_lambda_rate: {config.training.monitor_params.lambda_rate:.10g}\n")
+        handle.write("\nDirectional thresholds\n")
+        threshold_summary = directional_threshold_summary or {"enabled": False}
+        handle.write(f"enabled: {threshold_summary.get('enabled', False)}\n")
+        if threshold_summary.get("enabled"):
+            handle.write("classification_mode: directional_thresholds\n")
+            handle.write("argmax_ablation_columns: val_argmax_* and test_argmax_*\n")
+            handle.write(
+                "decision_scope: validation/test decision metrics, pred_label outputs, and confusion matrices "
+                "use thresholded decisions; PR/ROC/AP stay probability-ranking metrics.\n"
+            )
+            for key in (
+                "threshold_down",
+                "threshold_up",
+                "score",
+                "selection_split",
+                "selection_metric",
+                "tie_break",
+                "grid_min",
+                "grid_max",
+                "grid_step",
+                "n_candidates",
+            ):
+                if key in threshold_summary:
+                    handle.write(f"{key}: {threshold_summary[key]}\n")
+            if directional_thresholds_path is not None:
+                handle.write(f"artifact: {directional_thresholds_path}\n")
         handle.write("\nTraining sampling\n")
         _write_sampling_summary(handle, sampling_summary or {"enabled": False})
         handle.write("\nModel parameters\n")
@@ -754,13 +1017,20 @@ def save_run_log(
         for split, distribution in class_distributions.items():
             _write_class_distribution(handle, split, distribution)
 
-        _write_best_epoch_summary(handle, history, config)
+        _write_best_epoch_summary(
+            handle,
+            history,
+            config,
+            selected_epoch=selected_best_epoch,
+            selected_monitor_value=selected_monitor_value,
+        )
 
         handle.write("\nEpoch history\n")
-        handle.write(",".join(_epoch_fieldnames(config)) + "\n" if history else "")
+        epoch_fields = _epoch_fieldnames(config)
+        handle.write(",".join(epoch_fields) + "\n" if history else "")
         for epoch_index, result in enumerate(history, start=1):
             row = _epoch_row(epoch_index, result, fold, config)
-            handle.write(",".join(str(value) for value in row.values()) + "\n")
+            handle.write(",".join(str(row.get(field, "")) for field in epoch_fields) + "\n")
 
 
 def save_run_summary(summary: dict[str, Any], target: Path) -> None:

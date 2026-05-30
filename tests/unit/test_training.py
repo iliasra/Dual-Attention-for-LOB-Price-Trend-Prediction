@@ -15,6 +15,7 @@ from training import (
     LobTrainer,
     class_weights_from_class_counts,
     class_weights_from_sequence_labels,
+    classification_metrics_from_predictions,
 )
 
 
@@ -165,6 +166,47 @@ def test_lob_trainer_can_monitor_directional_macro_f1(
     _, history = trainer.fit(nn.Linear(1, 3), train_loader=[], val_loader=[])
 
     assert [result.val_metrics.directional_macro_f1 for result in history if result.val_metrics] == [0.1, 0.8, 0.4]
+    assert config.best_model_path.exists()
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_can_monitor_tailored_score(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config().training
+    config.epochs = 3
+    config.early_stopping_patience = 0
+    config.monitor = "tailored_score"
+    config.monitor_mode = "max"
+    config.monitor_params.lambda_ece = 0.5
+    config.monitor_params.lambda_rate = 0.5
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    train_metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_scores = iter([0.9, 0.85, 0.7])
+
+    def fake_train_epoch(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=0.25, metrics=train_metrics)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        model = kwargs["model"]
+        metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+        score = next(validation_scores)
+        with torch.no_grad():
+            model.bias.fill_(score)
+        metrics.directional_macro_f1 = score
+        metrics.per_class_expected_calibration_error = [0.1, 0.0, 0.1]
+        metrics.confusion_matrix = [[8, 1, 1], [1, 18, 1], [1, 1, 8]]
+        return EvaluationResult(loss=1.0, metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_run_epoch", fake_train_epoch)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    model, history = trainer.fit(nn.Linear(1, 3), train_loader=[], val_loader=[])
+
+    assert [result.val_metrics.directional_macro_f1 for result in history if result.val_metrics] == [0.9, 0.85, 0.7]
+    assert model.bias[0].item() == pytest.approx(0.9)
     assert config.best_model_path.exists()
 
 
@@ -352,3 +394,29 @@ def test_lob_trainer_evaluate_can_collect_probability_outputs() -> None:
     assert result.metrics.per_class_pr_ap == pytest.approx([1.0, 1.0, 1.0])
     assert result.metrics.per_class_pr_auc == pytest.approx([1.0, 1.0, 1.0])
     assert result.metrics.per_class_roc_auc == pytest.approx([1.0, 1.0, 1.0])
+
+
+def test_classification_metrics_from_predictions_uses_fixed_decisions() -> None:
+    targets = np.asarray([0, 2, 1])
+    predictions = np.asarray([0, 1, 1])
+    probabilities = np.asarray(
+        [
+            [0.7, 0.2, 0.1],
+            [0.2, 0.6, 0.2],
+            [0.1, 0.8, 0.1],
+        ],
+        dtype=np.float32,
+    )
+
+    metrics = classification_metrics_from_predictions(
+        targets,
+        predictions,
+        num_classes=3,
+        probabilities=probabilities,
+    )
+
+    assert metrics.confusion_matrix == [[1, 0, 0], [0, 1, 0], [0, 1, 0]]
+    assert metrics.accuracy == pytest.approx(2 / 3)
+    assert metrics.directional_macro_f1 == pytest.approx(0.5)
+    assert metrics.per_class_pr_ap is not None
+    assert metrics.per_class_roc_auc is not None

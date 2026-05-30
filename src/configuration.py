@@ -155,6 +155,10 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "early_stopping_patience": None,
         "monitor": None,
         "monitor_mode": None,
+        "monitor_params": {
+            "lambda_ece": None,
+            "lambda_rate": None,
+        },
         "persistent_workers": None,
         "learning_rate": None,
         "weight_decay": None,
@@ -166,6 +170,12 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "model_dir": None,
         "use_amp": None,
         "deterministic_torch": None,
+        "directional_thresholds": {
+            "enabled": None,
+            "min": None,
+            "max": None,
+            "step": None,
+        },
         "sampling": {
             "neutral_to_directional_ratio": None,
         },
@@ -178,6 +188,12 @@ OPTIONAL_CONFIG_KEYS = {
     "preprocessing.price_static.tau_clip",
     "preprocessing.price_static.tau_max",
     "model.max_dt",
+    "training.monitor_params",
+    "training.directional_thresholds",
+    "training.directional_thresholds.enabled",
+    "training.directional_thresholds.min",
+    "training.directional_thresholds.max",
+    "training.directional_thresholds.step",
     "training.sampling",
 }
 
@@ -191,7 +207,7 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.price_kinematic.reference": {"tick", "time"},
     "preprocessing.volume_kinematic.reference": {"tick", "time"},
     "model.rope_type": {"crope", "hybrid_crope", "hybrid-crope", "hybrid"},
-    "training.monitor": {"val_loss", "val_macro_f1", "val_directional_macro_f1"},
+    "training.monitor": {"val_loss", "val_macro_f1", "val_directional_macro_f1", "tailored_score"},
     "training.monitor_mode": {"min", "max"},
 }
 
@@ -1076,6 +1092,66 @@ class TrainingSamplingConfig:
 
 
 @dataclass(slots=True)
+class TrainingMonitorParamsConfig:
+    lambda_ece: float | None = None
+    lambda_rate: float | None = None
+
+    def __post_init__(self) -> None:
+        """Check optional custom monitor parameters."""
+        if self.lambda_ece is not None and self.lambda_ece < 0.0:
+            raise ValueError("training.monitor_params.lambda_ece must be >= 0.")
+        if self.lambda_rate is not None and self.lambda_rate < 0.0:
+            raise ValueError("training.monitor_params.lambda_rate must be >= 0.")
+
+    @property
+    def complete(self) -> bool:
+        """Whether all tailored_score parameters are present."""
+        return self.lambda_ece is not None and self.lambda_rate is not None
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingMonitorParamsConfig":
+        """Build custom monitor parameters from a YAML subsection."""
+        if payload is None:
+            return cls()
+        return cls(
+            lambda_ece=_optional_float(payload.get("lambda_ece")),
+            lambda_rate=_optional_float(payload.get("lambda_rate")),
+        )
+
+
+@dataclass(slots=True)
+class TrainingDirectionalThresholdConfig:
+    enabled: bool = False
+    min_threshold: float = 0.05
+    max_threshold: float = 0.95
+    step: float = 0.05
+
+    def __post_init__(self) -> None:
+        """Check optional post-training directional threshold settings."""
+        if not 0.0 <= self.min_threshold <= 1.0:
+            raise ValueError("training.directional_thresholds.min must be in [0, 1].")
+        if not 0.0 <= self.max_threshold <= 1.0:
+            raise ValueError("training.directional_thresholds.max must be in [0, 1].")
+        if self.min_threshold > self.max_threshold:
+            raise ValueError("training.directional_thresholds.min must be <= max.")
+        if self.step <= 0.0:
+            raise ValueError("training.directional_thresholds.step must be > 0.")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingDirectionalThresholdConfig":
+        """Build threshold settings from a YAML subsection."""
+        if payload is None:
+            return cls()
+        defaults = cls()
+        return cls(
+            enabled=bool(payload.get("enabled", False)),
+            min_threshold=float(payload.get("min", defaults.min_threshold)),
+            max_threshold=float(payload.get("max", defaults.max_threshold)),
+            step=float(payload.get("step", defaults.step)),
+        )
+
+
+@dataclass(slots=True)
 class TrainingConfig:
     device: str
     epochs: int
@@ -1085,6 +1161,7 @@ class TrainingConfig:
     early_stopping_patience: int
     monitor: str
     monitor_mode: str
+    monitor_params: TrainingMonitorParamsConfig
     persistent_workers: bool
     learning_rate: float
     weight_decay: float
@@ -1096,6 +1173,7 @@ class TrainingConfig:
     model_dir: str
     use_amp: bool
     deterministic_torch: bool
+    directional_thresholds: TrainingDirectionalThresholdConfig
     sampling: TrainingSamplingConfig
     class_weights: list[float] | None = None
 
@@ -1111,10 +1189,21 @@ class TrainingConfig:
             raise ValueError("training.early_stopping_patience must be >= 0.")
         self.monitor = self.monitor.lower()
         self.monitor_mode = self.monitor_mode.lower()
-        if self.monitor not in {"val_loss", "val_macro_f1", "val_directional_macro_f1"}:
-            raise ValueError("training.monitor must be one of val_loss, val_macro_f1, val_directional_macro_f1.")
+        if self.monitor not in {"val_loss", "val_macro_f1", "val_directional_macro_f1", "tailored_score"}:
+            raise ValueError(
+                "training.monitor must be one of val_loss, val_macro_f1, "
+                "val_directional_macro_f1, tailored_score."
+            )
         if self.monitor_mode not in {"min", "max"}:
             raise ValueError("training.monitor_mode must be 'min' or 'max'.")
+        if self.monitor == "tailored_score":
+            if self.monitor_mode != "max":
+                raise ValueError("training.monitor_mode must be 'max' when training.monitor is tailored_score.")
+            if not self.monitor_params.complete:
+                raise ValueError(
+                    "training.monitor_params.lambda_ece and training.monitor_params.lambda_rate "
+                    "must be set for tailored_score."
+                )
         if self.persistent_workers and self.num_workers == 0:
             raise ValueError("training.persistent_workers requires training.num_workers > 0.")
         if self.class_weight_beta < 0.0:
@@ -1166,6 +1255,7 @@ class TrainingConfig:
             early_stopping_patience=int(payload["early_stopping_patience"]),
             monitor=str(payload["monitor"]),
             monitor_mode=str(payload["monitor_mode"]),
+            monitor_params=TrainingMonitorParamsConfig.from_dict(payload.get("monitor_params")),
             persistent_workers=bool(payload["persistent_workers"]),
             learning_rate=float(payload["learning_rate"]),
             weight_decay=float(payload["weight_decay"]),
@@ -1177,6 +1267,9 @@ class TrainingConfig:
             model_dir=str(payload["model_dir"]),
             use_amp=bool(payload["use_amp"]),
             deterministic_torch=bool(payload["deterministic_torch"]),
+            directional_thresholds=TrainingDirectionalThresholdConfig.from_dict(
+                payload.get("directional_thresholds"),
+            ),
             sampling=TrainingSamplingConfig.from_dict(payload.get("sampling")),
         )
 
