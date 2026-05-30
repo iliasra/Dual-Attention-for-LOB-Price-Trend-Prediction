@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover
     from .utils import save_yaml
 
 ArrayLike = Union[float, int, np.ndarray, pd.Series]
-DerivativeScalingMethod = Literal["zscore", "robust_mad"]
+DerivativeScalingMethod = Literal["zscore", "robust_mad", "quantile_scaling"]
 DUMMY_PRICE_VALUES = [9999999999, -9999999999, 9999999999.0, -9999999999.0]
 DERIVATIVE_SCALING_EPS = 1e-8
 MAD_NORMAL_CONSISTENCY = 1.4826
@@ -127,7 +127,7 @@ def _zscore(series: pd.Series) -> ZScoreResult:
         std = float(series.std(ddof=0))
     return ZScoreResult((series - mean) / (std + DERIVATIVE_SCALING_EPS), mean, std)
 
-def _derivative_stats(series: pd.Series) -> DerivativeStats:
+def _derivative_stats(series: pd.Series, *, method: DerivativeScalingMethod = "robust_mad") -> DerivativeStats:
     values = pd.to_numeric(series, errors="coerce")
     finite_mask = np.isfinite(values)
     finite_values = values[finite_mask]
@@ -137,18 +137,35 @@ def _derivative_stats(series: pd.Series) -> DerivativeStats:
         mad = 0.0
         scale = 1.0
         scale_source = "empty"
+        q001 = 0.0
+        q999 = 0.0
     else:
         finite = finite_values.to_numpy(dtype=float, copy=False)
         median = float(np.median(finite))
         mad = float(np.median(np.abs(finite - median)))
-        scale = float(MAD_NORMAL_CONSISTENCY * mad)
-        scale_source = "mad"
-        if scale < DERIVATIVE_SCALING_EPS:
-            scale = float(np.std(finite))
-            scale_source = "std"
-        if scale < DERIVATIVE_SCALING_EPS:
-            scale = 1.0
-            scale_source = "unit"
+        std = float(np.std(finite))
+        q001 = float(finite_values.quantile(0.001))
+        q999 = float(finite_values.quantile(0.999))
+        if method == "quantile_scaling":
+            quantile_scale = (q999 - q001) / (2 * 3.090232306)  # 3.090232306 == cdf^-1(0.999)
+            if std >= quantile_scale:
+                scale = std
+                scale_source = "std"
+            else:
+                scale = float(quantile_scale)
+                scale_source = "quantile"
+            if scale < DERIVATIVE_SCALING_EPS:
+                scale = 1.0
+                scale_source = "unit"
+        else:
+            scale = float(MAD_NORMAL_CONSISTENCY * mad)
+            scale_source = "mad"
+            if scale < DERIVATIVE_SCALING_EPS:
+                scale = std
+                scale_source = "std"
+            if scale < DERIVATIVE_SCALING_EPS:
+                scale = 1.0
+                scale_source = "unit"
     return DerivativeStats(
         mean=zscore_result.mean,
         std=zscore_result.std,
@@ -156,16 +173,16 @@ def _derivative_stats(series: pd.Series) -> DerivativeStats:
         mad=mad,
         scale=scale,
         scale_source=scale_source,
-        q001=float(finite_values.quantile(0.001)),
-        q999=float(finite_values.quantile(0.999)),
+        q001=q001,
+        q999=q999,
         n_nan=int(values.isna().sum()),
         n_inf=int(np.isinf(values).sum()),
     )
 
 
 def _validate_derivative_scaling_method(method: str) -> DerivativeScalingMethod:
-    if method not in {"zscore", "robust_mad"}:
-        raise ValueError("Derivative scaling method must be 'zscore' or 'robust_mad'.")
+    if method not in {"zscore", "robust_mad", "quantile_scaling"}:
+        raise ValueError("Derivative scaling method must be 'zscore', 'robust_mad', or 'quantile_scaling'.")
     return method  # type: ignore[return-value]
 
 
@@ -181,11 +198,14 @@ def _scale_derivative_series(
 
     if "median" not in stats or "scale" not in stats:
         raise ValueError(
-            f"Derivative stats for column '{column}' do not contain robust_mad fields; "
+            f"Derivative stats for column '{column}' do not contain robust scaling fields; "
             "rerun preprocessing to refit derivative statistics."
         )
     scale = max(float(stats["scale"]), DERIVATIVE_SCALING_EPS)
-    return (series - float(stats["median"])) / scale
+    scaled = (series - float(stats["median"])) / scale
+    if method == "quantile_scaling":
+        return scaled.clip(-10.0, 10.0)
+    return scaled
 
 def _log1p(x: ArrayLike) -> pd.Series:
     return np.log1p(x)
@@ -1158,7 +1178,7 @@ class DerivativeNormalizer:
         concatenated = pd.concat(derivative_frames, axis=0, ignore_index=True)
         self.stats_ = {}
         for column in derivative_feature_columns(concatenated):
-            stats = _derivative_stats(concatenated[column])
+            stats = _derivative_stats(concatenated[column], method=self.method)
             self.stats_[column] = {
                 "mean": stats.mean,
                 "std": stats.std,

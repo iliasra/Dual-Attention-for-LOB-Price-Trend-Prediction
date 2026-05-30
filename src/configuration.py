@@ -206,7 +206,7 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.labels.strategy": {"smoothing", "triple_barrier"},
     "preprocessing.labels.smoothing.method": {"A", "B", "C"},
     "preprocessing.normalization.scope": {"train_only"},
-    "preprocessing.normalization.derivative_scaling_method": {"zscore", "robust_mad"},
+    "preprocessing.normalization.derivative_scaling_method": {"zscore", "robust_mad", "quantile_scaling"},
     "preprocessing.kinematic_tokenization.method": {"basis", "fast"},
     "preprocessing.price_kinematic.reference": {"tick", "time"},
     "preprocessing.volume_kinematic.reference": {"tick", "time"},

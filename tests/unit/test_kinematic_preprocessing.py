@@ -287,6 +287,27 @@ def test_derivative_normalizer_robust_mad_without_finite_values_uses_empty_scale
     assert stats["scale_source"] == "empty"
 
 
+def test_derivative_normalizer_quantile_scaling_uses_std_floor_and_clips() -> None:
+    artifact_dir = Path(__file__).resolve().parent / ".test_artifacts" / "derivative_normalizer_quantile"
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True)
+    stats_path = artifact_dir / "derivatives_stats.yaml"
+    train = pd.DataFrame({"price_kin_vel": np.linspace(-1.0, 1.0, 1001)})
+    test = pd.DataFrame({"price_kin_vel": [-100.0, 0.0, 100.0]})
+
+    normalizer = DerivativeNormalizer(stats_path, method="quantile_scaling").fit([train])
+    stats = DerivativeNormalizer.load_stats(stats_path)["price_kin_vel"]
+    quantile_scale = (float(stats["q999"]) - float(stats["q001"])) / (2 * 3.090232306)
+    expected_scale = max(float(np.std(train["price_kin_vel"].to_numpy(dtype=float))), quantile_scale)
+    normalized = normalizer.transform(test)
+
+    assert stats["median"] == 0.0
+    assert stats["scale_source"] == "std"
+    np.testing.assert_allclose(float(stats["scale"]), expected_scale)
+    np.testing.assert_allclose(normalized["price_kin_vel"], [-10.0, 0.0, 10.0])
+
+
 def test_static_centering_removes_touch_tick_symmetrically() -> None:
     price = pd.Series([101.0, 102.0, 100.0, 99.0])
     opposite_best = pd.Series([100.0, 100.0, 101.0, 101.0])
