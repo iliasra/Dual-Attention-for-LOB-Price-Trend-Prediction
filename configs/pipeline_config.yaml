@@ -171,8 +171,8 @@ training:
   persistent_workers: true
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
-  focal_gamma: 1.0
-  class_weight_beta: 0.25
+  focal_gamma: 0.5
+  class_weight_beta: 0.1
   class_weight_min: 0.5
   class_weight_max: 3.0
   grad_clip_norm: 1.0
@@ -185,4 +185,4 @@ training:
     max: 0.95
     step: 0.05
   sampling:
-    neutral_to_directional_ratio: 2.0 # downsampling of neutral class
+    neutral_to_directional_ratio: 8.0 # downsampling of neutral class
