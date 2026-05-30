@@ -774,18 +774,17 @@ def _validate_split_dates(
         context: Name included in validation error messages.
         train_dates: Dates assigned to the training split.
         validation_dates: Dates assigned to the validation split.
-        test_dates: Dates assigned to the test split.
+        test_dates: Dates assigned to the optional test split.
 
     Raises:
-        ValueError: If any split is empty, if a date appears in multiple splits, or
-            if train/validation/test dates are not strictly ordered.
+        ValueError: If train/validation is empty, if a date appears in multiple
+            splits, or if configured splits are not strictly ordered.
     """
     missing = [
         split_name
         for split_name, dates in (
             ("train_dates", train_dates),
             ("validation_dates", validation_dates),
-            ("test_dates", test_dates),
         )
         if not dates
     ]
@@ -811,7 +810,7 @@ def _validate_split_dates(
 
     if max(train_dates) >= min(validation_dates):
         raise ValueError(f"{context} must have train dates strictly before validation dates.")
-    if max(validation_dates) >= min(test_dates):
+    if test_dates and max(validation_dates) >= min(test_dates):
         raise ValueError(f"{context} must have validation dates strictly before test dates.")
 
 
@@ -825,7 +824,8 @@ class DatasetSplitConfig:
         """Check the configured dataset split dates.
 
         Raises:
-            ValueError: If split dates are empty, overlapping, or out of order.
+            ValueError: If train/validation dates are empty, overlapping, or out
+                of order.
         """
         _validate_split_dates(
             "dataset_splits",
@@ -855,8 +855,8 @@ class FoldConfig:
         """Check fold identifier and split dates.
 
         Raises:
-            ValueError: If the fold id is blank, or if split dates are empty,
-                overlapping, or out of order.
+            ValueError: If the fold id is blank, or if train/validation dates
+                are empty, overlapping, or out of order.
         """
         if not self.id.strip():
             raise ValueError("folds[].id must be a non-empty string.")
@@ -876,6 +876,11 @@ class FoldConfig:
             validation_dates=[str(value) for value in payload.get("validation_dates", [])],
             test_dates=[str(value) for value in payload.get("test_dates", [])],
         )
+
+    @property
+    def has_test_dates(self) -> bool:
+        """Return whether this fold declares an in-fold test split."""
+        return bool(self.test_dates)
 
     @classmethod
     def from_dataset_splits(cls, payload: DatasetSplitConfig) -> "FoldConfig":

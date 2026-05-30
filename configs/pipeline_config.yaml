@@ -25,6 +25,7 @@ dataset_splits:
   test_dates: ["2024-03-06"]
 
 # default behavior: uses folds
+# test_dates can be omitted or set to [] for folds validated against a final holdout later.
 folds:
   - id: fold_001
     train_dates: ["2024-03-04", "2024-03-05", "2024-03-06"]

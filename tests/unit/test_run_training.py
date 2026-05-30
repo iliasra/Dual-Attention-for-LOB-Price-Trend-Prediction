@@ -15,6 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from run_training import (
     build_train_sampler,
+    evaluate_best_model_on_validation_and_test_splits,
     fold_artifact_paths,
     resolve_class_weights,
     sequence_label_values,
@@ -22,6 +23,7 @@ from run_training import (
     train_fold,
 )
 from configuration import load_config
+from training import ClassificationMetrics, EpochResult, EvaluationResult
 
 
 @pytest.fixture()
@@ -109,6 +111,67 @@ def test_resolve_class_weights_can_use_sampled_class_counts() -> None:
     assert summary["source"] == "sampled_train_per_epoch"
     assert summary["counts"] == [1, 4, 1]
     assert config.training.class_weights == summary["weights"]
+
+
+def _dummy_metrics() -> ClassificationMetrics:
+    return ClassificationMetrics(
+        accuracy=1.0,
+        macro_precision=1.0,
+        macro_recall=1.0,
+        macro_f1=1.0,
+        directional_macro_f1=1.0,
+        weighted_f1=1.0,
+        balanced_accuracy=1.0,
+        expected_calibration_error=0.0,
+        per_class_expected_calibration_error=[0.0, 0.0, 0.0],
+        per_class_pr_ap=[1.0, 1.0, 1.0],
+        per_class_pr_auc=[1.0, 1.0, 1.0],
+        per_class_roc_auc=[1.0, 1.0, 1.0],
+        per_class_precision=[1.0, 1.0, 1.0],
+        per_class_recall=[1.0, 1.0, 1.0],
+        per_class_f1=[1.0, 1.0, 1.0],
+        confusion_matrix=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        normalized_confusion_matrix=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    )
+
+
+def test_best_model_evaluation_can_skip_missing_test_split() -> None:
+    class FakeTrainer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def evaluate(self, **kwargs: object) -> EvaluationResult:
+            self.calls.append(str(kwargs["description"]))
+            return EvaluationResult(
+                loss=0.25,
+                metrics=_dummy_metrics(),
+                prediction_outputs={
+                    "sample_index": np.asarray([0], dtype=np.int64),
+                    "targets": np.asarray([0], dtype=np.int64),
+                    "predictions": np.asarray([0], dtype=np.int64),
+                    "probabilities": np.asarray([[1.0, 0.0, 0.0]], dtype=np.float32),
+                },
+            )
+
+    config = load_config()
+    config.training.monitor = "val_loss"
+    config.training.monitor_mode = "min"
+    history = [EpochResult(train_loss=1.0, val_loss=0.5)]
+    trainer = FakeTrainer()
+
+    evaluation = evaluate_best_model_on_validation_and_test_splits(
+        config=config,
+        trainer=trainer,  # type: ignore[arg-type]
+        model=object(),
+        validation_loader=object(),  # type: ignore[arg-type]
+        test_loader=None,
+        history=history,
+    )
+
+    assert trainer.calls == ["Best epoch 1 [Validation artifacts]"]
+    assert evaluation["test_seconds"] is None
+    assert evaluation["test_outputs"] is None
+    assert history[0].test_loss is None
 
 
 def test_train_fold_rejects_missing_validation_sequences(

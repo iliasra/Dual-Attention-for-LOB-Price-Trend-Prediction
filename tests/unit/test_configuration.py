@@ -159,11 +159,12 @@ def test_fast_kinematic_config_values_are_loaded() -> None:
     assert config.preprocessing.kinematic_tokenization.n_df_candidates == 25
     assert config.preprocessing.price_kinematic.basis.alpha == 5.0
     assert config.preprocessing.price_kinematic.fast.n_basis == 20
-    assert config.preprocessing.price_kinematic.fast.df == 20.0
-    assert config.preprocessing.price_kinematic.fast.eval_at == 1.0
+    assert config.preprocessing.price_kinematic.fast.df == 12.0
+    assert config.preprocessing.price_kinematic.fast.eval_at == 0.95
     assert config.preprocessing.volume_kinematic.basis.alpha == 5.0
     assert config.preprocessing.volume_kinematic.fast.n_basis == 20
-    assert config.preprocessing.volume_kinematic.fast.df == 12.0
+    assert config.preprocessing.volume_kinematic.fast.df == 8.0
+    assert config.preprocessing.volume_kinematic.fast.eval_at == 0.95
 
 
 def test_price_static_plgs_train_fitted_config_values_are_loaded() -> None:
@@ -344,10 +345,19 @@ def test_adaptive_threshold_config_validates_non_negative_lambda(artifact_dir: P
 def test_explicit_folds_are_loaded() -> None:
     config = load_config()
 
-    assert [fold.id for fold in config.folds] == ["fold_001"]
+    assert [fold.id for fold in config.folds] == [
+        "fold_001",
+        "fold_002",
+        "fold_003",
+        "fold_004",
+        "fold_005",
+        "fold_006",
+    ]
     assert config.folds[0].train_dates == ["2024-03-04", "2024-03-05", "2024-03-06"]
     assert config.folds[0].validation_dates == ["2024-03-07"]
     assert config.folds[0].test_dates == ["2024-03-08"]
+    assert config.folds[-1].validation_dates == ["2024-03-14"]
+    assert config.folds[-1].test_dates == ["2024-03-15"]
 
 
 def test_folds_fallback_to_dataset_splits_when_missing(artifact_dir: Path) -> None:
@@ -365,6 +375,42 @@ def test_folds_fallback_to_dataset_splits_when_missing(artifact_dir: Path) -> No
     assert loaded.folds[0].train_dates == loaded.dataset_splits.train_dates
     assert loaded.folds[0].validation_dates == loaded.dataset_splits.validation_dates
     assert loaded.folds[0].test_dates == loaded.dataset_splits.test_dates
+
+
+def test_dataset_split_fallback_accepts_empty_test_dates(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload.pop("folds", None)
+    payload["dataset_splits"]["test_dates"] = []
+
+    config_path = artifact_dir / "single_fold_without_test.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.dataset_splits.test_dates == []
+    assert loaded.folds[0].test_dates == []
+    assert loaded.folds[0].has_test_dates is False
+
+
+def test_fold_config_accepts_missing_test_dates(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["folds"] = [
+        {
+            "id": "fold_without_test",
+            "train_dates": ["2012-06-21"],
+            "validation_dates": ["2012-06-22"],
+        }
+    ]
+
+    config_path = artifact_dir / "fold_without_test.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.folds[0].test_dates == []
+    assert loaded.folds[0].has_test_dates is False
 
 
 def test_fold_config_rejects_overlapping_split_dates(artifact_dir: Path) -> None:
@@ -405,7 +451,7 @@ def test_fold_config_requires_chronological_order(artifact_dir: Path) -> None:
         ExperimentConfig.from_yaml(config_path)
 
 
-def test_fold_config_requires_validation_and_test_dates(artifact_dir: Path) -> None:
+def test_fold_config_requires_validation_dates_but_allows_missing_test_dates(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
     payload["folds"] = [
@@ -420,7 +466,7 @@ def test_fold_config_requires_validation_and_test_dates(artifact_dir: Path) -> N
     config_path = artifact_dir / "missing_fold_validation_test.yaml"
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="validation_dates, test_dates"):
+    with pytest.raises(ValueError, match="validation_dates"):
         ExperimentConfig.from_yaml(config_path)
 
 

@@ -282,16 +282,17 @@ def evaluate_best_model_on_validation_and_test_splits(
     trainer: LobTrainer,
     model: Any,
     validation_loader: DataLoader,
-    test_loader: DataLoader,
+    test_loader: DataLoader | None,
     history: list[EpochResult],
 ) -> dict[str, Any]:
     """Evaluate and collect artifacts from the validation-selected model."""
     best_epoch, best_history, best_monitor_value = best_epoch_from_history(config, history)
+    test_message = "and on the held-out test split." if test_loader is not None else "with no fold test split."
     print(
         "Training uses train/validation splits only. "
         f"Evaluating best validation epoch {best_epoch} "
         f"({config.training.monitor}={best_monitor_value:.6f}) for validation artifacts "
-        "and on the held-out test split."
+        f"{test_message}"
     )
     validation_start = perf_counter()
     validation_result = trainer.evaluate(
@@ -317,58 +318,68 @@ def evaluate_best_model_on_validation_and_test_splits(
         f"({format_duration(validation_duration_seconds)})."
     )
 
-    test_start = perf_counter()
-    test_result = trainer.evaluate(
-        model=model,
-        data_loader=test_loader,
-        description=f"Best epoch {best_epoch} [Test]",
-        collect_outputs=True,
-    )
-    test_duration_seconds = perf_counter() - test_start
-    best_history.test_loss = test_result.loss
-    best_history.test_metrics = test_result.metrics
-    best_history.test_expert_usage = test_result.expert_usage
-    test_ece_down = mapped_class_metric(
-        config,
-        test_result.metrics,
-        -1,
-        "per_class_expected_calibration_error",
-    )
-    test_ece_neutral = mapped_class_metric(
-        config,
-        test_result.metrics,
-        0,
-        "per_class_expected_calibration_error",
-    )
-    test_ece_up = mapped_class_metric(
-        config,
-        test_result.metrics,
-        1,
-        "per_class_expected_calibration_error",
-    )
-    print(
-        f"Best epoch {best_epoch} test evaluation: "
-        f"test_loss={test_result.loss:.6f}, "
-        f"test_acc={test_result.metrics.accuracy:.4f}, "
-        f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
-        f"test_directional_macro_f1={test_result.metrics.directional_macro_f1:.4f}, "
-        f"test_ece={test_result.metrics.expected_calibration_error:.4f}, "
-        f"test_ece_down={format_optional_metric(test_ece_down)}, "
-        f"test_ece_neutral={format_optional_metric(test_ece_neutral)}, "
-        f"test_ece_up={format_optional_metric(test_ece_up)}, "
-        f"{roc_auc_summary(config, test_result.metrics, 'test')}, "
-        f"{pr_auc_summary(config, test_result.metrics, 'test')}, "
-        f"{pr_ap_summary(config, test_result.metrics, 'test')} "
-        f"({format_duration(test_duration_seconds)})."
-    )
+    test_duration_seconds: float | None = None
+    test_outputs = None
+    if test_loader is None:
+        best_history.test_loss = None
+        best_history.test_metrics = None
+        best_history.test_expert_usage = None
+        print(f"Best epoch {best_epoch} test evaluation skipped: fold has no configured test split.")
+    else:
+        test_start = perf_counter()
+        test_result = trainer.evaluate(
+            model=model,
+            data_loader=test_loader,
+            description=f"Best epoch {best_epoch} [Test]",
+            collect_outputs=True,
+        )
+        test_duration_seconds = perf_counter() - test_start
+        best_history.test_loss = test_result.loss
+        best_history.test_metrics = test_result.metrics
+        best_history.test_expert_usage = test_result.expert_usage
+        test_outputs = test_result.prediction_outputs
+        test_ece_down = mapped_class_metric(
+            config,
+            test_result.metrics,
+            -1,
+            "per_class_expected_calibration_error",
+        )
+        test_ece_neutral = mapped_class_metric(
+            config,
+            test_result.metrics,
+            0,
+            "per_class_expected_calibration_error",
+        )
+        test_ece_up = mapped_class_metric(
+            config,
+            test_result.metrics,
+            1,
+            "per_class_expected_calibration_error",
+        )
+        print(
+            f"Best epoch {best_epoch} test evaluation: "
+            f"test_loss={test_result.loss:.6f}, "
+            f"test_acc={test_result.metrics.accuracy:.4f}, "
+            f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
+            f"test_directional_macro_f1={test_result.metrics.directional_macro_f1:.4f}, "
+            f"test_ece={test_result.metrics.expected_calibration_error:.4f}, "
+            f"test_ece_down={format_optional_metric(test_ece_down)}, "
+            f"test_ece_neutral={format_optional_metric(test_ece_neutral)}, "
+            f"test_ece_up={format_optional_metric(test_ece_up)}, "
+            f"{roc_auc_summary(config, test_result.metrics, 'test')}, "
+            f"{pr_auc_summary(config, test_result.metrics, 'test')}, "
+            f"{pr_ap_summary(config, test_result.metrics, 'test')} "
+            f"({format_duration(test_duration_seconds)})."
+        )
+    total_seconds = validation_duration_seconds + (test_duration_seconds or 0.0)
     return {
         "best_epoch": best_epoch,
         "best_monitor_value": best_monitor_value,
         "validation_seconds": validation_duration_seconds,
         "test_seconds": test_duration_seconds,
-        "total_seconds": validation_duration_seconds + test_duration_seconds,
+        "total_seconds": total_seconds,
         "validation_outputs": validation_result.prediction_outputs,
-        "test_outputs": test_result.prediction_outputs,
+        "test_outputs": test_outputs,
     }
 
 
@@ -395,6 +406,7 @@ def train_fold(
     fold_result_dir: Path,
     run_stem: str,
     seed: int | None = None,
+    fold_has_test_split: bool | None = None,
 ) -> dict:
     fold_start = perf_counter()
     fold_seed = config.seed if seed is None else int(seed)
@@ -432,12 +444,20 @@ def train_fold(
             "Validation dates must be configured and preprocessed explicitly."
         )
 
-    test_dataset = build_dataset(fold_sequence_dir, "test", config.data.sequence_window)
-    if len(test_dataset) == 0:
-        raise ValueError(
-            f"No test sequences found in {fold_sequence_dir / 'test'}. "
-            "Test dates must be configured and preprocessed explicitly."
-        )
+    test_dataset: LOBDataset | None = None
+    if fold_has_test_split is False:
+        has_test_split = False
+        print(f"Fold '{fold_id}' has no configured test split; test evaluation will be skipped.")
+    else:
+        test_dataset = build_dataset(fold_sequence_dir, "test", config.data.sequence_window)
+        has_test_split = len(test_dataset) > 0 if fold_has_test_split is None else bool(fold_has_test_split)
+        if has_test_split and len(test_dataset) == 0:
+            raise ValueError(
+                f"No test sequences found in {fold_sequence_dir / 'test'}. "
+                "Test dates must be configured and preprocessed explicitly."
+            )
+        if not has_test_split:
+            print(f"Fold '{fold_id}' has no configured test split; test evaluation will be skipped.")
 
     max_dt_summary = resolve_model_max_dt(config, train_dataset)
     print(
@@ -488,7 +508,7 @@ def train_fold(
             train_dataset,
             batch_size=config.training.batch_size,
             sampler=train_sampler,
-            shuffle=False, # already shuffled during sampling
+            shuffle=False,  # already shuffled during sampling
             generator=torch_generator_from_seed(fold_seed),
             **loader_kwargs,
         )
@@ -498,11 +518,15 @@ def train_fold(
         shuffle=False,
         **loader_kwargs,
     )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config.training.eval_batch_size,
-        shuffle=False,
-        **loader_kwargs,
+    test_loader = (
+        DataLoader(
+            test_dataset,
+            batch_size=config.training.eval_batch_size,
+            shuffle=False,
+            **loader_kwargs,
+        )
+        if has_test_split and test_dataset is not None
+        else None
     )
 
     x_sample, _, _ = train_dataset[0]
@@ -511,14 +535,15 @@ def train_fold(
     class_distributions = {
         "train": class_distribution(train_dataset, config.model.num_classes),
         "validation": class_distribution(validation_dataset, config.model.num_classes),
-        "test": class_distribution(test_dataset, config.model.num_classes),
     }
+    if has_test_split and test_dataset is not None:
+        class_distributions["test"] = class_distribution(test_dataset, config.model.num_classes)
     if sampled_class_counts is not None:
         class_distributions["train_sampled_per_epoch"] = class_distribution_from_counts(sampled_class_counts)
     dataset_sizes = {
         "train": len(train_dataset),
         "validation": len(validation_dataset),
-        "test": len(test_dataset),
+        "test": len(test_dataset) if has_test_split and test_dataset is not None else 0,
     }
     if train_sampler is not None:
         dataset_sizes["train_sampled_per_epoch"] = len(train_sampler)
@@ -526,7 +551,7 @@ def train_fold(
         f"Fold '{fold_id}' dataset sizes: "
         f"train={dataset_sizes['train']}, "
         f"validation={dataset_sizes['validation']}, "
-        f"test={dataset_sizes['test']}."
+        f"test={dataset_sizes['test']}{'' if has_test_split else ' (skipped)'}."
     )
     save_run_config_snapshot(
         config,
@@ -550,11 +575,16 @@ def train_fold(
     )
     best_epoch = int(best_evaluation["best_epoch"])
     validation_probabilities_path = run_probabilities_dir / f"validation_best_epoch_{best_epoch}.csv"
-    test_probabilities_path = run_probabilities_dir / f"test_best_epoch_{best_epoch}.csv"
-    if best_evaluation["validation_outputs"] is None or best_evaluation["test_outputs"] is None:
-        raise RuntimeError("Best model evaluation did not collect probability outputs.")
+    test_probabilities_path = (
+        run_probabilities_dir / f"test_best_epoch_{best_epoch}.csv"
+        if best_evaluation["test_outputs"] is not None
+        else None
+    )
+    if best_evaluation["validation_outputs"] is None:
+        raise RuntimeError("Best model validation evaluation did not collect probability outputs.")
     save_probability_outputs(best_evaluation["validation_outputs"], validation_probabilities_path, config)
-    save_probability_outputs(best_evaluation["test_outputs"], test_probabilities_path, config)
+    if best_evaluation["test_outputs"] is not None and test_probabilities_path is not None:
+        save_probability_outputs(best_evaluation["test_outputs"], test_probabilities_path, config)
     pr_artifacts = save_best_pr_artifacts(
         best_evaluation["validation_outputs"],
         curves_dir=run_pr_curves_dir,
@@ -571,8 +601,12 @@ def train_fold(
         "model_fit_duration": format_duration(fit_duration_seconds),
         "best_validation_evaluation_seconds": round(best_evaluation["validation_seconds"], 6),
         "best_validation_evaluation_duration": format_duration(best_evaluation["validation_seconds"]),
-        "test_evaluation_seconds": round(best_evaluation["test_seconds"], 6),
-        "test_evaluation_duration": format_duration(best_evaluation["test_seconds"]),
+        "test_evaluation_seconds": (
+            None if best_evaluation["test_seconds"] is None else round(best_evaluation["test_seconds"], 6)
+        ),
+        "test_evaluation_duration": (
+            "skipped" if best_evaluation["test_seconds"] is None else format_duration(best_evaluation["test_seconds"])
+        ),
         "best_model_evaluation_seconds": round(best_evaluation["total_seconds"], 6),
         "best_model_evaluation_duration": format_duration(best_evaluation["total_seconds"]),
     }
@@ -608,7 +642,10 @@ def train_fold(
     )
     print(f"Fold {fold_id} run log saved to: {run_log_path}")
     print(f"Fold {fold_id} PR thresholds saved to: {run_pr_thresholds_path}")
-    print(f"Fold {fold_id} probability outputs saved to: {run_probabilities_dir}")
+    if test_probabilities_path is None:
+        print(f"Fold {fold_id} validation probability outputs saved to: {validation_probabilities_path}")
+    else:
+        print(f"Fold {fold_id} validation/test probability outputs saved to: {run_probabilities_dir}")
     for epoch_index, result in enumerate(history, start=1):
         test_suffix = "" if result.test_loss is None else f", test_loss={result.test_loss:.6f}"
         val_metrics = result.val_metrics
@@ -667,7 +704,7 @@ def train_fold(
             "pr_thresholds": str(run_pr_thresholds_path),
             "pr_curves_dir": str(run_pr_curves_dir),
             "validation_probabilities": str(validation_probabilities_path),
-            "test_probabilities": str(test_probabilities_path),
+            "test_probabilities": None if test_probabilities_path is None else str(test_probabilities_path),
         },
         "pr_artifacts": pr_artifacts,
     }
@@ -735,6 +772,7 @@ def main() -> None:
             fold_result_dir=paths["result_dir"],
             run_stem=run_stem,
             seed=fold_config.seed,
+            fold_has_test_split=fold.has_test_dates,
         )
         summary["folds"][fold.id] = fold_summary
 
