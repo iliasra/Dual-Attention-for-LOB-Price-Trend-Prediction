@@ -5,9 +5,6 @@
 *.o[0-9]*
 *.e[0-9]*
 
-# Scripts
-scripts/plot_confusion_matrices.py
-
 # Data
 data/*
 !data/.gitkeep 

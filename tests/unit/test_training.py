@@ -313,3 +313,42 @@ def test_lob_trainer_evaluate_collects_moe_expert_usage() -> None:
     assert usage["primary_counts"] == [2, 1, 1]
     assert usage["by_true_class"]["0"]["selected_counts"] == [1, 2, 1]
     assert usage["by_true_class"]["2"]["selected_counts"] == [1, 1, 2]
+
+
+def test_lob_trainer_evaluate_can_collect_probability_outputs() -> None:
+    class SimpleModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = nn.Parameter(torch.zeros(()))
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            del x, t
+            return torch.tensor(
+                [
+                    [4.0, 0.0, 0.0],
+                    [0.0, 4.0, 0.0],
+                    [0.0, 0.0, 4.0],
+                ]
+            )
+
+    config = load_config().training
+    config.device = "cpu"
+    config.class_weights = None
+    trainer = LobTrainer(config)
+    data_loader = [
+        (
+            torch.zeros((3, 2, 1)),
+            torch.zeros((3, 2)),
+            torch.tensor([0, 1, 2]),
+        )
+    ]
+
+    result = trainer.evaluate(SimpleModel(), data_loader, description="Probability output test", collect_outputs=True)
+
+    assert result.prediction_outputs is not None
+    assert result.prediction_outputs["probabilities"].shape == (3, 3)
+    assert result.prediction_outputs["probabilities"].dtype == np.float32
+    assert result.prediction_outputs["targets"].tolist() == [0, 1, 2]
+    assert result.metrics.per_class_pr_ap == pytest.approx([1.0, 1.0, 1.0])
+    assert result.metrics.per_class_pr_auc == pytest.approx([1.0, 1.0, 1.0])
+    assert result.metrics.per_class_roc_auc == pytest.approx([1.0, 1.0, 1.0])

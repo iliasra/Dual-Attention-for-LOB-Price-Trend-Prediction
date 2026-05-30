@@ -29,6 +29,8 @@ from run_logging import (
     save_confusion_matrices,
     save_epoch_history,
     save_expert_usage,
+    save_best_pr_artifacts,
+    save_probability_outputs,
     save_run_config_snapshot,
     save_run_log,
     save_run_summary,
@@ -231,6 +233,36 @@ def format_optional_metric(value: float | None) -> str:
     return "nan" if value is None else f"{value:.4f}"
 
 
+def pr_ap_summary(config: ExperimentConfig, metrics: Any, prefix: str) -> str:
+    """Format one-vs-rest PR-AP values for console logs."""
+    values = {
+        "down": mapped_class_metric(config, metrics, -1, "per_class_pr_ap"),
+        "neutral": mapped_class_metric(config, metrics, 0, "per_class_pr_ap"),
+        "up": mapped_class_metric(config, metrics, 1, "per_class_pr_ap"),
+    }
+    return ", ".join(f"{prefix}_pr_ap_{label}={format_optional_metric(value)}" for label, value in values.items())
+
+
+def pr_auc_summary(config: ExperimentConfig, metrics: Any, prefix: str) -> str:
+    """Format one-vs-rest PR-AUC values for console logs."""
+    values = {
+        "down": mapped_class_metric(config, metrics, -1, "per_class_pr_auc"),
+        "neutral": mapped_class_metric(config, metrics, 0, "per_class_pr_auc"),
+        "up": mapped_class_metric(config, metrics, 1, "per_class_pr_auc"),
+    }
+    return ", ".join(f"{prefix}_pr_auc_{label}={format_optional_metric(value)}" for label, value in values.items())
+
+
+def roc_auc_summary(config: ExperimentConfig, metrics: Any, prefix: str) -> str:
+    """Format one-vs-rest ROC-AUC values for console logs."""
+    values = {
+        "down": mapped_class_metric(config, metrics, -1, "per_class_roc_auc"),
+        "neutral": mapped_class_metric(config, metrics, 0, "per_class_roc_auc"),
+        "up": mapped_class_metric(config, metrics, 1, "per_class_roc_auc"),
+    }
+    return ", ".join(f"{prefix}_roc_auc_{label}={format_optional_metric(value)}" for label, value in values.items())
+
+
 def best_epoch_from_history(config: ExperimentConfig, history: list[EpochResult]) -> tuple[int, EpochResult, float]:
     """Select the best epoch using the configured validation monitor."""
     if not history:
@@ -244,28 +276,55 @@ def best_epoch_from_history(config: ExperimentConfig, history: list[EpochResult]
     return best_epoch, best_history, epoch_monitor_value(best_history, config.training.monitor)
 
 
-def evaluate_best_model_on_test_split(
+def evaluate_best_model_on_validation_and_test_splits(
     *,
     config: ExperimentConfig,
     trainer: LobTrainer,
     model: Any,
+    validation_loader: DataLoader,
     test_loader: DataLoader,
     history: list[EpochResult],
-) -> float:
-    """Evaluate the validation-selected model once on the held-out test split."""
+) -> dict[str, Any]:
+    """Evaluate and collect artifacts from the validation-selected model."""
     best_epoch, best_history, best_monitor_value = best_epoch_from_history(config, history)
     print(
         "Training uses train/validation splits only. "
         f"Evaluating best validation epoch {best_epoch} "
-        f"({config.training.monitor}={best_monitor_value:.6f}) on the held-out test split."
+        f"({config.training.monitor}={best_monitor_value:.6f}) for validation artifacts "
+        "and on the held-out test split."
     )
-    evaluation_start = perf_counter()
+    validation_start = perf_counter()
+    validation_result = trainer.evaluate(
+        model=model,
+        data_loader=validation_loader,
+        description=f"Best epoch {best_epoch} [Validation artifacts]",
+        collect_outputs=True,
+    )
+    validation_duration_seconds = perf_counter() - validation_start
+    best_history.val_loss = validation_result.loss
+    best_history.val_metrics = validation_result.metrics
+    best_history.val_expert_usage = validation_result.expert_usage
+    print(
+        f"Best epoch {best_epoch} validation evaluation: "
+        f"val_loss={validation_result.loss:.6f}, "
+        f"val_acc={validation_result.metrics.accuracy:.4f}, "
+        f"val_macro_f1={validation_result.metrics.macro_f1:.4f}, "
+        f"val_directional_macro_f1={validation_result.metrics.directional_macro_f1:.4f}, "
+        f"val_ece={validation_result.metrics.expected_calibration_error:.4f}, "
+        f"{roc_auc_summary(config, validation_result.metrics, 'val')}, "
+        f"{pr_auc_summary(config, validation_result.metrics, 'val')}, "
+        f"{pr_ap_summary(config, validation_result.metrics, 'val')} "
+        f"({format_duration(validation_duration_seconds)})."
+    )
+
+    test_start = perf_counter()
     test_result = trainer.evaluate(
         model=model,
         data_loader=test_loader,
         description=f"Best epoch {best_epoch} [Test]",
+        collect_outputs=True,
     )
-    evaluation_duration_seconds = perf_counter() - evaluation_start
+    test_duration_seconds = perf_counter() - test_start
     best_history.test_loss = test_result.loss
     best_history.test_metrics = test_result.metrics
     best_history.test_expert_usage = test_result.expert_usage
@@ -296,10 +355,21 @@ def evaluate_best_model_on_test_split(
         f"test_ece={test_result.metrics.expected_calibration_error:.4f}, "
         f"test_ece_down={format_optional_metric(test_ece_down)}, "
         f"test_ece_neutral={format_optional_metric(test_ece_neutral)}, "
-        f"test_ece_up={format_optional_metric(test_ece_up)} "
-        f"({format_duration(evaluation_duration_seconds)})."
+        f"test_ece_up={format_optional_metric(test_ece_up)}, "
+        f"{roc_auc_summary(config, test_result.metrics, 'test')}, "
+        f"{pr_auc_summary(config, test_result.metrics, 'test')}, "
+        f"{pr_ap_summary(config, test_result.metrics, 'test')} "
+        f"({format_duration(test_duration_seconds)})."
     )
-    return evaluation_duration_seconds
+    return {
+        "best_epoch": best_epoch,
+        "best_monitor_value": best_monitor_value,
+        "validation_seconds": validation_duration_seconds,
+        "test_seconds": test_duration_seconds,
+        "total_seconds": validation_duration_seconds + test_duration_seconds,
+        "validation_outputs": validation_result.prediction_outputs,
+        "test_outputs": test_result.prediction_outputs,
+    }
 
 
 def fold_artifact_paths(
@@ -342,6 +412,9 @@ def train_fold(
     run_losses_path = fold_log_dir / "metrics.csv"
     run_confusion_matrices_path = fold_log_dir / "confusion_matrices.yaml"
     run_expert_usage_path = fold_log_dir / "expert_usage.yaml"
+    run_pr_thresholds_path = fold_log_dir / "pr_thresholds.yaml"
+    run_pr_curves_dir = fold_log_dir / "pr_curves"
+    run_probabilities_dir = fold_log_dir / "probabilities"
     config.training.model_dir = str(fold_result_dir)
     preprocessing_metadata = load_preprocessing_metadata(fold_sequence_dir)
 
@@ -467,12 +540,28 @@ def train_fold(
     fit_start = perf_counter()
     model, history = trainer.fit(model, train_loader, validation_loader)
     fit_duration_seconds = perf_counter() - fit_start
-    test_evaluation_duration_seconds = evaluate_best_model_on_test_split(
+    best_evaluation = evaluate_best_model_on_validation_and_test_splits(
         trainer=trainer,
         config=config,
         model=model,
+        validation_loader=validation_loader,
         test_loader=test_loader,
         history=history,
+    )
+    best_epoch = int(best_evaluation["best_epoch"])
+    validation_probabilities_path = run_probabilities_dir / f"validation_best_epoch_{best_epoch}.csv"
+    test_probabilities_path = run_probabilities_dir / f"test_best_epoch_{best_epoch}.csv"
+    if best_evaluation["validation_outputs"] is None or best_evaluation["test_outputs"] is None:
+        raise RuntimeError("Best model evaluation did not collect probability outputs.")
+    save_probability_outputs(best_evaluation["validation_outputs"], validation_probabilities_path, config)
+    save_probability_outputs(best_evaluation["test_outputs"], test_probabilities_path, config)
+    pr_artifacts = save_best_pr_artifacts(
+        best_evaluation["validation_outputs"],
+        curves_dir=run_pr_curves_dir,
+        thresholds_path=run_pr_thresholds_path,
+        config=config,
+        best_epoch=best_epoch,
+        fold=fold_id,
     )
     fold_duration_seconds = perf_counter() - fold_start
     timing = {
@@ -480,8 +569,12 @@ def train_fold(
         "fold_training_duration": format_duration(fold_duration_seconds),
         "model_fit_seconds": round(fit_duration_seconds, 6),
         "model_fit_duration": format_duration(fit_duration_seconds),
-        "test_evaluation_seconds": round(test_evaluation_duration_seconds, 6),
-        "test_evaluation_duration": format_duration(test_evaluation_duration_seconds),
+        "best_validation_evaluation_seconds": round(best_evaluation["validation_seconds"], 6),
+        "best_validation_evaluation_duration": format_duration(best_evaluation["validation_seconds"]),
+        "test_evaluation_seconds": round(best_evaluation["test_seconds"], 6),
+        "test_evaluation_duration": format_duration(best_evaluation["test_seconds"]),
+        "best_model_evaluation_seconds": round(best_evaluation["total_seconds"], 6),
+        "best_model_evaluation_duration": format_duration(best_evaluation["total_seconds"]),
     }
 
     save_epoch_history(history, run_losses_path, config=config, fold=fold_id)
@@ -499,6 +592,9 @@ def train_fold(
         expert_usage_path=run_expert_usage_path,
         config_snapshot_path=run_config_path,
         model_parameters=model_parameters,
+        pr_thresholds_path=run_pr_thresholds_path,
+        pr_curves_dir=run_pr_curves_dir,
+        probabilities_dir=run_probabilities_dir,
         preprocessing_metadata=preprocessing_metadata,
         sampling_summary=sampling_summary,
         timing=timing,
@@ -511,6 +607,8 @@ def train_fold(
         f"Best model saved to: {config.training.best_model_path}"
     )
     print(f"Fold {fold_id} run log saved to: {run_log_path}")
+    print(f"Fold {fold_id} PR thresholds saved to: {run_pr_thresholds_path}")
+    print(f"Fold {fold_id} probability outputs saved to: {run_probabilities_dir}")
     for epoch_index, result in enumerate(history, start=1):
         test_suffix = "" if result.test_loss is None else f", test_loss={result.test_loss:.6f}"
         val_metrics = result.val_metrics
@@ -540,7 +638,10 @@ def train_fold(
                 f"val_ece={val_metrics.expected_calibration_error:.4f}, "
                 f"val_ece_down={format_optional_metric(val_ece_down)}, "
                 f"val_ece_neutral={format_optional_metric(val_ece_neutral)}, "
-                f"val_ece_up={format_optional_metric(val_ece_up)}"
+                f"val_ece_up={format_optional_metric(val_ece_up)}, "
+                f"{roc_auc_summary(config, val_metrics, 'val')}, "
+                f"{pr_auc_summary(config, val_metrics, 'val')}, "
+                f"{pr_ap_summary(config, val_metrics, 'val')}"
             )
         print(
             f"epoch {epoch_index}: train_loss={result.train_loss:.6f}, "
@@ -563,7 +664,12 @@ def train_fold(
             "metrics": str(run_losses_path),
             "confusion_matrices": str(run_confusion_matrices_path),
             "expert_usage": str(run_expert_usage_path),
+            "pr_thresholds": str(run_pr_thresholds_path),
+            "pr_curves_dir": str(run_pr_curves_dir),
+            "validation_probabilities": str(validation_probabilities_path),
+            "test_probabilities": str(test_probabilities_path),
         },
+        "pr_artifacts": pr_artifacts,
     }
 
 

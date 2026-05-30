@@ -7,12 +7,21 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import yaml
 
 try:
     from configuration import ExperimentConfig
+    from pr_metrics import (
+        best_f1_threshold,
+        per_class_ranking_metrics,
+    )
 except ImportError:  # pragma: no cover
     from .configuration import ExperimentConfig
+    from .pr_metrics import (
+        best_f1_threshold,
+        per_class_ranking_metrics,
+    )
 
 
 RUN_FILE_PATTERN = re.compile(r"^run_(\d+)(?:[._]|$)")
@@ -307,6 +316,15 @@ def _epoch_row(
             "per_class_expected_calibration_error",
             up_class_id,
         )
+        row[f"{split}_pr_ap_down"] = _class_metric_value(metrics, "per_class_pr_ap", down_class_id)
+        row[f"{split}_pr_ap_neutral"] = _class_metric_value(metrics, "per_class_pr_ap", neutral_class_id)
+        row[f"{split}_pr_ap_up"] = _class_metric_value(metrics, "per_class_pr_ap", up_class_id)
+        row[f"{split}_pr_auc_down"] = _class_metric_value(metrics, "per_class_pr_auc", down_class_id)
+        row[f"{split}_pr_auc_neutral"] = _class_metric_value(metrics, "per_class_pr_auc", neutral_class_id)
+        row[f"{split}_pr_auc_up"] = _class_metric_value(metrics, "per_class_pr_auc", up_class_id)
+        row[f"{split}_roc_auc_down"] = _class_metric_value(metrics, "per_class_roc_auc", down_class_id)
+        row[f"{split}_roc_auc_neutral"] = _class_metric_value(metrics, "per_class_roc_auc", neutral_class_id)
+        row[f"{split}_roc_auc_up"] = _class_metric_value(metrics, "per_class_roc_auc", up_class_id)
     return row
 
 
@@ -324,6 +342,15 @@ def _epoch_fieldnames(config: ExperimentConfig) -> list[str]:
                 f"{split}_ece_down",
                 f"{split}_ece_neutral",
                 f"{split}_ece_up",
+                f"{split}_pr_ap_down",
+                f"{split}_pr_ap_neutral",
+                f"{split}_pr_ap_up",
+                f"{split}_pr_auc_down",
+                f"{split}_pr_auc_neutral",
+                f"{split}_pr_auc_up",
+                f"{split}_roc_auc_down",
+                f"{split}_roc_auc_neutral",
+                f"{split}_roc_auc_up",
             ]
         )
     return fieldnames
@@ -383,6 +410,131 @@ def _class_label_names(config: ExperimentConfig) -> dict[str, str]:
         if 0 <= mapped_id < config.model.num_classes:
             labels[str(mapped_id)] = raw_label_names.get(int(raw_label), f"raw_{raw_label}")
     return labels
+
+
+def _ordered_class_labels(config: ExperimentConfig) -> list[str]:
+    """Return class labels ordered by model class id."""
+    labels = _class_label_names(config)
+    return [labels.get(str(class_id), f"class_{class_id}") for class_id in range(config.model.num_classes)]
+
+
+def _safe_artifact_label(label: str) -> str:
+    """Return a filesystem-safe class label for artifact filenames."""
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_") or "class"
+
+
+def prediction_outputs_to_frame(outputs: dict[str, Any], config: ExperimentConfig) -> pd.DataFrame:
+    """Convert collected model outputs to a probability CSV frame."""
+    probabilities = np.asarray(outputs.get("probabilities", []), dtype=np.float32)
+    targets = np.asarray(outputs.get("targets", []), dtype=np.int64).reshape(-1)
+    predictions = np.asarray(outputs.get("predictions", []), dtype=np.int64).reshape(-1)
+    sample_index = np.asarray(
+        outputs.get("sample_index", np.arange(targets.shape[0])),
+        dtype=np.int64,
+    ).reshape(-1)
+
+    if probabilities.ndim == 1 and probabilities.size == 0:
+        probabilities = np.empty((0, config.model.num_classes), dtype=np.float32)
+    if probabilities.ndim != 2:
+        raise ValueError("prediction probabilities must be a 2D array.")
+    if probabilities.shape[0] != targets.shape[0] or predictions.shape[0] != targets.shape[0]:
+        raise ValueError("prediction outputs have inconsistent row counts.")
+    if sample_index.shape[0] != targets.shape[0]:
+        raise ValueError("sample indices and targets have inconsistent row counts.")
+
+    labels = _ordered_class_labels(config)
+    frame_payload: dict[str, Any] = {
+        "sample_index": sample_index,
+        "true_label": [
+            labels[class_id] if 0 <= class_id < len(labels) else f"class_{class_id}"
+            for class_id in targets
+        ],
+        "pred_label": [
+            labels[class_id] if 0 <= class_id < len(labels) else f"class_{class_id}"
+            for class_id in predictions
+        ],
+    }
+    for class_id, label in enumerate(labels):
+        column = f"p_{_safe_artifact_label(label)}"
+        values = probabilities[:, class_id] if class_id < probabilities.shape[1] else np.zeros(targets.shape[0])
+        frame_payload[column] = values
+    return pd.DataFrame(frame_payload)
+
+
+def save_probability_outputs(outputs: dict[str, Any], target: Path, config: ExperimentConfig) -> None:
+    """Write collected post-softmax probabilities to CSV."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    prediction_outputs_to_frame(outputs, config).to_csv(target, index=False)
+
+
+def save_best_pr_artifacts(
+    validation_outputs: dict[str, Any],
+    *,
+    curves_dir: Path,
+    thresholds_path: Path,
+    config: ExperimentConfig,
+    best_epoch: int,
+    fold: str = "single",
+) -> dict[str, Any]:
+    """Write validation PR curves and max-F1 thresholds for the best epoch."""
+    probabilities = np.asarray(validation_outputs.get("probabilities", []), dtype=np.float32)
+    targets = np.asarray(validation_outputs.get("targets", []), dtype=np.int64).reshape(-1)
+    if probabilities.ndim == 1 and probabilities.size == 0:
+        probabilities = np.empty((0, config.model.num_classes), dtype=np.float32)
+    if probabilities.ndim != 2:
+        raise ValueError("validation probabilities must be a 2D array.")
+    if probabilities.shape[0] != targets.shape[0]:
+        raise ValueError("validation probabilities and targets have inconsistent row counts.")
+
+    labels = _ordered_class_labels(config)
+    ranking_metrics = per_class_ranking_metrics(
+        probabilities,
+        targets,
+        config.model.num_classes,
+        class_names=labels,
+        include_curves=True,
+    )
+    curves = ranking_metrics["pr_curves"]
+    pr_ap_values = ranking_metrics["pr_ap"]
+    pr_auc_values = ranking_metrics["pr_auc"]
+    roc_auc_values = ranking_metrics["roc_auc"]
+    curves_dir.mkdir(parents=True, exist_ok=True)
+    threshold_payload: dict[str, Any] = {
+        "description": "One-vs-rest thresholds selected on validation by maximizing F1.",
+        "fold": fold,
+        "split": "validation",
+        "best_epoch": int(best_epoch),
+        "selection_rule": "max_f1",
+        "classes": {},
+    }
+    curve_paths: dict[str, str] = {}
+    for class_id, label in enumerate(labels):
+        safe_label = _safe_artifact_label(label)
+        curve = curves[label]
+        curve_path = curves_dir / f"validation_best_epoch_{best_epoch}_{safe_label}.csv"
+        curve.to_csv(curve_path, index=False)
+        threshold = best_f1_threshold(curve)
+        threshold_payload["classes"][label] = {
+            "class_id": int(class_id),
+            "threshold": float(threshold["threshold"]),
+            "precision": float(threshold["precision"]),
+            "recall": float(threshold["recall"]),
+            "f1": float(threshold["f1"]),
+            "pr_ap": float(pr_ap_values[class_id]),
+            "pr_auc": float(pr_auc_values[class_id]),
+            "roc_auc": float(roc_auc_values[class_id]),
+            "curve_csv": str(curve_path),
+        }
+        curve_paths[label] = str(curve_path)
+
+    thresholds_path.parent.mkdir(parents=True, exist_ok=True)
+    with thresholds_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(threshold_payload, handle, sort_keys=False, allow_unicode=True)
+    return {
+        "thresholds": threshold_payload,
+        "thresholds_path": str(thresholds_path),
+        "curve_paths": curve_paths,
+    }
 
 
 def _expert_usage_payload(usage: Any) -> dict[str, Any] | None:
@@ -505,6 +657,15 @@ def _write_best_epoch_summary(handle: Any, history: list[Any], config: Experimen
             value = _class_metric_value(metrics, "per_class_expected_calibration_error", class_id)
             if value:
                 handle.write(f"{split}_ece_{label}: {value}\n")
+            pr_ap = _class_metric_value(metrics, "per_class_pr_ap", class_id)
+            if pr_ap:
+                handle.write(f"{split}_pr_ap_{label}: {pr_ap}\n")
+            pr_auc = _class_metric_value(metrics, "per_class_pr_auc", class_id)
+            if pr_auc:
+                handle.write(f"{split}_pr_auc_{label}: {pr_auc}\n")
+            roc_auc_value = _class_metric_value(metrics, "per_class_roc_auc", class_id)
+            if roc_auc_value:
+                handle.write(f"{split}_roc_auc_{label}: {roc_auc_value}\n")
 
 
 def _write_sampling_summary(handle: Any, summary: dict[str, Any]) -> None:
@@ -538,6 +699,9 @@ def save_run_log(
     expert_usage_path: Path,
     config_snapshot_path: Path,
     model_parameters: dict[str, int],
+    pr_thresholds_path: Path | None = None,
+    pr_curves_dir: Path | None = None,
+    probabilities_dir: Path | None = None,
     preprocessing_metadata: dict[str, Any] | None = None,
     sampling_summary: dict[str, Any] | None = None,
     timing: dict[str, Any] | None = None,
@@ -554,6 +718,12 @@ def save_run_log(
         handle.write(f"Loss and metrics CSV: {losses_path}\n")
         handle.write(f"Confusion matrices: {confusion_matrices_path}\n")
         handle.write(f"Expert usage: {expert_usage_path}\n")
+        if pr_thresholds_path is not None:
+            handle.write(f"PR thresholds: {pr_thresholds_path}\n")
+        if pr_curves_dir is not None:
+            handle.write(f"PR curves directory: {pr_curves_dir}\n")
+        if probabilities_dir is not None:
+            handle.write(f"Probability outputs directory: {probabilities_dir}\n")
         handle.write(f"Model directory: {config.training.model_dir}\n")
         handle.write(f"Best model path: {config.training.best_model_path}\n")
         if timing:

@@ -13,9 +13,11 @@ from tqdm import tqdm
 
 try:
     from configuration import TrainingConfig, load_config
+    from pr_metrics import per_class_ranking_metrics
     from run_logging import format_duration
 except ImportError:  # pragma: no cover
     from .configuration import TrainingConfig, load_config
+    from .pr_metrics import per_class_ranking_metrics
     from .run_logging import format_duration
 
 
@@ -100,6 +102,9 @@ class ClassificationMetrics:
     balanced_accuracy: float
     expected_calibration_error: float
     per_class_expected_calibration_error: list[float]
+    per_class_pr_ap: list[float] | None
+    per_class_pr_auc: list[float] | None
+    per_class_roc_auc: list[float] | None
     per_class_precision: list[float]
     per_class_recall: list[float]
     per_class_f1: list[float]
@@ -112,6 +117,7 @@ class EvaluationResult:
     loss: float
     metrics: ClassificationMetrics
     expert_usage: dict[str, Any] | None = None
+    prediction_outputs: dict[str, Any] | None = None
 
 
 class ExpertUsageAccumulator:
@@ -315,9 +321,16 @@ class ExpertUsageAccumulator:
 
 
 class ClassificationMetricAccumulator:
-    def __init__(self, device: torch.device, num_calibration_bins: int = 15) -> None:
+    def __init__(
+        self,
+        device: torch.device,
+        num_calibration_bins: int = 15,
+        *,
+        track_pr_metrics: bool = False,
+    ) -> None:
         self.device = device
         self.num_calibration_bins = num_calibration_bins
+        self.track_pr_metrics = bool(track_pr_metrics)
         self.num_classes: int | None = None
         self.confusion_matrix: torch.Tensor | None = None
         self.calibration_bin_counts: torch.Tensor | None = None
@@ -326,6 +339,8 @@ class ClassificationMetricAccumulator:
         self.class_calibration_bin_counts: torch.Tensor | None = None
         self.class_calibration_confidence_sums: torch.Tensor | None = None
         self.class_calibration_positive_sums: torch.Tensor | None = None
+        self.pr_probability_chunks: list[np.ndarray] = []
+        self.pr_target_chunks: list[np.ndarray] = []
 
     @staticmethod
     def _zero_metrics(num_classes: int = 0) -> ClassificationMetrics:
@@ -339,6 +354,9 @@ class ClassificationMetricAccumulator:
             balanced_accuracy=0.0,
             expected_calibration_error=0.0,
             per_class_expected_calibration_error=[0.0] * num_classes,
+            per_class_pr_ap=None,
+            per_class_pr_auc=None,
+            per_class_roc_auc=None,
             per_class_precision=[0.0] * num_classes,
             per_class_recall=[0.0] * num_classes,
             per_class_f1=[0.0] * num_classes,
@@ -417,8 +435,12 @@ class ClassificationMetricAccumulator:
             minlength=self.num_calibration_bins,
         )
 
-        valid_probabilities = probabilities[valid_mask].to(torch.float64)
+        valid_probabilities = probabilities[valid_mask]
         valid_targets = targets[valid_mask].long()
+        if self.track_pr_metrics:
+            self.pr_probability_chunks.append(valid_probabilities.detach().cpu().numpy().astype(np.float32, copy=False))
+            self.pr_target_chunks.append(valid_targets.detach().cpu().numpy())
+        valid_probabilities = valid_probabilities.to(torch.float64)
         class_bin_indices = torch.clamp(
             (valid_probabilities * self.num_calibration_bins).long(),
             max=self.num_calibration_bins - 1,
@@ -519,6 +541,16 @@ class ClassificationMetricAccumulator:
                 class_bin_weights * torch.abs(class_bin_positive_rate - class_bin_confidence),
                 dim=1,
             )
+        per_class_pr_ap = None
+        per_class_pr_auc_values = None
+        per_class_roc_auc_values = None
+        if self.track_pr_metrics and self.pr_probability_chunks and self.pr_target_chunks:
+            pr_probabilities = np.concatenate(self.pr_probability_chunks, axis=0)
+            pr_targets = np.concatenate(self.pr_target_chunks, axis=0)
+            ranking_metrics = per_class_ranking_metrics(pr_probabilities, pr_targets, int(confusion.shape[0]))
+            per_class_pr_ap = ranking_metrics["pr_ap"]  # type: ignore[assignment]
+            per_class_pr_auc_values = ranking_metrics["pr_auc"]  # type: ignore[assignment]
+            per_class_roc_auc_values = ranking_metrics["roc_auc"]  # type: ignore[assignment]
 
         return ClassificationMetrics(
             accuracy=float(accuracy.item()),
@@ -532,6 +564,9 @@ class ClassificationMetricAccumulator:
             per_class_expected_calibration_error=[
                 float(value) for value in per_class_expected_calibration_error.detach().cpu().tolist()
             ],
+            per_class_pr_ap=per_class_pr_ap,
+            per_class_pr_auc=per_class_pr_auc_values,
+            per_class_roc_auc=per_class_roc_auc_values,
             per_class_precision=[float(value) for value in precision.detach().cpu().tolist()],
             per_class_recall=[float(value) for value in recall.detach().cpu().tolist()],
             per_class_f1=[float(value) for value in f1.detach().cpu().tolist()],
@@ -544,6 +579,42 @@ class ClassificationMetricAccumulator:
                 for row in normalized_confusion.detach().cpu().tolist()
             ],
         )
+
+
+class PredictionOutputAccumulator:
+    """Collect evaluation outputs for probability and PR artifacts."""
+
+    def __init__(self) -> None:
+        self.probability_chunks: list[np.ndarray] = []
+        self.target_chunks: list[np.ndarray] = []
+        self.prediction_chunks: list[np.ndarray] = []
+
+    def update(self, logits: torch.Tensor, targets: torch.Tensor) -> None:
+        """Collect post-softmax probabilities and labels for one batch."""
+        probabilities = torch.softmax(logits.detach().float(), dim=-1)
+        predictions = torch.argmax(probabilities, dim=-1)
+        self.probability_chunks.append(probabilities.cpu().numpy().astype(np.float32, copy=False))
+        self.target_chunks.append(targets.detach().to("cpu", dtype=torch.long).numpy())
+        self.prediction_chunks.append(predictions.cpu().numpy())
+
+    def compute(self) -> dict[str, Any]:
+        """Return concatenated prediction outputs for artifact logging."""
+        if not self.probability_chunks:
+            return {
+                "sample_index": np.asarray([], dtype=np.int64),
+                "targets": np.asarray([], dtype=np.int64),
+                "predictions": np.asarray([], dtype=np.int64),
+                "probabilities": np.empty((0, 0), dtype=np.float64),
+            }
+        probabilities = np.concatenate(self.probability_chunks, axis=0)
+        targets = np.concatenate(self.target_chunks, axis=0).astype(np.int64, copy=False)
+        predictions = np.concatenate(self.prediction_chunks, axis=0).astype(np.int64, copy=False)
+        return {
+            "sample_index": np.arange(targets.shape[0], dtype=np.int64),
+            "targets": targets,
+            "predictions": predictions,
+            "probabilities": probabilities,
+        }
 
 
 @dataclass(slots=True)
@@ -742,13 +813,16 @@ class LobTrainer:
         data_loader: Iterable,
         criterion: nn.Module | None = None,
         description: str = "Validation",
+        *,
+        collect_outputs: bool = False,
     ) -> EvaluationResult:
         model.eval()
         criterion = criterion or self._criterion()
         total_loss = 0.0
         batch_count = 0
-        metrics = ClassificationMetricAccumulator(device=self.device)
+        metrics = ClassificationMetricAccumulator(device=self.device, track_pr_metrics=True)
         expert_usage = ExpertUsageAccumulator()
+        prediction_outputs = PredictionOutputAccumulator() if collect_outputs else None
 
         with torch.no_grad():
             for x_batch, t_batch, y_batch in tqdm(data_loader, desc=description):
@@ -759,6 +833,8 @@ class LobTrainer:
                 logits = model(x_batch, t_batch)
                 total_loss += float(criterion(logits, y_batch).item())
                 metrics.update(logits, y_batch)
+                if prediction_outputs is not None:
+                    prediction_outputs.update(logits, y_batch)
                 expert_usage.update(
                     getattr(model, "moe_routing", None),
                     y_batch,
@@ -770,6 +846,7 @@ class LobTrainer:
             loss=total_loss / max(batch_count, 1),
             metrics=metrics.compute(),
             expert_usage=expert_usage.compute(),
+            prediction_outputs=None if prediction_outputs is None else prediction_outputs.compute(),
         )
 
 
