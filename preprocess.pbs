@@ -1,0 +1,116 @@
+#!/bin/bash
+#PBS -N lob_preprocess
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ncpus=8:mem=64gb:ompthreads=8
+
+set -euo pipefail
+SCRIPT_START_EPOCH="$(date +%s)"
+
+PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
+WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
+FOLDS_FILE="$PROJECT_DIR/configs/folds.txt"
+LAMBDA_CACHE_DIR="${LAMBDA_CACHE_DIR:-$PROJECT_DIR/data/gcv_cache}"
+OUTPUT_ROOT="$PROJECT_DIR"
+
+format_duration() {
+  total_seconds="$1"
+  hours=$((total_seconds / 3600))
+  minutes=$(((total_seconds % 3600) / 60))
+  seconds=$((total_seconds % 60))
+  if [ "$hours" -gt 0 ]; then
+    printf "%dh %02dm %02ds" "$hours" "$minutes" "$seconds"
+  elif [ "$minutes" -gt 0 ]; then
+    printf "%dm %02ds" "$minutes" "$seconds"
+  else
+    printf "%ds" "$seconds"
+  fi
+}
+
+finish() {
+  status=$?
+  end_epoch="$(date +%s)"
+  elapsed=$((end_epoch - SCRIPT_START_EPOCH))
+  duration="$(format_duration "$elapsed")"
+  echo
+  echo "===== FINISHING PREPROCESS JOB ====="
+  echo "Exit status=$status"
+  echo "Total runtime=$duration (${elapsed}s)"
+  exit "$status"
+}
+
+copy_fold_outputs() {
+  fold_id="$1"
+
+  echo "===== COPYING OUTPUTS BACK FOR $fold_id ====="
+  mkdir -p "$OUTPUT_ROOT/data/sequences/$fold_id"
+  mkdir -p "$OUTPUT_ROOT/data/derivatives_z_scores/$fold_id"
+
+  rsync -a "$WORK_DIR/data/sequences/$fold_id/" \
+    "$OUTPUT_ROOT/data/sequences/$fold_id/"
+
+  if [ -d "$WORK_DIR/data/processed_dataframes/$fold_id" ]; then
+    mkdir -p "$OUTPUT_ROOT/data/processed_dataframes/$fold_id"
+    rsync -a "$WORK_DIR/data/processed_dataframes/$fold_id/" \
+      "$OUTPUT_ROOT/data/processed_dataframes/$fold_id/"
+  else
+    echo "No processed dataframe CSV directory to copy for $fold_id (save_processed_dataframes=false)."
+  fi
+
+  rsync -a "$WORK_DIR/data/derivatives_z_scores/$fold_id/" \
+    "$OUTPUT_ROOT/data/derivatives_z_scores/$fold_id/"
+}
+
+trap finish EXIT
+
+if [ ! -f "$FOLDS_FILE" ]; then
+  echo "Fold list not found: $FOLDS_FILE" >&2
+  exit 1
+fi
+
+mapfile -t FOLD_IDS < <(awk 'NF && $1 !~ /^#/ { print $1 }' "$FOLDS_FILE")
+FOLD_COUNT="${#FOLD_IDS[@]}"
+
+if [ "$FOLD_COUNT" -eq 0 ]; then
+  echo "No fold id found in $FOLDS_FILE." >&2
+  exit 1
+fi
+
+echo "===== PREPROCESS SEQUENTIAL JOB ====="
+echo "PBS_JOBID=${PBS_JOBID:-}"
+echo "FOLDS_FILE=$FOLDS_FILE"
+echo "FOLD_COUNT=$FOLD_COUNT"
+echo "FOLDS=${FOLD_IDS[*]}"
+echo "TMPDIR=$TMPDIR"
+echo "OUTPUT_ROOT=$OUTPUT_ROOT"
+
+ml purge
+
+set +u
+eval "$($HOME/miniforge3/bin/conda shell.bash hook)"
+conda activate transformer
+set -u
+
+# Avoid accidental uncontrolled oversubscription.
+export OMP_NUM_THREADS=8
+export MKL_NUM_THREADS=8
+export OPENBLAS_NUM_THREADS=8
+export NUMEXPR_NUM_THREADS=8
+
+echo "===== COPYING PROJECT TO TMPDIR ====="
+cp -r "$PROJECT_DIR" "$TMPDIR/"
+cd "$WORK_DIR"
+
+for fold_id in "${FOLD_IDS[@]}"; do
+  echo
+  echo "===== RUNNING PREPROCESSING FOR $fold_id ====="
+  PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" \
+  python scripts/process_data.py \
+    --fold-id "$fold_id" \
+    --lambda-cache-dir "$LAMBDA_CACHE_DIR" \
+    --require-lambda-cache
+
+  copy_fold_outputs "$fold_id"
+  echo "===== DONE $fold_id ====="
+done
+
+echo "===== ALL PREPROCESS FOLDS COMPLETED OK ====="
