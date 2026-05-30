@@ -190,6 +190,36 @@ def test_model_max_dt_quantile_is_loaded_and_max_dt_is_resolved_later() -> None:
     assert config.model.max_dt is None
 
 
+def test_model_max_dt_can_be_loaded_when_present(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["model"]["max_dt"] = 1.25
+
+    config_path = artifact_dir / "resolved_model_max_dt.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.model.max_dt == 1.25
+
+
+def test_config_loader_accepts_run_metadata_snapshot_section(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["run_metadata"] = {
+        "model_max_dt": {
+            "quantile": 95.0,
+            "resolved_max_dt": 1.5,
+        },
+        "class_weights": [1.0, 1.0, 1.0],
+    }
+
+    config_path = artifact_dir / "snapshot_config.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.path == config_path.resolve()
+
+
 def test_model_max_dt_quantile_is_validated(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))

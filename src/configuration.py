@@ -133,6 +133,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "feature_sigma": None,
         "num_heads": None,
         "max_dt_quantile": None,
+        "max_dt": None,
         "num_experts": None,
         "top_k": None,
         "num_classes": None,
@@ -171,11 +172,12 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
     },
 }
 
-OPTIONAL_TOP_LEVEL_KEYS = {"folds"}
+OPTIONAL_TOP_LEVEL_KEYS = {"folds", "run_metadata"}
 OPTIONAL_CONFIG_KEYS = {
     "preprocessing.labels.smoothing.adaptive_threshold",
     "preprocessing.price_static.tau_clip",
     "preprocessing.price_static.tau_max",
+    "model.max_dt",
     "training.sampling",
 }
 
@@ -1026,6 +1028,7 @@ class ModelConfig:
             moe_load_balancing_weight=float(payload["moe_load_balancing_weight"]),
             classifier_dropout=float(payload["classifier_dropout"]),
             max_dt_quantile=float(_require_explicit_value(payload["max_dt_quantile"], "model.max_dt_quantile")),
+            max_dt=_optional_float(payload.get("max_dt")),
         )
 
     def resolved_d_input(self, inferred_feature_count: int | None = None) -> int:
