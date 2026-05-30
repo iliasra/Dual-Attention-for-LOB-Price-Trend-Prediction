@@ -42,7 +42,7 @@ folds:
   - id: fold_004
     train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11"]
     validation_dates: ["2024-03-12", "2024-03-13"]
-    test_dates: []
+    test_dates: ["2024-03-14", "2024-03-15"]
 
 preprocessing:
   snapshot_window: 100
