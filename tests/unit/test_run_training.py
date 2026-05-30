@@ -7,6 +7,7 @@ import shutil
 import numpy as np
 import pytest
 
+pytest.importorskip("torch")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -139,9 +140,17 @@ def test_best_model_evaluation_can_skip_missing_test_split() -> None:
     class FakeTrainer:
         def __init__(self) -> None:
             self.calls: list[str] = []
+            self.flags: list[tuple[bool, bool, bool]] = []
 
         def evaluate(self, **kwargs: object) -> EvaluationResult:
             self.calls.append(str(kwargs["description"]))
+            self.flags.append(
+                (
+                    bool(kwargs.get("collect_outputs", False)),
+                    bool(kwargs.get("track_pr_metrics", False)),
+                    bool(kwargs.get("track_expert_usage", False)),
+                )
+            )
             return EvaluationResult(
                 loss=0.25,
                 metrics=_dummy_metrics(),
@@ -169,6 +178,7 @@ def test_best_model_evaluation_can_skip_missing_test_split() -> None:
     )
 
     assert trainer.calls == ["Best epoch 1 [Validation artifacts]"]
+    assert trainer.flags == [(True, True, True)]
     assert evaluation["test_seconds"] is None
     assert evaluation["test_outputs"] is None
     assert history[0].test_loss is None

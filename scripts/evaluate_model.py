@@ -9,6 +9,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader
@@ -25,7 +26,8 @@ from run_logging import (
     format_duration,
     save_probability_outputs,
 )
-from training import LobTrainer
+from thresholding import apply_directional_threshold_policy
+from training import LobTrainer, classification_metrics_from_predictions
 
 
 RAW_CLASS_NAMES = {-1: "down", 0: "neutral", 1: "up"}
@@ -57,6 +59,12 @@ def parse_args() -> argparse.Namespace:
         "--save-probabilities",
         action="store_true",
         help="Also write per-sample post-softmax probabilities to probabilities.csv.",
+    )
+    parser.add_argument(
+        "--directional-thresholds",
+        type=Path,
+        default=None,
+        help="Optional directional_thresholds.yaml file whose down/up thresholds define evaluation decisions.",
     )
     return parser.parse_args()
 
@@ -198,6 +206,80 @@ def label_class_id(config: ExperimentConfig, raw_label: int) -> int | None:
     return None if mapped is None else int(mapped)
 
 
+def directional_threshold_class_ids(
+    config: ExperimentConfig,
+    payload: Mapping[str, Any],
+) -> tuple[int, int, int]:
+    """Resolve down/neutral/up ids from threshold YAML or config mapping."""
+    class_ids = payload.get("class_ids")
+    if isinstance(class_ids, Mapping):
+        try:
+            return int(class_ids["down"]), int(class_ids["neutral"]), int(class_ids["up"])
+        except KeyError as exc:
+            raise ValueError("directional threshold class_ids must include down, neutral, and up.") from exc
+
+    ids = (
+        label_class_id(config, -1),
+        label_class_id(config, 0),
+        label_class_id(config, 1),
+    )
+    if any(class_id is None for class_id in ids):
+        raise ValueError("directional thresholds require label_mapping entries for raw labels -1, 0, and 1.")
+    return int(ids[0]), int(ids[1]), int(ids[2])  # type: ignore[arg-type]
+
+
+def load_directional_thresholds(path: Path, config: ExperimentConfig) -> dict[str, Any]:
+    """Load selected directional thresholds for external evaluation."""
+    payload = load_yaml_payload(path)
+    if payload.get("enabled") is False:
+        raise ValueError(f"Directional threshold file is disabled: {path}")
+    if "threshold_down" not in payload or "threshold_up" not in payload:
+        raise ValueError("Directional threshold file must contain threshold_down and threshold_up.")
+    down_id, neutral_id, up_id = directional_threshold_class_ids(config, payload)
+    for label, class_id in (("down", down_id), ("neutral", neutral_id), ("up", up_id)):
+        if not 0 <= int(class_id) < config.model.num_classes:
+            raise ValueError(f"Directional threshold {label} class id is outside model.num_classes.")
+    return {
+        "path": str(path),
+        "threshold_down": float(payload["threshold_down"]),
+        "threshold_up": float(payload["threshold_up"]),
+        "down_id": int(down_id),
+        "neutral_id": int(neutral_id),
+        "up_id": int(up_id),
+        "source_payload": payload,
+    }
+
+
+def apply_directional_thresholds_to_result(
+    result: Any,
+    config: ExperimentConfig,
+    threshold_config: Mapping[str, Any],
+) -> None:
+    """Replace argmax decisions and metrics with thresholded decisions."""
+    if result.prediction_outputs is None:
+        raise RuntimeError("Directional thresholds require collected probability outputs.")
+    outputs = result.prediction_outputs
+    probabilities = np.asarray(outputs.get("probabilities", []), dtype=np.float32)
+    targets = np.asarray(outputs.get("targets", []), dtype=np.int64).reshape(-1)
+    thresholded_predictions = apply_directional_threshold_policy(
+        probabilities,
+        threshold_down=float(threshold_config["threshold_down"]),
+        threshold_up=float(threshold_config["threshold_up"]),
+        down_id=int(threshold_config["down_id"]),
+        neutral_id=int(threshold_config["neutral_id"]),
+        up_id=int(threshold_config["up_id"]),
+    )
+    if "argmax_predictions" not in outputs:
+        outputs["argmax_predictions"] = np.asarray(outputs.get("predictions", []), dtype=np.int64).reshape(-1)
+    outputs["predictions"] = thresholded_predictions
+    result.metrics = classification_metrics_from_predictions(
+        targets,
+        thresholded_predictions,
+        num_classes=config.model.num_classes,
+        probabilities=probabilities,
+    )
+
+
 def evaluation_metrics_row(result: Any, config: ExperimentConfig, split: str, num_samples: int) -> dict[str, Any]:
     """Flatten evaluation metrics into one CSV/YAML row."""
     metrics = result.metrics
@@ -226,6 +308,24 @@ def evaluation_metrics_row(result: Any, config: ExperimentConfig, split: str, nu
     for class_id, label in enumerate(ordered_class_labels(config)):
         row[f"f1_class_{class_id}_{label}"] = class_metric(metrics, "per_class_f1", class_id)
     return row
+
+
+def add_directional_threshold_fields(row: dict[str, Any], threshold_config: Mapping[str, Any] | None) -> None:
+    """Add optional threshold decision metadata to a metrics row."""
+    if threshold_config is None:
+        row["classification_mode"] = "argmax"
+        return
+    row.update(
+        {
+            "classification_mode": "directional_thresholds",
+            "directional_thresholds_path": threshold_config["path"],
+            "threshold_down": float(threshold_config["threshold_down"]),
+            "threshold_up": float(threshold_config["threshold_up"]),
+            "threshold_down_id": int(threshold_config["down_id"]),
+            "threshold_neutral_id": int(threshold_config["neutral_id"]),
+            "threshold_up_id": int(threshold_config["up_id"]),
+        }
+    )
 
 
 def write_metrics_csv(row: Mapping[str, Any], target: Path) -> None:
@@ -285,6 +385,7 @@ def write_evaluation_log(
     batch_size: int,
     num_samples: int,
     duration_seconds: float,
+    directional_thresholds_path: Path | None = None,
 ) -> None:
     """Write a compact text log for one evaluation run."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -298,6 +399,11 @@ def write_evaluation_log(
         handle.write(f"Device: {device}\n")
         handle.write(f"Batch size: {batch_size}\n")
         handle.write(f"Samples: {num_samples}\n")
+        if directional_thresholds_path is not None:
+            handle.write("Classification mode: directional_thresholds\n")
+            handle.write(f"Directional thresholds: {directional_thresholds_path}\n")
+        else:
+            handle.write("Classification mode: argmax\n")
         handle.write(f"Duration seconds: {duration_seconds:.6f}\n")
         handle.write(f"Duration: {format_duration(duration_seconds)}\n")
 
@@ -316,9 +422,11 @@ def write_evaluation_outputs(
     batch_size: int,
     duration_seconds: float,
     save_probabilities: bool,
+    directional_thresholds: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write metrics and optional probability artifacts."""
     row = evaluation_metrics_row(result, config, split, num_samples)
+    add_directional_threshold_fields(row, directional_thresholds)
     output_dir.mkdir(parents=True, exist_ok=True)
     write_metrics_csv(row, output_dir / "metrics.csv")
     with (output_dir / "metrics.yaml").open("w", encoding="utf-8") as handle:
@@ -336,6 +444,7 @@ def write_evaluation_outputs(
         batch_size=batch_size,
         num_samples=num_samples,
         duration_seconds=duration_seconds,
+        directional_thresholds_path=None if directional_thresholds is None else Path(str(directional_thresholds["path"])),
     )
     if save_probabilities:
         if result.prediction_outputs is None:
@@ -354,6 +463,11 @@ def main() -> None:
         if args.batch_size <= 0:
             raise ValueError("--batch-size must be > 0.")
         config.training.eval_batch_size = int(args.batch_size)
+    directional_thresholds = (
+        None
+        if args.directional_thresholds is None
+        else load_directional_thresholds(args.directional_thresholds, config)
+    )
 
     dataset, resolved_sequence_path = build_evaluation_dataset(
         args.sequence_dir,
@@ -383,8 +497,12 @@ def main() -> None:
         model=model,
         data_loader=data_loader,
         description=f"Evaluate [{split_name}]",
-        collect_outputs=args.save_probabilities,
+        collect_outputs=args.save_probabilities or directional_thresholds is not None,
+        track_pr_metrics=True,
+        track_expert_usage=True,
     )
+    if directional_thresholds is not None:
+        apply_directional_thresholds_to_result(result, config, directional_thresholds)
     duration_seconds = perf_counter() - start
 
     row = write_evaluation_outputs(
@@ -400,6 +518,7 @@ def main() -> None:
         batch_size=config.training.eval_batch_size,
         duration_seconds=duration_seconds,
         save_probabilities=args.save_probabilities,
+        directional_thresholds=directional_thresholds,
     )
     print(
         f"Evaluation complete: split={split_name}, loss={row['loss']:.6f}, "

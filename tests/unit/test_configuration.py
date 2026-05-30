@@ -94,13 +94,13 @@ def test_training_sampling_ratio_is_loaded() -> None:
     config = load_config()
 
     assert config.training.sampling.enabled
-    assert config.training.sampling.neutral_to_directional_ratio == 2.0
+    assert config.training.sampling.neutral_to_directional_ratio == 8.0
 
 
 def test_training_class_weight_parameters_are_loaded() -> None:
     config = load_config()
 
-    assert config.training.class_weight_beta == 0.25
+    assert config.training.class_weight_beta == 0.1
     assert config.training.class_weight_min == 0.5
     assert config.training.class_weight_max == 3.0
     assert config.training.deterministic_torch is False
@@ -529,6 +529,26 @@ def test_fast_kinematic_method_requires_tick_reference(artifact_dir: Path) -> No
 
     with pytest.raises(ValueError, match="volume_kinematic\\.reference"):
         ExperimentConfig.from_yaml(broken_config_path)
+
+
+def test_preprocessing_processed_dataframe_saving_defaults_to_false(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+
+    assert config.preprocessing.save_processed_dataframes is False
+
+    payload["preprocessing"].pop("save_processed_dataframes", None)
+    config_path = artifact_dir / "legacy_without_processed_dataframe_flag.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.preprocessing.save_processed_dataframes is False
+
+    payload["preprocessing"]["save_processed_dataframes"] = True
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.preprocessing.save_processed_dataframes is True
 
 
 def test_training_data_loader_settings_are_loaded() -> None:

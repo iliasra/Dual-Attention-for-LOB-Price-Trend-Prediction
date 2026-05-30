@@ -356,7 +356,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert "volatility_floor > cost_floor" in output
     assert "Selected price static PLGS parameters from train:" in output
     assert "Selected volume static exponential scaling from train:" in output
-    assert (artifact_dir / "processed" / "fold_001" / "train" / "TEST_2020-01-01_processed.csv").exists()
+    assert not (artifact_dir / "processed" / "fold_001" / "train" / "TEST_2020-01-01_processed.csv").exists()
     train_features_path = artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-01_features.npy"
     assert train_features_path.exists()
     assert (artifact_dir / "sequences" / "fold_001" / "validation" / "TEST_2020-01-02_features.npy").exists()
@@ -369,6 +369,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
 
     metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
     feature_schema = yaml.safe_load(feature_schema_path.read_text(encoding="utf-8"))
+    assert metadata["save_processed_dataframes"] is False
     assert len(feature_schema["ordered_feature_columns"]) == np.load(train_features_path).shape[1]
     label_distribution = metadata["label_distribution"]
     assert label_distribution["method"] == "smoothing_C_adaptive"

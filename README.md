@@ -56,8 +56,9 @@ python scripts/run_training.py
 `scripts/process_data.py` runs the preprocessing pipeline. It loads
 LOBSTER-style message and orderbook files, joins them, filters the trading
 session, creates trend labels, computes static and kinematic features,
-normalizes derivative features on the training split, and saves both processed
-dataframes and model-ready sequence tensors.
+normalizes derivative features on the training split, and saves model-ready
+sequence tensors. Large processed dataframe CSVs are optional and controlled by
+`preprocessing.save_processed_dataframes`.
 
 `scripts/run_training.py` loads the generated sequence tensors, creates PyTorch
 datasets and dataloaders, instantiates the dual-attention model, and trains it
@@ -80,7 +81,7 @@ in `configs/pipeline_config.yaml`.
 |-- data/
 |   |-- LOBSTER/                          # Raw LOBSTER-style files, ignored by git
 |   |-- gcv_cache/                        # Daily GCV lambda cache files and task lists
-|   |-- processed_dataframes/             # Processed CSV outputs
+|   |-- processed_dataframes/             # Optional processed CSV outputs
 |   |-- sequences/                        # Saved X/T/y NumPy sequence tensors
 |   `-- derivatives_z_scores/             # Fitted derivative normalization statistics
 |-- logs/                                 # Run logs, metrics, config snapshots, PBS logs
@@ -123,13 +124,15 @@ in `configs/pipeline_config.yaml`.
 
 When preprocessing folds are enabled, outputs are fold-scoped.
 
-The preprocessing stage writes normalized processed dataframes to:
+If `preprocessing.save_processed_dataframes: true`, the preprocessing stage also
+writes normalized processed dataframes to:
 
 ```text
 data/processed_dataframes/<fold_id>/<split>/<symbol>_<date>_processed.csv
 ```
 
-It writes model-ready sequence tensors to:
+By default this option is `false` to save disk space. The training stage does
+not need these CSVs. It reads the model-ready sequence tensors written to:
 
 ```text
 data/sequences/<fold_id>/<split>/<symbol>_<date>_features.npy
@@ -271,7 +274,7 @@ and copies fold outputs back to:
 
 ```text
 data/sequences/<fold_id>/
-data/processed_dataframes/<fold_id>/
+data/processed_dataframes/<fold_id>/   # only when save_processed_dataframes=true
 data/derivatives_z_scores/<fold_id>/
 ```
 

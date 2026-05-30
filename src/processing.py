@@ -1123,24 +1123,33 @@ class LobProcessingPipeline:
         sequence_dir: Path | None = None,
     ) -> None:
         """Legacy in-memory output writer; RAM-safe run_fold writes per day."""
-        print("Saving processed CSV and sequence outputs.")
+        save_processed_csv = self.config.preprocessing.save_processed_dataframes
+        print(
+            "Saving sequence outputs"
+            + (" and processed CSV outputs." if save_processed_csv else " without processed CSV outputs.")
+        )
         target_processed_dir = processed_dir or self.processed_dir
         target_sequence_dir = sequence_dir or self.sequence_dir
-        target_processed_dir.mkdir(parents=True, exist_ok=True)
+        if save_processed_csv:
+            target_processed_dir.mkdir(parents=True, exist_ok=True)
         target_sequence_dir.mkdir(parents=True, exist_ok=True)
 
         for split, days in processed_splits.items():
             processed_split_dir = target_processed_dir / split
             sequence_split_dir = target_sequence_dir / split
-            processed_split_dir.mkdir(parents=True, exist_ok=True)
+            if save_processed_csv:
+                processed_split_dir.mkdir(parents=True, exist_ok=True)
             sequence_split_dir.mkdir(parents=True, exist_ok=True)
 
             for day in days:
                 normalized = self._require_frame(day, "normalized", "output saving")
 
-                csv_path = processed_split_dir / f"{day.pair.output_stem}_processed.csv"
-                normalized.to_csv(csv_path, index=False)
-                day.processed_csv_path = csv_path
+                if save_processed_csv:
+                    csv_path = processed_split_dir / f"{day.pair.output_stem}_processed.csv"
+                    normalized.to_csv(csv_path, index=False)
+                    day.processed_csv_path = csv_path
+                else:
+                    day.processed_csv_path = None
 
                 prefix = sequence_split_dir / day.pair.output_stem
                 day.sequence_paths = self.sequence_builder.save(normalized, prefix)
@@ -1171,12 +1180,17 @@ class LobProcessingPipeline:
 
         processed_split_dir = processed_dir / split
         sequence_split_dir = sequence_dir / split
-        processed_split_dir.mkdir(parents=True, exist_ok=True)
+        save_processed_csv = self.config.preprocessing.save_processed_dataframes
+        if save_processed_csv:
+            processed_split_dir.mkdir(parents=True, exist_ok=True)
         sequence_split_dir.mkdir(parents=True, exist_ok=True)
 
-        csv_path = processed_split_dir / f"{day.pair.output_stem}_processed.csv"
-        normalized.to_csv(csv_path, index=False)
-        day.processed_csv_path = csv_path
+        if save_processed_csv:
+            csv_path = processed_split_dir / f"{day.pair.output_stem}_processed.csv"
+            normalized.to_csv(csv_path, index=False)
+            day.processed_csv_path = csv_path
+        else:
+            day.processed_csv_path = None
 
         prefix = sequence_split_dir / day.pair.output_stem
         day.sequence_paths = self.sequence_builder.save(normalized, prefix)

@@ -152,6 +152,7 @@ def save_preprocessing_metadata(
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "config_path": str(config.path),
         "sequence_data_dir": str(sequence_dir),
+        "save_processed_dataframes": bool(config.preprocessing.save_processed_dataframes),
         "fast_smoothing_lambdas": lambdas,
     }
     if label_distribution is not None:
@@ -993,9 +994,12 @@ def save_run_log(
                 "threshold_down",
                 "threshold_up",
                 "score",
+                "rate_penalty",
+                "min_directional_precision",
                 "selection_split",
                 "selection_metric",
-                "tie_break",
+                "decision_tie_break",
+                "selection_final_tie_break",
                 "grid_min",
                 "grid_max",
                 "grid_step",

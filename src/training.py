@@ -977,13 +977,15 @@ class LobTrainer:
         description: str = "Validation",
         *,
         collect_outputs: bool = False,
+        track_pr_metrics: bool = False,
+        track_expert_usage: bool = False,
     ) -> EvaluationResult:
         model.eval()
         criterion = criterion or self._criterion()
         total_loss = 0.0
         batch_count = 0
-        metrics = ClassificationMetricAccumulator(device=self.device, track_pr_metrics=True)
-        expert_usage = ExpertUsageAccumulator()
+        metrics = ClassificationMetricAccumulator(device=self.device, track_pr_metrics=track_pr_metrics)
+        expert_usage = ExpertUsageAccumulator() if track_expert_usage else None
         prediction_outputs = PredictionOutputAccumulator() if collect_outputs else None
 
         with torch.no_grad():
@@ -997,17 +999,18 @@ class LobTrainer:
                 metrics.update(logits, y_batch)
                 if prediction_outputs is not None:
                     prediction_outputs.update(logits, y_batch)
-                expert_usage.update(
-                    getattr(model, "moe_routing", None),
-                    y_batch,
-                    num_classes=int(logits.shape[-1]),
-                )
+                if expert_usage is not None:
+                    expert_usage.update(
+                        getattr(model, "moe_routing", None),
+                        y_batch,
+                        num_classes=int(logits.shape[-1]),
+                    )
                 batch_count += 1
 
         return EvaluationResult(
             loss=total_loss / max(batch_count, 1),
             metrics=metrics.compute(),
-            expert_usage=expert_usage.compute(),
+            expert_usage=None if expert_usage is None else expert_usage.compute(),
             prediction_outputs=None if prediction_outputs is None else prediction_outputs.compute(),
         )
 

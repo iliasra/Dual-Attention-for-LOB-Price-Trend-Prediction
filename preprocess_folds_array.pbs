@@ -104,14 +104,18 @@ python scripts/process_data.py \
 
 echo "===== COPYING OUTPUTS BACK ====="
 mkdir -p "$OUTPUT_ROOT/data/sequences/$FOLD_ID"
-mkdir -p "$OUTPUT_ROOT/data/processed_dataframes/$FOLD_ID"
 mkdir -p "$OUTPUT_ROOT/data/derivatives_z_scores/$FOLD_ID"
 
 rsync -a "$WORK_DIR/data/sequences/$FOLD_ID/" \
   "$OUTPUT_ROOT/data/sequences/$FOLD_ID/"
 
-rsync -a "$WORK_DIR/data/processed_dataframes/$FOLD_ID/" \
-  "$OUTPUT_ROOT/data/processed_dataframes/$FOLD_ID/"
+if [ -d "$WORK_DIR/data/processed_dataframes/$FOLD_ID" ]; then
+  mkdir -p "$OUTPUT_ROOT/data/processed_dataframes/$FOLD_ID"
+  rsync -a "$WORK_DIR/data/processed_dataframes/$FOLD_ID/" \
+    "$OUTPUT_ROOT/data/processed_dataframes/$FOLD_ID/"
+else
+  echo "No processed dataframe CSV directory to copy for $FOLD_ID (save_processed_dataframes=false)."
+fi
 
 rsync -a "$WORK_DIR/data/derivatives_z_scores/$FOLD_ID/" \
   "$OUTPUT_ROOT/data/derivatives_z_scores/$FOLD_ID/"

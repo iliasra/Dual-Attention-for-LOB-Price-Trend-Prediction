@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import shutil
 import sys
 
+import numpy as np
 import pytest
 import yaml
 
@@ -18,7 +19,9 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from configuration import load_config
 from evaluate_model import (
+    apply_directional_thresholds_to_result,
     extract_checkpoint_state_dict,
+    load_directional_thresholds,
     load_config_for_evaluation,
     write_evaluation_outputs,
 )
@@ -82,6 +85,52 @@ def test_extract_checkpoint_state_dict_accepts_common_formats() -> None:
     assert extract_checkpoint_state_dict({"model_state_dict": state_dict}) is state_dict
 
 
+def test_directional_thresholds_are_loaded_and_applied(artifact_dir: Path) -> None:
+    payload = _config_payload()
+    payload["model"]["max_dt"] = 1.0
+    config_path = artifact_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    config = load_config_for_evaluation(config_path)
+    threshold_path = artifact_dir / "directional_thresholds.yaml"
+    threshold_path.write_text(
+        yaml.safe_dump(
+            {
+                "enabled": True,
+                "threshold_down": 0.6,
+                "threshold_up": 0.6,
+                "class_ids": {"down": 0, "neutral": 1, "up": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+    thresholds = load_directional_thresholds(threshold_path, config)
+    result = SimpleNamespace(
+        loss=0.1,
+        metrics=None,
+        expert_usage=None,
+        prediction_outputs={
+            "sample_index": np.asarray([0, 1, 2]),
+            "targets": np.asarray([0, 2, 1]),
+            "predictions": np.asarray([0, 1, 2]),
+            "probabilities": np.asarray(
+                [
+                    [0.7, 0.2, 0.1],
+                    [0.1, 0.2, 0.7],
+                    [0.3, 0.5, 0.2],
+                ],
+                dtype=np.float32,
+            ),
+        },
+    )
+
+    apply_directional_thresholds_to_result(result, config, thresholds)
+
+    assert result.prediction_outputs["predictions"].tolist() == [0, 2, 1]
+    assert result.prediction_outputs["argmax_predictions"].tolist() == [0, 1, 2]
+    assert result.metrics.confusion_matrix == [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    assert result.metrics.accuracy == pytest.approx(1.0)
+
+
 def test_write_evaluation_outputs_creates_metrics_and_logs(artifact_dir: Path) -> None:
     payload = _config_payload()
     payload["model"]["max_dt"] = 1.0
@@ -135,3 +184,60 @@ def test_write_evaluation_outputs_creates_metrics_and_logs(artifact_dir: Path) -
         csv_row = next(csv.DictReader(handle))
     assert csv_row["split"] == "holdout"
     assert csv_row["roc_auc_up"] == "0.9"
+
+
+def test_write_evaluation_outputs_records_directional_threshold_metadata(artifact_dir: Path) -> None:
+    payload = _config_payload()
+    payload["model"]["max_dt"] = 1.0
+    config_path = artifact_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    config = load_config_for_evaluation(config_path)
+    metrics = SimpleNamespace(
+        accuracy=1.0,
+        macro_precision=1.0,
+        macro_recall=1.0,
+        macro_f1=1.0,
+        directional_macro_f1=1.0,
+        weighted_f1=1.0,
+        balanced_accuracy=1.0,
+        expected_calibration_error=0.0,
+        per_class_expected_calibration_error=[0.0, 0.0, 0.0],
+        per_class_pr_ap=[1.0, 1.0, 1.0],
+        per_class_pr_auc=[1.0, 1.0, 1.0],
+        per_class_roc_auc=[1.0, 1.0, 1.0],
+        per_class_precision=[1.0, 1.0, 1.0],
+        per_class_recall=[1.0, 1.0, 1.0],
+        per_class_f1=[1.0, 1.0, 1.0],
+        confusion_matrix=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        normalized_confusion_matrix=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    )
+    result = SimpleNamespace(loss=0.1, metrics=metrics, expert_usage=None, prediction_outputs=None)
+
+    row = write_evaluation_outputs(
+        result=result,
+        config=config,
+        output_dir=artifact_dir / "evaluation_thresholded",
+        split="holdout",
+        num_samples=3,
+        checkpoint=artifact_dir / "model.pth",
+        config_path=config_path,
+        sequence_path=artifact_dir / "sequences",
+        device="cpu",
+        batch_size=256,
+        duration_seconds=1.0,
+        save_probabilities=False,
+        directional_thresholds={
+            "path": str(artifact_dir / "directional_thresholds.yaml"),
+            "threshold_down": 0.6,
+            "threshold_up": 0.7,
+            "down_id": 0,
+            "neutral_id": 1,
+            "up_id": 2,
+        },
+    )
+
+    assert row["classification_mode"] == "directional_thresholds"
+    assert row["threshold_down"] == pytest.approx(0.6)
+    assert "Directional thresholds:" in (artifact_dir / "evaluation_thresholded" / "evaluation.log").read_text(
+        encoding="utf-8"
+    )

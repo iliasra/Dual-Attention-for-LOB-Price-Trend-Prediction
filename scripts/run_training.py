@@ -400,14 +400,23 @@ def fit_and_apply_directional_thresholds(
         "best_epoch": int(best_epoch),
         "selection_split": "validation",
         "selection_metric": "directional_macro_f1",
+        "tie_break_order": [
+            "maximize_directional_macro_f1",
+            "minimize_directional_rate_penalty",
+            "maximize_min_down_up_precision",
+            "maximize_thresholds",
+        ],
         "threshold_down": float(selection.threshold_down),
         "threshold_up": float(selection.threshold_up),
         "score": float(selection.score),
+        "rate_penalty": float(selection.rate_penalty),
+        "min_directional_precision": float(selection.min_directional_precision),
         "grid_min": float(threshold_config.min_threshold),
         "grid_max": float(threshold_config.max_threshold),
         "grid_step": float(threshold_config.step),
         "n_candidates": int(selection.n_candidates),
-        "tie_break": "max_margin_over_threshold",
+        "decision_tie_break": "max_margin_over_threshold",
+        "selection_final_tie_break": "highest_threshold_sum_then_down_then_up",
         "class_ids": {
             "down": int(down_id),
             "neutral": int(neutral_id),
@@ -457,6 +466,8 @@ def evaluate_best_model_on_validation_and_test_splits(
         data_loader=validation_loader,
         description=f"Best epoch {best_epoch} [Validation artifacts]",
         collect_outputs=True,
+        track_pr_metrics=True,
+        track_expert_usage=True,
     )
     validation_duration_seconds = perf_counter() - validation_start
     best_history.val_loss = validation_result.loss
@@ -489,6 +500,8 @@ def evaluate_best_model_on_validation_and_test_splits(
             data_loader=test_loader,
             description=f"Best epoch {best_epoch} [Test]",
             collect_outputs=True,
+            track_pr_metrics=True,
+            track_expert_usage=True,
         )
         test_duration_seconds = perf_counter() - test_start
         best_history.test_loss = test_result.loss

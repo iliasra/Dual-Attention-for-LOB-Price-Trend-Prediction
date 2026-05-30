@@ -131,6 +131,42 @@ def test_lob_trainer_fit_uses_only_train_and_validation_loaders(
 
 
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_fit_uses_lightweight_validation_evaluation(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config().training
+    config.epochs = 2
+    config.early_stopping_patience = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    evaluate_flags: list[tuple[bool, bool, bool]] = []
+
+    def fake_train_epoch(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=0.25, metrics=metrics)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        evaluate_flags.append(
+            (
+                bool(kwargs.get("collect_outputs", False)),
+                bool(kwargs.get("track_pr_metrics", False)),
+                bool(kwargs.get("track_expert_usage", False)),
+            )
+        )
+        return EvaluationResult(loss=1.0, metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_run_epoch", fake_train_epoch)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    trainer.fit(nn.Linear(1, 3), train_loader=[], val_loader=[])
+
+    assert evaluate_flags == [(False, False, False), (False, False, False)]
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
 def test_lob_trainer_sets_epoch_on_train_sampler(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -377,7 +413,12 @@ def test_lob_trainer_evaluate_collects_moe_expert_usage() -> None:
         )
     ]
 
-    result = trainer.evaluate(RoutingModel(), data_loader, description="Expert usage test")
+    result = trainer.evaluate(
+        RoutingModel(),
+        data_loader,
+        description="Expert usage test",
+        track_expert_usage=True,
+    )
     usage = result.expert_usage
 
     assert usage is not None
@@ -419,7 +460,13 @@ def test_lob_trainer_evaluate_can_collect_probability_outputs() -> None:
         )
     ]
 
-    result = trainer.evaluate(SimpleModel(), data_loader, description="Probability output test", collect_outputs=True)
+    result = trainer.evaluate(
+        SimpleModel(),
+        data_loader,
+        description="Probability output test",
+        collect_outputs=True,
+        track_pr_metrics=True,
+    )
 
     assert result.prediction_outputs is not None
     assert result.prediction_outputs["probabilities"].shape == (3, 3)
@@ -428,6 +475,37 @@ def test_lob_trainer_evaluate_can_collect_probability_outputs() -> None:
     assert result.metrics.per_class_pr_ap == pytest.approx([1.0, 1.0, 1.0])
     assert result.metrics.per_class_pr_auc == pytest.approx([1.0, 1.0, 1.0])
     assert result.metrics.per_class_roc_auc == pytest.approx([1.0, 1.0, 1.0])
+
+
+def test_lob_trainer_evaluate_skips_optional_expensive_tracking_by_default() -> None:
+    class SimpleModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = nn.Parameter(torch.zeros(()))
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            del x, t
+            return torch.tensor([[4.0, 0.0, 0.0]])
+
+    config = load_config().training
+    config.device = "cpu"
+    config.class_weights = None
+    trainer = LobTrainer(config)
+    data_loader = [
+        (
+            torch.zeros((1, 2, 1)),
+            torch.zeros((1, 2)),
+            torch.tensor([0]),
+        )
+    ]
+
+    result = trainer.evaluate(SimpleModel(), data_loader, description="Default lightweight eval")
+
+    assert result.expert_usage is None
+    assert result.prediction_outputs is None
+    assert result.metrics.per_class_pr_ap is None
+    assert result.metrics.per_class_pr_auc is None
+    assert result.metrics.per_class_roc_auc is None
 
 
 def test_classification_metrics_from_predictions_uses_fixed_decisions() -> None:

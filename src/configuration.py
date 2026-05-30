@@ -33,6 +33,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
     },
     "preprocessing": {
         "snapshot_window": None,
+        "save_processed_dataframes": None,
         "labels": {
             "strategy": None,
             "smoothing": {
@@ -190,6 +191,7 @@ OPTIONAL_CONFIG_KEYS = {
     "preprocessing.price_static.tau_max",
     "model.max_dt",
     "training.monitor_params",
+    "preprocessing.save_processed_dataframes",
     "training.early_stopping_warmup",
     "training.directional_thresholds",
     "training.directional_thresholds.enabled",
@@ -956,6 +958,7 @@ class PreprocessingConfig:
     price_static: PriceStaticConfig
     volume_kinematic: VolumeKinematicConfig
     volume_static: VolumeStaticConfig
+    save_processed_dataframes: bool = False
 
     def __post_init__(self) -> None:
         """Check cross-field preprocessing constraints."""
@@ -988,6 +991,7 @@ class PreprocessingConfig:
             price_static=PriceStaticConfig.from_dict(payload["price_static"], tick_size=tick_size),
             volume_kinematic=VolumeKinematicConfig.from_dict(payload["volume_kinematic"]),
             volume_static=VolumeStaticConfig.from_dict(payload["volume_static"]),
+            save_processed_dataframes=bool(payload.get("save_processed_dataframes", False)),
         )
 
 
