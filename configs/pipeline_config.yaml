@@ -29,28 +29,20 @@ dataset_splits:
 folds:
   - id: fold_001
     train_dates: ["2024-03-04", "2024-03-05", "2024-03-06"]
-    validation_dates: ["2024-03-07"]
-    test_dates: ["2024-03-08"]
+    validation_dates: ["2024-03-07", "2024-03-08"]
+    test_dates: []
   - id: fold_002
     train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07"]
-    validation_dates: ["2024-03-08"]
-    test_dates: ["2024-03-11"]
+    validation_dates: ["2024-03-08", "2024-03-11"]
+    test_dates: []
   - id: fold_003
     train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08"]
-    validation_dates: ["2024-03-11"]
-    test_dates: ["2024-03-12"]
+    validation_dates: ["2024-03-11", "2024-03-12"]
+    test_dates: []
   - id: fold_004
     train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11"]
-    validation_dates: ["2024-03-12"]
-    test_dates: ["2024-03-13"]
-  - id: fold_005
-    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11", "2024-03-12"]
-    validation_dates: ["2024-03-13"]
-    test_dates: ["2024-03-14"]
-  - id: fold_006
-    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11", "2024-03-12", "2024-03-13"]
-    validation_dates: ["2024-03-14"]
-    test_dates: ["2024-03-15"]
+    validation_dates: ["2024-03-12", "2024-03-13"]
+    test_dates: []
 
 preprocessing:
   snapshot_window: 100
@@ -165,16 +157,17 @@ model:
 
 training:
   device: cuda # allowed: cpu, cuda
-  epochs: 20
+  epochs: 25
   batch_size: 128 # tuned with the dry-run
   eval_batch_size: 256 # evaluation only; no backward pass
   num_workers: 8
-  early_stopping_patience: 3
+  early_stopping_patience: 5
+  early_stopping_warmup: 3
   monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
   monitor_mode: max # allowed: min, max; tailored_score requires max
   monitor_params:
-    lambda_ece: 0.5
-    lambda_rate: 0.5
+    lambda_ece: 0.1
+    lambda_rate: 0.2
   persistent_workers: true
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4

@@ -153,6 +153,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "eval_batch_size": None,
         "num_workers": None,
         "early_stopping_patience": None,
+        "early_stopping_warmup": None,
         "monitor": None,
         "monitor_mode": None,
         "monitor_params": {
@@ -189,6 +190,7 @@ OPTIONAL_CONFIG_KEYS = {
     "preprocessing.price_static.tau_max",
     "model.max_dt",
     "training.monitor_params",
+    "training.early_stopping_warmup",
     "training.directional_thresholds",
     "training.directional_thresholds.enabled",
     "training.directional_thresholds.min",
@@ -1159,6 +1161,7 @@ class TrainingConfig:
     eval_batch_size: int
     num_workers: int
     early_stopping_patience: int
+    early_stopping_warmup: int
     monitor: str
     monitor_mode: str
     monitor_params: TrainingMonitorParamsConfig
@@ -1187,6 +1190,8 @@ class TrainingConfig:
             raise ValueError("training.num_workers must be >= 0.")
         if self.early_stopping_patience < 0:
             raise ValueError("training.early_stopping_patience must be >= 0.")
+        if self.early_stopping_warmup < 0:
+            raise ValueError("training.early_stopping_warmup must be >= 0.")
         self.monitor = self.monitor.lower()
         self.monitor_mode = self.monitor_mode.lower()
         if self.monitor not in {"val_loss", "val_macro_f1", "val_directional_macro_f1", "tailored_score"}:
@@ -1253,6 +1258,7 @@ class TrainingConfig:
             eval_batch_size=int(payload["eval_batch_size"]),
             num_workers=int(payload["num_workers"]),
             early_stopping_patience=int(payload["early_stopping_patience"]),
+            early_stopping_warmup=int(payload.get("early_stopping_warmup", 0)),
             monitor=str(payload["monitor"]),
             monitor_mode=str(payload["monitor_mode"]),
             monitor_params=TrainingMonitorParamsConfig.from_dict(payload.get("monitor_params")),

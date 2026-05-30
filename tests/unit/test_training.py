@@ -5,8 +5,9 @@ import shutil
 
 import numpy as np
 import pytest
-import torch
-import torch.nn as nn
+
+torch = pytest.importorskip("torch")
+nn = pytest.importorskip("torch.nn")
 
 from configuration import load_config
 from training import (
@@ -36,6 +37,7 @@ def test_lob_trainer_stops_after_patience_without_val_improvement(
     config = load_config().training
     config.epochs = 10
     config.early_stopping_patience = 2
+    config.early_stopping_warmup = 0
     config.monitor = "val_loss"
     config.monitor_mode = "min"
     config.model_dir = str(artifact_dir)
@@ -56,6 +58,38 @@ def test_lob_trainer_stops_after_patience_without_val_improvement(
 
     assert len(history) == 3
     assert [result.val_loss for result in history] == [1.0, 1.1, 1.2]
+    assert config.best_model_path.exists()
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_does_not_check_early_stopping_during_warmup(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config().training
+    config.epochs = 10
+    config.early_stopping_patience = 1
+    config.early_stopping_warmup = 3
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_losses = iter([1.0, 1.1, 1.2, 1.3, 0.5])
+
+    def fake_train_epoch(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=0.25, metrics=metrics)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=next(validation_losses), metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_run_epoch", fake_train_epoch)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    _, history = trainer.fit(nn.Linear(1, 3), train_loader=[], val_loader=[])
+
+    assert len(history) == 4
+    assert [result.val_loss for result in history] == [1.0, 1.1, 1.2, 1.3]
     assert config.best_model_path.exists()
 
 

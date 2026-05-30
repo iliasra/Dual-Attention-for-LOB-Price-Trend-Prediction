@@ -243,6 +243,8 @@ def save_run_config_snapshot(
             "monitor": {
                 "name": config.training.monitor,
                 "mode": config.training.monitor_mode,
+                "early_stopping_patience": config.training.early_stopping_patience,
+                "early_stopping_warmup": config.training.early_stopping_warmup,
                 "params": {
                     "lambda_ece": config.training.monitor_params.lambda_ece,
                     "lambda_rate": config.training.monitor_params.lambda_rate,
@@ -972,6 +974,8 @@ def save_run_log(
         handle.write("\nTraining monitor\n")
         handle.write(f"monitor: {config.training.monitor}\n")
         handle.write(f"monitor_mode: {config.training.monitor_mode}\n")
+        handle.write(f"early_stopping_patience: {config.training.early_stopping_patience}\n")
+        handle.write(f"early_stopping_warmup: {config.training.early_stopping_warmup}\n")
         if config.training.monitor_params.complete:
             handle.write(f"monitor_lambda_ece: {config.training.monitor_params.lambda_ece:.10g}\n")
             handle.write(f"monitor_lambda_rate: {config.training.monitor_params.lambda_rate:.10g}\n")

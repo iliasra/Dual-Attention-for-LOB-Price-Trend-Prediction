@@ -851,23 +851,25 @@ class LobTrainer:
 
         print(
             f"Starting training for {self.config.epochs} epoch(s) on {self.device}. "
-            f"Monitoring {self.config.monitor} ({self.config.monitor_mode})."
+            f"Monitoring {self.config.monitor} ({self.config.monitor_mode}); "
+            f"early stopping warmup={self.config.early_stopping_warmup} epoch(s)."
         )
         for epoch in range(self.config.epochs):
+            epoch_number = epoch + 1
             self._set_epoch(train_loader, epoch)
-            print(f"Starting epoch {epoch + 1}/{self.config.epochs}.")
+            print(f"Starting epoch {epoch_number}/{self.config.epochs}.")
             train_result = self._run_epoch(
                 model=model,
                 data_loader=train_loader,
                 criterion=criterion,
                 optimizer=optimizer,
-                description=f"Epoch {epoch + 1}/{self.config.epochs} [Train]",
+                description=f"Epoch {epoch_number}/{self.config.epochs} [Train]",
             )
             val_result = self.evaluate(
                 model=model,
                 data_loader=val_loader,
                 criterion=criterion,
-                description=f"Epoch {epoch + 1}/{self.config.epochs} [Val]",
+                description=f"Epoch {epoch_number}/{self.config.epochs} [Val]",
             )
             scheduler.step()
             history.append(
@@ -884,7 +886,7 @@ class LobTrainer:
             monitor_value = self._monitor_value(val_result)
             if self._is_improvement(monitor_value, best_monitor_value):
                 best_monitor_value = monitor_value
-                best_epoch = epoch + 1
+                best_epoch = epoch_number
                 epochs_without_improvement = 0
                 best_path = Path(self.config.best_model_path)
                 best_path.parent.mkdir(parents=True, exist_ok=True)
@@ -894,10 +896,11 @@ class LobTrainer:
                     f"with {self.config.monitor}={best_monitor_value:.6f}."
                 )
             else:
-                epochs_without_improvement += 1
+                if epoch_number > self.config.early_stopping_warmup:
+                    epochs_without_improvement += 1
 
             print(
-                f"Epoch {epoch + 1}/{self.config.epochs} completed: "
+                f"Epoch {epoch_number}/{self.config.epochs} completed: "
                 f"train_loss={train_result.loss:.6f}, val_loss={val_result.loss:.6f}, "
                 f"train_acc={train_result.metrics.accuracy:.4f}, "
                 f"val_acc={val_result.metrics.accuracy:.4f}, "
@@ -907,12 +910,14 @@ class LobTrainer:
             )
             if (
                 self.config.early_stopping_patience > 0
+                and epoch_number > self.config.early_stopping_warmup
                 and epochs_without_improvement >= self.config.early_stopping_patience
             ):
                 print(
                     "Early stopping triggered after "
                     f"{epochs_without_improvement} epoch(s) without {self.config.monitor} improvement. "
-                    f"Best {self.config.monitor}={best_monitor_value:.6f}."
+                    f"Best {self.config.monitor}={best_monitor_value:.6f}; "
+                    f"warmup={self.config.early_stopping_warmup} epoch(s)."
                 )
                 break
 

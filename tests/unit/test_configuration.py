@@ -375,19 +375,13 @@ def test_adaptive_threshold_config_validates_non_negative_lambda(artifact_dir: P
 def test_explicit_folds_are_loaded() -> None:
     config = load_config()
 
-    assert [fold.id for fold in config.folds] == [
-        "fold_001",
-        "fold_002",
-        "fold_003",
-        "fold_004",
-        "fold_005",
-        "fold_006",
-    ]
+    assert [fold.id for fold in config.folds] == ["fold_001", "fold_002", "fold_003", "fold_004"]
     assert config.folds[0].train_dates == ["2024-03-04", "2024-03-05", "2024-03-06"]
-    assert config.folds[0].validation_dates == ["2024-03-07"]
-    assert config.folds[0].test_dates == ["2024-03-08"]
-    assert config.folds[-1].validation_dates == ["2024-03-14"]
-    assert config.folds[-1].test_dates == ["2024-03-15"]
+    assert config.folds[0].validation_dates == ["2024-03-07", "2024-03-08"]
+    assert config.folds[0].test_dates == []
+    assert config.folds[-1].validation_dates == ["2024-03-12", "2024-03-13"]
+    assert config.folds[-1].test_dates == []
+    assert all(not fold.has_test_dates for fold in config.folds)
 
 
 def test_folds_fallback_to_dataset_splits_when_missing(artifact_dir: Path) -> None:
@@ -543,10 +537,11 @@ def test_training_data_loader_settings_are_loaded() -> None:
 
     assert config.training.num_workers >= 0
     assert config.training.early_stopping_patience >= 0
+    assert config.training.early_stopping_warmup == 3
     assert config.training.monitor == "tailored_score"
     assert config.training.monitor_mode == "max"
-    assert config.training.monitor_params.lambda_ece == 0.5
-    assert config.training.monitor_params.lambda_rate == 0.5
+    assert config.training.monitor_params.lambda_ece == 0.1
+    assert config.training.monitor_params.lambda_rate == 0.2
     assert config.training.directional_thresholds.enabled is True
     assert config.training.directional_thresholds.min_threshold == 0.05
     assert config.training.directional_thresholds.max_threshold == 0.95
@@ -601,6 +596,24 @@ def test_training_monitor_values_are_validated(artifact_dir: Path) -> None:
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="training\\.monitor_mode"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_training_early_stopping_warmup_is_optional_and_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"].pop("early_stopping_warmup", None)
+
+    config_path = artifact_dir / "legacy_without_early_stopping_warmup.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.early_stopping_warmup == 0
+
+    payload["training"]["early_stopping_warmup"] = -1
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="early_stopping_warmup"):
         ExperimentConfig.from_yaml(config_path)
 
 
