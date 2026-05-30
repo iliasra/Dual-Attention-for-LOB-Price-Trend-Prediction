@@ -3,7 +3,7 @@
 #PBS -l walltime=04:00:00
 #PBS -l select=1:ncpus=8:mem=64gb:ompthreads=8
 # Keep this range aligned with the non-empty, non-comment lines in configs/folds.txt.
-#PBS -J 1-6
+#PBS -J 1-1
 
 set -euo pipefail
 SCRIPT_START_EPOCH="$(date +%s)"

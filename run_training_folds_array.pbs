@@ -2,7 +2,7 @@
 #PBS -N lob_train_fold
 #PBS -l walltime=15:00:00
 #PBS -l select=1:ncpus=10:mem=48gb:ngpus=1
-#PBS -J 1-6%3
+#PBS -J 1-1%1
 
 set -euo pipefail
 SCRIPT_START_EPOCH="$(date +%s)"
