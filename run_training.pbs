@@ -11,7 +11,10 @@ SCRIPT_START_EPOCH="$(date +%s)"
 
 PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
 WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
-FOLDS_FILE="$PROJECT_DIR/configs/folds.txt"
+TRAINING_CONFIG="${TRAINING_CONFIG:-configs/pipeline_config.yaml}"
+FOLDS_FILE="${FOLDS_FILE:-configs/folds.txt}"
+PROJECT_FOLDS_FILE="$PROJECT_DIR/$FOLDS_FILE"
+WORK_CONFIG_PATH="$WORK_DIR/$TRAINING_CONFIG"
 
 JOB_ID="${PBS_JOBID:-$(date +%Y%m%d_%H%M%S)}"
 RUN_STEM="${TRAINING_RUN_STEM:-training_${JOB_ID}}"
@@ -152,16 +155,20 @@ trap 'terminate TERM 143' TERM
 trap 'terminate INT 130' INT
 trap finish EXIT
 
-if [ ! -f "$FOLDS_FILE" ]; then
-  echo "Fold list not found: $FOLDS_FILE" >&2
+if [ ! -f "$PROJECT_FOLDS_FILE" ]; then
+  echo "Fold list not found: $PROJECT_FOLDS_FILE" >&2
+  exit 1
+fi
+if [ ! -f "$PROJECT_DIR/$TRAINING_CONFIG" ]; then
+  echo "Training config not found: $PROJECT_DIR/$TRAINING_CONFIG" >&2
   exit 1
 fi
 
-mapfile -t FOLD_IDS < <(awk 'NF && $1 !~ /^#/ { print $1 }' "$FOLDS_FILE")
+mapfile -t FOLD_IDS < <(awk 'NF && $1 !~ /^#/ { print $1 }' "$PROJECT_FOLDS_FILE")
 FOLD_COUNT="${#FOLD_IDS[@]}"
 
 if [ "$FOLD_COUNT" -eq 0 ]; then
-  echo "No fold id found in $FOLDS_FILE." >&2
+  echo "No fold id found in $PROJECT_FOLDS_FILE." >&2
   exit 1
 fi
 
@@ -170,6 +177,8 @@ date
 echo "PBS_JOBID=${PBS_JOBID:-}"
 echo "RUN_STEM=$RUN_STEM"
 echo "FOLDS_FILE=$FOLDS_FILE"
+echo "PROJECT_FOLDS_FILE=$PROJECT_FOLDS_FILE"
+echo "TRAINING_CONFIG=$TRAINING_CONFIG"
 echo "FOLD_COUNT=$FOLD_COUNT"
 echo "FOLDS=${FOLD_IDS[*]}"
 echo "HOSTNAME=$(hostname)"
@@ -233,6 +242,7 @@ for fold_id in "${FOLD_IDS[@]}"; do
   echo "===== RUNNING TRAINING FOR $fold_id ====="
   PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" \
   python scripts/run_training.py \
+    --config "$WORK_CONFIG_PATH" \
     --fold-id "$fold_id" \
     --run-stem "$RUN_STEM"
 done

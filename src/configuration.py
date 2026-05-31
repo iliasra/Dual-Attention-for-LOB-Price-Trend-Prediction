@@ -155,6 +155,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "num_workers": None,
         "early_stopping_patience": None,
         "early_stopping_warmup": None,
+        "early_stopping_min_delta": None,
         "monitor": None,
         "monitor_mode": None,
         "monitor_params": {
@@ -162,6 +163,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "lambda_rate": None,
         },
         "persistent_workers": None,
+        "optimizer": None,
         "learning_rate": None,
         "weight_decay": None,
         "focal_gamma": None,
@@ -193,6 +195,8 @@ OPTIONAL_CONFIG_KEYS = {
     "training.monitor_params",
     "preprocessing.save_processed_dataframes",
     "training.early_stopping_warmup",
+    "training.early_stopping_min_delta",
+    "training.optimizer",
     "training.directional_thresholds",
     "training.directional_thresholds.enabled",
     "training.directional_thresholds.min",
@@ -1166,10 +1170,12 @@ class TrainingConfig:
     num_workers: int
     early_stopping_patience: int
     early_stopping_warmup: int
+    early_stopping_min_delta: float
     monitor: str
     monitor_mode: str
     monitor_params: TrainingMonitorParamsConfig
     persistent_workers: bool
+    optimizer: str
     learning_rate: float
     weight_decay: float
     focal_gamma: float
@@ -1196,8 +1202,13 @@ class TrainingConfig:
             raise ValueError("training.early_stopping_patience must be >= 0.")
         if self.early_stopping_warmup < 0:
             raise ValueError("training.early_stopping_warmup must be >= 0.")
+        if self.early_stopping_min_delta < 0.0:
+            raise ValueError("training.early_stopping_min_delta must be >= 0.")
         self.monitor = self.monitor.lower()
         self.monitor_mode = self.monitor_mode.lower()
+        self.optimizer = self.optimizer.lower()
+        if self.optimizer not in {"adam", "adamw"}:
+            raise ValueError("training.optimizer must be 'adam' or 'adamw'.")
         if self.monitor not in {"val_loss", "val_macro_f1", "val_directional_macro_f1", "tailored_score"}:
             raise ValueError(
                 "training.monitor must be one of val_loss, val_macro_f1, "
@@ -1263,10 +1274,12 @@ class TrainingConfig:
             num_workers=int(payload["num_workers"]),
             early_stopping_patience=int(payload["early_stopping_patience"]),
             early_stopping_warmup=int(payload.get("early_stopping_warmup", 0)),
+            early_stopping_min_delta=float(payload.get("early_stopping_min_delta", 0.0)),
             monitor=str(payload["monitor"]),
             monitor_mode=str(payload["monitor_mode"]),
             monitor_params=TrainingMonitorParamsConfig.from_dict(payload.get("monitor_params")),
             persistent_workers=bool(payload["persistent_workers"]),
+            optimizer=str(payload.get("optimizer", "adamw")),
             learning_rate=float(payload["learning_rate"]),
             weight_decay=float(payload["weight_decay"]),
             focal_gamma=float(payload["focal_gamma"]),

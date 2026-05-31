@@ -280,6 +280,53 @@ def test_lob_trainer_can_monitor_tailored_score(
     assert config.best_model_path.exists()
 
 
+def test_lob_trainer_uses_configured_adam_optimizer() -> None:
+    config = load_config().training
+    config.device = "cpu"
+    config.optimizer = "adam"
+    trainer = LobTrainer(config)
+
+    optimizer = trainer._optimizer(nn.Linear(1, 3))
+
+    assert isinstance(optimizer, torch.optim.Adam)
+    assert not isinstance(optimizer, torch.optim.AdamW)
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_min_delta_filters_tiny_val_loss_improvements(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config().training
+    config.epochs = 2
+    config.early_stopping_patience = 0
+    config.early_stopping_min_delta = 0.002
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.device = "cpu"
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_losses = iter([1.0, 0.999])
+
+    def fake_train_epoch(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=0.25, metrics=metrics)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        model = kwargs["model"]
+        loss = next(validation_losses)
+        with torch.no_grad():
+            model.bias.fill_(loss)
+        return EvaluationResult(loss=loss, metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_run_epoch", fake_train_epoch)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    model, _history = trainer.fit(nn.Linear(1, 3), train_loader=[], val_loader=[])
+
+    assert model.bias[0].item() == pytest.approx(1.0)
+
+
 def test_class_weights_from_sequence_labels_uses_balanced_clipped_weights() -> None:
     weights, counts = class_weights_from_sequence_labels(
         np.asarray([0, 0, 0, 0, 1, 1, 2]),

@@ -1,0 +1,161 @@
+seed: 42
+
+data:
+  raw_data_dir: ../data/F1_2010
+  processed_data_dir: ../data/processed_dataframes_fi2010
+  sequence_data_dir: ../data/sequences
+  logs_dir: ../logs
+  tick_size: 1.0
+  time_column: time
+  label_column: trend_label
+  label_mapping: {0: 0, 1: 1, 2: 2}
+  price_columns: auto
+  volume_columns: auto
+  feature_exclude_columns: []
+  sequence_window: 128
+
+dataset_splits:
+  train_dates: ["0001-train"]
+  validation_dates: ["0002-validation"]
+  test_dates: ["0003-test"]
+
+folds:
+  - id: fi2010_tlob
+    train_dates: ["0001-train"]
+    validation_dates: ["0002-validation"]
+    test_dates: ["0003-test"]
+
+preprocessing:
+  # Compatibility-only block for the shared config loader.
+  # FI-2010/TLOB training uses prebuilt .npy sequences, not this preprocessing path.
+  snapshot_window: 1
+  save_processed_dataframes: false
+  labels:
+    strategy: smoothing
+    smoothing:
+      method: C
+      threshold: 0.0
+      k: 0
+      h: 1
+      bid_column: bid_price_1
+      ask_column: ask_price_1
+      adaptive_threshold:
+        enabled: false
+        exit_spread_window: 1
+        volatility_window: 1
+        round_trip_fees_bps: 0.0
+        volatility_lambda: 0.0
+    triple_barrier:
+      horizon: 1
+      upper_barrier_ticks: 0.0
+      lower_barrier_ticks: 0.0
+      bid_column: bid_price_1
+      ask_column: ask_price_1
+      price_column:
+  message:
+    size_column: size
+    price_column: price
+    order_id_column: order_id
+    categorical_value_map:
+      type: [1, 2, 3, 4, 5]
+      direction: [-1, 1]
+    drop_columns: [price, size, type, direction, order_id]
+  temporal_features:
+    add_day_sincos: false
+    day_frequency: 1
+    keep_timestamp: true
+    market_open_seconds: 0
+    market_close_seconds: 1
+    start_offset_minutes: 0
+    end_offset_minutes: 0
+  normalization:
+    derivatives_stats_dir: ../data/derivatives_z_scores_fi2010
+    scope: train_only
+    derivative_scaling_method: zscore
+  kinematic_tokenization:
+    method: fast
+    chunk_size: 1
+    n_df_candidates: 1
+  price_kinematic:
+    enabled: false
+    columns: auto
+    reference: tick
+    basis:
+      alpha: 0.0
+    fast:
+      n_basis: 4
+      df: 1.0
+      eval_at: 0.0
+  price_static:
+    enabled: false
+    columns: auto
+    tau_start: 0.0
+    tau_clip:
+    tau_max:
+  volume_kinematic:
+    enabled: false
+    columns: auto
+    reference: tick
+    basis:
+      alpha: 0.0
+    fast:
+      n_basis: 4
+      df: 1.0
+      eval_at: 0.0
+  volume_static:
+    enabled: false
+    columns: auto
+    quantile: 0.0
+    target: 0.5
+
+model:
+  d_input: 144
+  d_model: 144
+  feature_embed_dim: 16
+  feature_num_frequencies: 8
+  feature_sigma: 1.0
+  num_heads: 4
+  max_dt_quantile: 95.0
+  max_dt:
+  num_experts: 4
+  top_k: 2
+  num_classes: 3
+  rope_type: crope
+  rope_base: 10000
+  attention_dropout: 0.1
+  moe_dropout: 0.1
+  moe_expansion_factor: 4
+  moe_router_noise: 0.01
+  moe_load_balancing_weight: 0.01
+  classifier_dropout: 0.1
+
+training:
+  device: cuda
+  epochs: 10
+  batch_size: 64
+  eval_batch_size: 256
+  num_workers: 8
+  early_stopping_patience: 1
+  early_stopping_warmup: 0
+  early_stopping_min_delta: 0.002
+  monitor: val_loss
+  monitor_mode: min
+  persistent_workers: true
+  optimizer: adam
+  learning_rate: 1.0e-4
+  weight_decay: 0.0
+  focal_gamma: 0.0
+  class_weight_beta: 0.0
+  class_weight_min: 1.0
+  class_weight_max: 1.0
+  grad_clip_norm: 1.0
+  model_dir: ../results
+  use_amp: true
+  deterministic_torch: false
+  directional_thresholds:
+    enabled: false
+    min: 0.05
+    max: 0.95
+    step: 0.05
+  sampling:
+    neutral_to_directional_ratio:

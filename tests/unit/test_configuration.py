@@ -116,6 +116,21 @@ def test_training_class_weight_parameters_are_loaded() -> None:
     assert config.training.class_weight_min == 0.5
     assert config.training.class_weight_max == 3.0
     assert config.training.deterministic_torch is False
+    assert config.training.optimizer == "adamw"
+    assert config.training.early_stopping_min_delta == 0.0
+
+
+def test_tlob_fi2010_config_loads() -> None:
+    config_path = Path(__file__).resolve().parents[2] / "configs" / "config_TLOB_F1_2010.yaml"
+    config = ExperimentConfig.from_yaml(config_path)
+
+    assert config.folds[0].id == "fi2010_tlob"
+    assert config.data.sequence_window == 128
+    assert config.model.d_input == 144
+    assert config.model.d_model == 144
+    assert config.training.optimizer == "adam"
+    assert config.training.early_stopping_min_delta == 0.002
+    assert config.training.monitor == "val_loss"
 
 
 def test_training_class_weight_parameters_are_validated(artifact_dir: Path) -> None:
@@ -135,6 +150,25 @@ def test_training_class_weight_parameters_are_validated(artifact_dir: Path) -> N
     broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="class_weight_max"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+
+def test_training_optimizer_and_min_delta_are_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["optimizer"] = "rmsprop"
+
+    broken_config_path = artifact_dir / "bad_optimizer.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="training\\.optimizer"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+    payload["training"]["optimizer"] = "adam"
+    payload["training"]["early_stopping_min_delta"] = -0.001
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="early_stopping_min_delta"):
         ExperimentConfig.from_yaml(broken_config_path)
 
 

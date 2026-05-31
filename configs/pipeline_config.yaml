@@ -164,12 +164,14 @@ training:
   num_workers: 8
   early_stopping_patience: 5
   early_stopping_warmup: 3
+  early_stopping_min_delta: 0.0
   monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
   monitor_mode: max # allowed: min, max; tailored_score requires max
   monitor_params:
     lambda_ece: 0.1
     lambda_rate: 0.2
   persistent_workers: true
+  optimizer: adamw # allowed: adam, adamw
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   focal_gamma: 0.5

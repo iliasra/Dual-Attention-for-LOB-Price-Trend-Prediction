@@ -12,13 +12,20 @@ SCRIPT_START_EPOCH="$(date +%s)"
 
 PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
 WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
-FOLDS_FILE="$PROJECT_DIR/configs/folds.txt"
+TRAINING_CONFIG="${TRAINING_CONFIG:-configs/pipeline_config.yaml}"
+FOLDS_FILE="${FOLDS_FILE:-configs/folds.txt}"
+PROJECT_FOLDS_FILE="$PROJECT_DIR/$FOLDS_FILE"
+WORK_CONFIG_PATH="$WORK_DIR/$TRAINING_CONFIG"
 
 ARRAY_JOB_ID="${PBS_JOBID%%[*}"
 RUN_STEM="${TRAINING_RUN_STEM:-training_${ARRAY_JOB_ID}}"
 
-if [ ! -f "$FOLDS_FILE" ]; then
-  echo "Fold list not found: $FOLDS_FILE" >&2
+if [ ! -f "$PROJECT_FOLDS_FILE" ]; then
+  echo "Fold list not found: $PROJECT_FOLDS_FILE" >&2
+  exit 1
+fi
+if [ ! -f "$PROJECT_DIR/$TRAINING_CONFIG" ]; then
+  echo "Training config not found: $PROJECT_DIR/$TRAINING_CONFIG" >&2
   exit 1
 fi
 
@@ -31,7 +38,7 @@ FOLD_ID="$(
         exit
       }
     }
-  ' "$FOLDS_FILE"
+  ' "$PROJECT_FOLDS_FILE"
 )"
 
 if [ -z "$FOLD_ID" ]; then
@@ -181,6 +188,9 @@ echo "ARRAY_JOB_ID=$ARRAY_JOB_ID"
 echo "PBS_ARRAY_INDEX=$PBS_ARRAY_INDEX"
 echo "RUN_STEM=$RUN_STEM"
 echo "FOLD_ID=$FOLD_ID"
+echo "FOLDS_FILE=$FOLDS_FILE"
+echo "PROJECT_FOLDS_FILE=$PROJECT_FOLDS_FILE"
+echo "TRAINING_CONFIG=$TRAINING_CONFIG"
 echo "HOSTNAME=$(hostname)"
 echo "TMPDIR=$TMPDIR"
 
@@ -239,6 +249,7 @@ echo
 echo "===== RUNNING TRAINING FOR $FOLD_ID ====="
 PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" \
 python scripts/run_training.py \
+  --config "$WORK_CONFIG_PATH" \
   --fold-id "$FOLD_ID" \
   --run-stem "$RUN_STEM"
 

@@ -822,7 +822,20 @@ class LobTrainer:
 
     def _is_improvement(self, value: float, best_value: float) -> bool:
         """Compare a monitor value against the current best value."""
-        return value < best_value if self.config.monitor_mode == "min" else value > best_value
+        min_delta = float(self.config.early_stopping_min_delta)
+        if self.config.monitor_mode == "min":
+            return value < best_value - min_delta
+        return value > best_value + min_delta
+
+    def _optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
+        """Build the configured optimizer."""
+        optimizer_name = self.config.optimizer.lower()
+        optimizer_class = torch.optim.Adam if optimizer_name == "adam" else torch.optim.AdamW
+        return optimizer_class(
+            model.parameters(),
+            lr=self.config.learning_rate,
+            weight_decay=self.config.weight_decay,
+        )
 
     def fit(
         self,
@@ -838,11 +851,7 @@ class LobTrainer:
         fit_start = perf_counter()
         model = model.to(self.device)
         criterion = self._criterion()
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=self.config.learning_rate,
-            weight_decay=self.config.weight_decay,
-        )
+        optimizer = self._optimizer(model)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config.epochs)
         best_monitor_value = float("inf") if self.config.monitor_mode == "min" else -float("inf")
         best_epoch = 0
@@ -852,7 +861,9 @@ class LobTrainer:
         print(
             f"Starting training for {self.config.epochs} epoch(s) on {self.device}. "
             f"Monitoring {self.config.monitor} ({self.config.monitor_mode}); "
-            f"early stopping warmup={self.config.early_stopping_warmup} epoch(s)."
+            f"early stopping warmup={self.config.early_stopping_warmup} epoch(s), "
+            f"min_delta={self.config.early_stopping_min_delta:.6g}; "
+            f"optimizer={self.config.optimizer}."
         )
         for epoch in range(self.config.epochs):
             epoch_number = epoch + 1
@@ -917,7 +928,8 @@ class LobTrainer:
                     "Early stopping triggered after "
                     f"{epochs_without_improvement} epoch(s) without {self.config.monitor} improvement. "
                     f"Best {self.config.monitor}={best_monitor_value:.6f}; "
-                    f"warmup={self.config.early_stopping_warmup} epoch(s)."
+                    f"warmup={self.config.early_stopping_warmup} epoch(s); "
+                    f"min_delta={self.config.early_stopping_min_delta:.6g}."
                 )
                 break
 
