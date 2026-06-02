@@ -187,10 +187,14 @@ training:
   deterministic_torch: false
   temperature_scaling:
     enabled: true
-  directional_thresholds: #choose best probability thresholds to classify, based on the grid below
+  directional_thresholds:
     enabled: true
-    min: 0.05
-    max: 0.95
-    step: 0.05
+    method: joint_up_down # allowed: joint_up_down, precision_floor
+    min: 0.05 # lower bound for candidate probability thresholds
+    max: 0.95 # upper bound for candidate probability thresholds
+    step: 0.05 # coarse grid step; joint_up_down also refines around the best region
+    delta: 0.0 # logit-margin gap required to break up/down ties; otherwise neutral
+    up_precision_floor: null # required only for precision_floor; null for joint_up_down
+    down_precision_floor: null # required only for precision_floor; null for joint_up_down
   sampling:
     neutral_to_directional_ratio: 8.0 # downsampling of neutral class

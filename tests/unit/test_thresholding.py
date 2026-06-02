@@ -9,6 +9,7 @@ from thresholding import (
     apply_directional_threshold_policy,
     directional_macro_f1_from_predictions,
     optimize_directional_thresholds,
+    optimize_precision_floor_thresholds,
     threshold_candidates,
     thresholded_metric_summary,
 )
@@ -36,6 +37,39 @@ def test_directional_threshold_policy_handles_neutral_and_tie_break() -> None:
     )
 
     assert predictions.tolist() == [0, 2, 1, 0, 2]
+
+
+def test_directional_threshold_policy_uses_logit_margin_delta_for_double_hits() -> None:
+    probabilities = np.asarray(
+        [
+            [0.65, 0.0, 0.64],
+            [0.65, 0.0, 0.64],
+            [0.64, 0.0, 0.65],
+        ],
+        dtype=np.float32,
+    )
+
+    low_delta = apply_directional_threshold_policy(
+        probabilities,
+        threshold_down=0.6,
+        threshold_up=0.6,
+        down_id=0,
+        neutral_id=1,
+        up_id=2,
+        delta=0.0,
+    )
+    high_delta = apply_directional_threshold_policy(
+        probabilities,
+        threshold_down=0.6,
+        threshold_up=0.6,
+        down_id=0,
+        neutral_id=1,
+        up_id=2,
+        delta=0.2,
+    )
+
+    assert low_delta.tolist() == [0, 0, 2]
+    assert high_delta.tolist() == [1, 1, 1]
 
 
 def test_threshold_candidates_are_inclusive() -> None:
@@ -153,6 +187,68 @@ def test_optimize_directional_thresholds_prefers_rate_penalty_on_score_tie() -> 
     assert selection.threshold_up == pytest.approx(0.3)
     assert selection.score == pytest.approx(0.0)
     assert selection.rate_penalty == pytest.approx(2 / 3)
+
+
+def test_optimize_precision_floor_thresholds_maximizes_recall_under_floor() -> None:
+    probabilities = np.asarray(
+        [
+            [0.1, 0.0, 0.90],
+            [0.1, 0.0, 0.80],
+            [0.1, 0.0, 0.70],
+            [0.8, 0.0, 0.20],
+            [0.7, 0.0, 0.10],
+        ],
+        dtype=np.float32,
+    )
+    targets = np.asarray([2, 2, 1, 0, 1])
+
+    selection = optimize_precision_floor_thresholds(
+        probabilities,
+        targets,
+        down_candidates=np.asarray([0.5, 0.75]),
+        up_candidates=np.asarray([0.5, 0.75, 0.85]),
+        down_precision_floor=0.5,
+        up_precision_floor=0.67,
+        down_id=0,
+        neutral_id=1,
+        up_id=2,
+    )
+
+    assert selection.threshold_up == pytest.approx(0.75)
+    assert selection.threshold_down == pytest.approx(0.75)
+    assert selection.up_enabled is True
+    assert selection.down_enabled is True
+    assert selection.selection_details["up"]["precision"] == pytest.approx(1.0)
+    assert selection.selection_details["up"]["recall"] == pytest.approx(1.0)
+
+
+def test_optimize_precision_floor_thresholds_disables_class_when_floor_is_unreachable() -> None:
+    probabilities = np.asarray(
+        [
+            [0.9, 0.0, 0.1],
+            [0.8, 0.0, 0.1],
+            [0.1, 0.0, 0.9],
+        ],
+        dtype=np.float32,
+    )
+    targets = np.asarray([1, 0, 2])
+
+    selection = optimize_precision_floor_thresholds(
+        probabilities,
+        targets,
+        down_candidates=np.asarray([0.5]),
+        up_candidates=np.asarray([0.5]),
+        down_precision_floor=0.9,
+        up_precision_floor=0.9,
+        down_id=0,
+        neutral_id=1,
+        up_id=2,
+    )
+
+    assert selection.down_enabled is False
+    assert selection.threshold_down is None
+    assert selection.up_enabled is True
+    assert selection.selection_details["down"]["fallback"] == "disabled_no_candidate_meets_precision_floor"
 
 
 def test_threshold_selection_prefers_min_precision_before_high_thresholds() -> None:

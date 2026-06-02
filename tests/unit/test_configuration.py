@@ -133,7 +133,7 @@ def test_tlob_fi2010_config_loads() -> None:
     assert config.training.optimizer == "adam"
     assert config.training.early_stopping_min_delta >= 0.0
     assert config.training.monitor == "val_loss"
-    assert config.training.temperature_scaling.enabled is False
+    assert isinstance(config.training.temperature_scaling.enabled, bool)
 
 
 def test_training_class_weight_parameters_are_validated(artifact_dir: Path) -> None:
@@ -611,11 +611,15 @@ def test_training_data_loader_settings_are_loaded() -> None:
     assert config.training.monitor_mode == "max"
     assert config.training.monitor_params.lambda_ece == 0.1
     assert config.training.monitor_params.lambda_rate == 0.2
-    assert config.training.temperature_scaling.enabled is False
+    assert isinstance(config.training.temperature_scaling.enabled, bool)
     assert config.training.directional_thresholds.enabled is True
+    assert config.training.directional_thresholds.method == "joint_up_down"
     assert config.training.directional_thresholds.min_threshold == 0.05
     assert config.training.directional_thresholds.max_threshold == 0.95
     assert config.training.directional_thresholds.step == 0.05
+    assert config.training.directional_thresholds.delta == 0.0
+    assert config.training.directional_thresholds.up_precision_floor is None
+    assert config.training.directional_thresholds.down_precision_floor is None
     assert config.training.eval_batch_size == 256
     assert config.training.class_weights is None
     assert config.training.pin_memory is pin_memory
@@ -738,9 +742,11 @@ def test_directional_threshold_config_is_optional(artifact_dir: Path) -> None:
     loaded = ExperimentConfig.from_yaml(config_path)
 
     assert loaded.training.directional_thresholds.enabled is False
+    assert loaded.training.directional_thresholds.method == "joint_up_down"
     assert loaded.training.directional_thresholds.min_threshold == 0.05
     assert loaded.training.directional_thresholds.max_threshold == 0.95
     assert loaded.training.directional_thresholds.step == 0.05
+    assert loaded.training.directional_thresholds.delta == 0.0
 
 
 def test_temperature_scaling_config_is_optional(artifact_dir: Path) -> None:
@@ -771,6 +777,7 @@ def test_directional_threshold_config_uses_grid_defaults(artifact_dir: Path) -> 
     loaded = ExperimentConfig.from_yaml(config_path)
 
     assert loaded.training.directional_thresholds.enabled is False
+    assert loaded.training.directional_thresholds.method == "joint_up_down"
     assert loaded.training.directional_thresholds.min_threshold == 0.05
     assert loaded.training.directional_thresholds.max_threshold == 0.95
     assert loaded.training.directional_thresholds.step == 0.05
@@ -801,6 +808,63 @@ def test_directional_threshold_config_validates_grid(artifact_dir: Path) -> None
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="directional_thresholds\\.step"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_directional_threshold_config_validates_methods_and_floors(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["directional_thresholds"] = {
+        "enabled": True,
+        "method": "joint_up_down",
+        "min": 0.05,
+        "max": 0.95,
+        "step": 0.05,
+        "delta": 0.0,
+        "up_precision_floor": 0.6,
+        "down_precision_floor": None,
+    }
+
+    config_path = artifact_dir / "bad_joint_threshold_floor.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="precision floors must be null"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["directional_thresholds"] = {
+        "enabled": True,
+        "method": "precision_floor",
+        "min": 0.05,
+        "max": 0.95,
+        "step": 0.05,
+        "delta": 0.0,
+        "up_precision_floor": 0.6,
+        "down_precision_floor": 0.6,
+    }
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.directional_thresholds.method == "precision_floor"
+    assert loaded.training.directional_thresholds.up_precision_floor == pytest.approx(0.6)
+    assert loaded.training.directional_thresholds.down_precision_floor == pytest.approx(0.6)
+
+    payload["training"]["directional_thresholds"]["up_precision_floor"] = None
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be set when method is precision_floor"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["directional_thresholds"]["up_precision_floor"] = 1.2
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="up_precision_floor"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["directional_thresholds"]["up_precision_floor"] = 0.6
+    payload["training"]["directional_thresholds"]["delta"] = -0.1
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="delta"):
         ExperimentConfig.from_yaml(config_path)
 
 

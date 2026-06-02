@@ -46,6 +46,7 @@ from thresholding import (
     apply_directional_threshold_policy,
     apply_thresholds_and_summarize,
     optimize_directional_thresholds,
+    optimize_precision_floor_thresholds,
     threshold_candidates,
 )
 from training import (
@@ -250,6 +251,11 @@ def format_optional_metric(value: float | None) -> str:
     return "nan" if value is None else f"{value:.4f}"
 
 
+def format_optional_threshold(value: float | None) -> str:
+    """Format optional thresholds for console logs."""
+    return "disabled" if value is None else f"{float(value):.4f}"
+
+
 def pr_ap_summary(config: ExperimentConfig, metrics: Any, prefix: str) -> str:
     """Format one-vs-rest PR-AP values for console logs."""
     values = {
@@ -407,23 +413,63 @@ def fit_and_apply_directional_thresholds(
         for step in (0.01, 0.005)
         if step < float(threshold_config.step) - 1e-12
     )
-    selection = optimize_directional_thresholds(
-        np.asarray(validation_outputs["probabilities"], dtype=np.float32),
-        np.asarray(validation_outputs["targets"], dtype=np.int64),
-        down_candidates=down_candidates,
-        up_candidates=up_candidates,
-        down_id=down_id,
-        neutral_id=neutral_id,
-        up_id=up_id,
-        refinement_steps=refinement_steps,
-    )
+    probabilities_validation = np.asarray(validation_outputs["probabilities"], dtype=np.float32)
+    targets_validation = np.asarray(validation_outputs["targets"], dtype=np.int64)
+    applied_refinement_steps: tuple[float, ...] = ()
+    if threshold_config.method == "joint_up_down":
+        applied_refinement_steps = refinement_steps
+        selection = optimize_directional_thresholds(
+            probabilities_validation,
+            targets_validation,
+            down_candidates=down_candidates,
+            up_candidates=up_candidates,
+            down_id=down_id,
+            neutral_id=neutral_id,
+            up_id=up_id,
+            refinement_steps=applied_refinement_steps,
+            delta=threshold_config.delta,
+        )
+        selection_metric = "directional_macro_f1"
+        tie_break_order = [
+            "maximize_directional_macro_f1",
+            "minimize_directional_rate_penalty",
+            "maximize_min_down_up_precision",
+            "maximize_thresholds",
+        ]
+        selection_final_tie_break = "highest_threshold_sum_then_down_then_up"
+    elif threshold_config.method == "precision_floor":
+        selection = optimize_precision_floor_thresholds(
+            probabilities_validation,
+            targets_validation,
+            down_candidates=down_candidates,
+            up_candidates=up_candidates,
+            down_precision_floor=float(threshold_config.down_precision_floor),
+            up_precision_floor=float(threshold_config.up_precision_floor),
+            down_id=down_id,
+            neutral_id=neutral_id,
+            up_id=up_id,
+            delta=threshold_config.delta,
+        )
+        selection_metric = "per_class_precision_floor_then_recall"
+        tie_break_order = [
+            "per_class_precision_at_or_above_floor",
+            "maximize_per_class_recall",
+            "maximize_per_class_precision",
+            "maximize_per_class_threshold",
+        ]
+        selection_final_tie_break = "independent_class_threshold_selection"
+    else:
+        raise ValueError(f"Unsupported directional threshold method: {threshold_config.method}")
     validation_predictions = apply_directional_threshold_policy(
-        np.asarray(validation_outputs["probabilities"], dtype=np.float32),
+        probabilities_validation,
         threshold_down=selection.threshold_down,
         threshold_up=selection.threshold_up,
         down_id=down_id,
         neutral_id=neutral_id,
         up_id=up_id,
+        delta=threshold_config.delta,
+        down_enabled=selection.down_enabled,
+        up_enabled=selection.up_enabled,
     )
     validation_metrics = metrics_from_prediction_outputs(config, validation_outputs, validation_predictions)
     validation_summary = apply_thresholds_and_summarize(
@@ -433,6 +479,9 @@ def fit_and_apply_directional_thresholds(
         down_id=down_id,
         neutral_id=neutral_id,
         up_id=up_id,
+        delta=threshold_config.delta,
+        down_enabled=selection.down_enabled,
+        up_enabled=selection.up_enabled,
     )
     validation_outputs_thresholded = prediction_outputs_with_decisions(validation_outputs, validation_predictions)
     test_metrics = None
@@ -446,6 +495,9 @@ def fit_and_apply_directional_thresholds(
             down_id=down_id,
             neutral_id=neutral_id,
             up_id=up_id,
+            delta=threshold_config.delta,
+            down_enabled=selection.down_enabled,
+            up_enabled=selection.up_enabled,
         )
         test_metrics = metrics_from_prediction_outputs(config, test_outputs, test_predictions)
         test_summary = apply_thresholds_and_summarize(
@@ -455,12 +507,16 @@ def fit_and_apply_directional_thresholds(
             down_id=down_id,
             neutral_id=neutral_id,
             up_id=up_id,
+            delta=threshold_config.delta,
+            down_enabled=selection.down_enabled,
+            up_enabled=selection.up_enabled,
         )
         test_outputs_thresholded = prediction_outputs_with_decisions(test_outputs, test_predictions)
 
     payload: dict[str, Any] = {
         "enabled": True,
         "classification_mode": "directional_thresholds",
+        "method": threshold_config.method,
         "decision_scope": (
             "Validation/test decision metrics, saved pred_label values, and confusion matrices use thresholded "
             "decisions. PR/ROC/AP remain probability-ranking metrics computed from softmax scores."
@@ -468,26 +524,27 @@ def fit_and_apply_directional_thresholds(
         "fold": fold,
         "best_epoch": int(best_epoch),
         "selection_split": "validation",
-        "selection_metric": "directional_macro_f1",
-        "tie_break_order": [
-            "maximize_directional_macro_f1",
-            "minimize_directional_rate_penalty",
-            "maximize_min_down_up_precision",
-            "maximize_thresholds",
-        ],
-        "threshold_down": float(selection.threshold_down),
-        "threshold_up": float(selection.threshold_up),
+        "selection_metric": selection_metric,
+        "tie_break_order": tie_break_order,
+        "threshold_down": None if selection.threshold_down is None else float(selection.threshold_down),
+        "threshold_up": None if selection.threshold_up is None else float(selection.threshold_up),
+        "down_enabled": bool(selection.down_enabled),
+        "up_enabled": bool(selection.up_enabled),
         "score": float(selection.score),
         "rate_penalty": float(selection.rate_penalty),
         "min_directional_precision": float(selection.min_directional_precision),
         "grid_min": float(threshold_config.min_threshold),
         "grid_max": float(threshold_config.max_threshold),
         "grid_step": float(threshold_config.step),
-        "refinement_steps": [float(step) for step in refinement_steps],
+        "refinement_steps": [float(step) for step in applied_refinement_steps],
+        "delta": float(threshold_config.delta),
+        "down_precision_floor": threshold_config.down_precision_floor,
+        "up_precision_floor": threshold_config.up_precision_floor,
         "n_candidates": int(selection.n_candidates),
         "optimization_stages": list(selection.stage_summaries),
-        "decision_tie_break": "max_margin_over_threshold",
-        "selection_final_tie_break": "highest_threshold_sum_then_down_then_up",
+        "selection_details": selection.selection_details,
+        "decision_tie_break": "logit_margin_over_threshold_with_delta_else_neutral",
+        "selection_final_tie_break": selection_final_tie_break,
         "class_ids": {
             "down": int(down_id),
             "neutral": int(neutral_id),
@@ -881,8 +938,9 @@ def train_fold(
         best_history.test_threshold_metrics = directional_threshold_summary["test_threshold_metrics"]
         print(
             f"Fold {fold_id} directional thresholds selected on validation: "
-            f"down={directional_threshold_summary['threshold_down']:.4f}, "
-            f"up={directional_threshold_summary['threshold_up']:.4f}, "
+            f"method={directional_threshold_summary['method']}, "
+            f"down={format_optional_threshold(directional_threshold_summary['threshold_down'])}, "
+            f"up={format_optional_threshold(directional_threshold_summary['threshold_up'])}, "
             f"val_threshold_directional_macro_f1={directional_threshold_summary['score']:.4f}."
         )
     save_probability_outputs(validation_outputs_for_artifacts, validation_probabilities_path, config)

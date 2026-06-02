@@ -239,10 +239,22 @@ def load_directional_thresholds(path: Path, config: ExperimentConfig) -> dict[st
     for label, class_id in (("down", down_id), ("neutral", neutral_id), ("up", up_id)):
         if not 0 <= int(class_id) < config.model.num_classes:
             raise ValueError(f"Directional threshold {label} class id is outside model.num_classes.")
+    threshold_down = None if payload["threshold_down"] is None else float(payload["threshold_down"])
+    threshold_up = None if payload["threshold_up"] is None else float(payload["threshold_up"])
+    method = str(payload.get("method", "joint_up_down"))
+    if method not in {"joint_up_down", "precision_floor"}:
+        raise ValueError("Directional threshold method must be joint_up_down or precision_floor.")
+    delta = float(payload.get("delta", 0.0))
+    if delta < 0.0:
+        raise ValueError("Directional threshold delta must be >= 0.")
     return {
         "path": str(path),
-        "threshold_down": float(payload["threshold_down"]),
-        "threshold_up": float(payload["threshold_up"]),
+        "method": method,
+        "threshold_down": threshold_down,
+        "threshold_up": threshold_up,
+        "down_enabled": bool(payload.get("down_enabled", threshold_down is not None)),
+        "up_enabled": bool(payload.get("up_enabled", threshold_up is not None)),
+        "delta": delta,
         "down_id": int(down_id),
         "neutral_id": int(neutral_id),
         "up_id": int(up_id),
@@ -263,11 +275,14 @@ def apply_directional_thresholds_to_result(
     targets = np.asarray(outputs.get("targets", []), dtype=np.int64).reshape(-1)
     thresholded_predictions = apply_directional_threshold_policy(
         probabilities,
-        threshold_down=float(threshold_config["threshold_down"]),
-        threshold_up=float(threshold_config["threshold_up"]),
+        threshold_down=None if threshold_config["threshold_down"] is None else float(threshold_config["threshold_down"]),
+        threshold_up=None if threshold_config["threshold_up"] is None else float(threshold_config["threshold_up"]),
         down_id=int(threshold_config["down_id"]),
         neutral_id=int(threshold_config["neutral_id"]),
         up_id=int(threshold_config["up_id"]),
+        delta=float(threshold_config.get("delta", 0.0)),
+        down_enabled=bool(threshold_config.get("down_enabled", threshold_config["threshold_down"] is not None)),
+        up_enabled=bool(threshold_config.get("up_enabled", threshold_config["threshold_up"] is not None)),
     )
     if "argmax_predictions" not in outputs:
         outputs["argmax_predictions"] = np.asarray(outputs.get("predictions", []), dtype=np.int64).reshape(-1)
@@ -319,8 +334,14 @@ def add_directional_threshold_fields(row: dict[str, Any], threshold_config: Mapp
         {
             "classification_mode": "directional_thresholds",
             "directional_thresholds_path": threshold_config["path"],
-            "threshold_down": float(threshold_config["threshold_down"]),
-            "threshold_up": float(threshold_config["threshold_up"]),
+            "threshold_method": threshold_config.get("method", "joint_up_down"),
+            "threshold_down": (
+                None if threshold_config["threshold_down"] is None else float(threshold_config["threshold_down"])
+            ),
+            "threshold_up": None if threshold_config["threshold_up"] is None else float(threshold_config["threshold_up"]),
+            "threshold_down_enabled": bool(threshold_config.get("down_enabled", True)),
+            "threshold_up_enabled": bool(threshold_config.get("up_enabled", True)),
+            "threshold_delta": float(threshold_config.get("delta", 0.0)),
             "threshold_down_id": int(threshold_config["down_id"]),
             "threshold_neutral_id": int(threshold_config["neutral_id"]),
             "threshold_up_id": int(threshold_config["up_id"]),

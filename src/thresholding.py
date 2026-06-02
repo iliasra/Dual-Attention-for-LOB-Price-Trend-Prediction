@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -10,16 +10,20 @@ import numpy as np
 class DirectionalThresholdSelection:
     """Store the selected directional thresholds and validation score."""
 
-    threshold_down: float
-    threshold_up: float
+    threshold_down: float | None
+    threshold_up: float | None
     score: float
     rate_penalty: float
     min_directional_precision: float
     n_candidates: int
+    down_enabled: bool = True
+    up_enabled: bool = True
     stage_summaries: tuple[dict[str, Any], ...] = ()
+    selection_details: dict[str, Any] = field(default_factory=dict)
 
 
 _TIE_TOLERANCE = 1e-12
+_PROBABILITY_EPS = 1e-7
 
 
 def threshold_candidates(min_threshold: float, max_threshold: float, step: float) -> np.ndarray:
@@ -62,16 +66,28 @@ def _refined_threshold_candidates(
     return threshold_candidates(lower, upper, step)
 
 
+def _clipped_logit(values: np.ndarray | float) -> np.ndarray:
+    """Return numerically stable logits from probabilities."""
+    probabilities = np.asarray(values, dtype=np.float64)
+    clipped = np.clip(probabilities, _PROBABILITY_EPS, 1.0 - _PROBABILITY_EPS)
+    return np.log(clipped / (1.0 - clipped))
+
+
 def apply_directional_threshold_policy(
     probabilities: np.ndarray,
     *,
-    threshold_down: float,
-    threshold_up: float,
+    threshold_down: float | None,
+    threshold_up: float | None,
     down_id: int,
     neutral_id: int,
     up_id: int,
+    delta: float = 0.0,
+    down_enabled: bool = True,
+    up_enabled: bool = True,
 ) -> np.ndarray:
     """Classify samples with fixed down/up probability thresholds."""
+    if delta < 0.0:
+        raise ValueError("delta must be >= 0.")
     probs = np.asarray(probabilities, dtype=np.float32)
     if probs.ndim != 2:
         raise ValueError("probabilities must be a 2D array.")
@@ -81,17 +97,24 @@ def apply_directional_threshold_policy(
 
     p_down = probs[:, down_id]
     p_up = probs[:, up_id]
-    down_hit = p_down >= float(threshold_down)
-    up_hit = p_up >= float(threshold_up)
+    down_active = bool(down_enabled) and threshold_down is not None
+    up_active = bool(up_enabled) and threshold_up is not None
+    down_hit = np.zeros(probs.shape[0], dtype=bool)
+    up_hit = np.zeros(probs.shape[0], dtype=bool)
+    if down_active:
+        down_hit = p_down >= float(threshold_down)
+    if up_active:
+        up_hit = p_up >= float(threshold_up)
 
     predictions = np.full(probs.shape[0], int(neutral_id), dtype=np.int64)
     predictions[down_hit & ~up_hit] = int(down_id)
     predictions[up_hit & ~down_hit] = int(up_id)
     both_hit = down_hit & up_hit
-    down_margin = p_down - float(threshold_down)
-    up_margin = p_up - float(threshold_up)
-    predictions[both_hit & (down_margin >= up_margin)] = int(down_id)
-    predictions[both_hit & (up_margin > down_margin)] = int(up_id)
+    if np.any(both_hit):
+        down_margin = _clipped_logit(p_down) - _clipped_logit(float(threshold_down))
+        up_margin = _clipped_logit(p_up) - _clipped_logit(float(threshold_up))
+        predictions[both_hit & (down_margin > up_margin + float(delta))] = int(down_id)
+        predictions[both_hit & (up_margin > down_margin + float(delta))] = int(up_id)
     return predictions
 
 
@@ -149,10 +172,12 @@ def _directional_selection_metrics(
 
 def _threshold_key(selection: DirectionalThresholdSelection) -> tuple[float, float, float]:
     """Return the final tie-breaker key favoring higher thresholds."""
+    threshold_down = -float("inf") if selection.threshold_down is None else float(selection.threshold_down)
+    threshold_up = -float("inf") if selection.threshold_up is None else float(selection.threshold_up)
     return (
-        float(selection.threshold_down + selection.threshold_up),
-        float(selection.threshold_down),
-        float(selection.threshold_up),
+        float(threshold_down + threshold_up),
+        threshold_down,
+        threshold_up,
     )
 
 
@@ -187,6 +212,7 @@ def _select_best_on_grid(
     down_id: int,
     neutral_id: int,
     up_id: int,
+    delta: float = 0.0,
 ) -> DirectionalThresholdSelection:
     """Search one down/up grid and return its best threshold pair."""
     best: DirectionalThresholdSelection | None = None
@@ -200,6 +226,7 @@ def _select_best_on_grid(
                 down_id=down_id,
                 neutral_id=neutral_id,
                 up_id=up_id,
+                delta=delta,
             )
             score, rate_penalty, min_directional_precision = _directional_selection_metrics(
                 targets,
@@ -261,8 +288,11 @@ def optimize_directional_thresholds(
     neutral_id: int,
     up_id: int,
     refinement_steps: tuple[float, ...] = (),
+    delta: float = 0.0,
 ) -> DirectionalThresholdSelection:
     """Select thresholds using F1, rate, precision, then high-threshold tie-breaks."""
+    if delta < 0.0:
+        raise ValueError("delta must be >= 0.")
     down_grid = np.asarray(down_candidates, dtype=np.float64)
     up_grid = np.asarray(up_candidates, dtype=np.float64)
     if down_grid.size == 0 or up_grid.size == 0:
@@ -284,6 +314,7 @@ def optimize_directional_thresholds(
         down_id=down_id,
         neutral_id=neutral_id,
         up_id=up_id,
+        delta=delta,
     )
     stage_summaries = [
         _stage_summary(
@@ -323,6 +354,7 @@ def optimize_directional_thresholds(
             down_id=down_id,
             neutral_id=neutral_id,
             up_id=up_id,
+            delta=delta,
         )
         total_candidates += int(stage_best.n_candidates)
         if _is_better_selection(stage_best, best):
@@ -342,6 +374,168 @@ def optimize_directional_thresholds(
         best,
         n_candidates=total_candidates,
         stage_summaries=tuple(stage_summaries),
+    )
+
+
+def _binary_threshold_metrics(
+    scores: np.ndarray,
+    targets: np.ndarray,
+    *,
+    threshold: float,
+    class_id: int,
+) -> tuple[float, float, float]:
+    """Return precision, recall, and F1 for one class threshold."""
+    score_array = np.asarray(scores, dtype=np.float32).reshape(-1)
+    target_array = np.asarray(targets, dtype=np.int64).reshape(-1)
+    if score_array.shape[0] != target_array.shape[0]:
+        raise ValueError("scores and targets must have the same length.")
+    positive_predictions = score_array >= float(threshold)
+    positive_targets = target_array == int(class_id)
+    true_positive = int(np.sum(positive_predictions & positive_targets))
+    false_positive = int(np.sum(positive_predictions & ~positive_targets))
+    false_negative = int(np.sum(~positive_predictions & positive_targets))
+    precision = 0.0 if true_positive + false_positive == 0 else true_positive / (true_positive + false_positive)
+    recall = 0.0 if true_positive + false_negative == 0 else true_positive / (true_positive + false_negative)
+    f1 = 0.0 if precision + recall == 0.0 else 2.0 * precision * recall / (precision + recall)
+    return float(precision), float(recall), float(f1)
+
+
+def _is_better_precision_floor_candidate(
+    candidate: dict[str, Any],
+    best: dict[str, Any] | None,
+) -> bool:
+    """Compare candidates by recall, precision, then higher threshold."""
+    if best is None:
+        return True
+    if candidate["recall"] > best["recall"] + _TIE_TOLERANCE:
+        return True
+    if abs(candidate["recall"] - best["recall"]) > _TIE_TOLERANCE:
+        return False
+    if candidate["precision"] > best["precision"] + _TIE_TOLERANCE:
+        return True
+    if abs(candidate["precision"] - best["precision"]) > _TIE_TOLERANCE:
+        return False
+    return candidate["threshold"] > best["threshold"] + _TIE_TOLERANCE
+
+
+def _select_precision_floor_threshold(
+    scores: np.ndarray,
+    targets: np.ndarray,
+    *,
+    candidates: np.ndarray,
+    class_id: int,
+    precision_floor: float,
+) -> dict[str, Any]:
+    """Select one class threshold maximizing recall under a precision floor."""
+    if not 0.0 <= precision_floor <= 1.0:
+        raise ValueError("precision floor must be in [0, 1].")
+    best: dict[str, Any] | None = None
+    meeting_floor = 0
+    for threshold in np.asarray(candidates, dtype=np.float64):
+        precision, recall, f1 = _binary_threshold_metrics(
+            scores,
+            targets,
+            threshold=float(threshold),
+            class_id=int(class_id),
+        )
+        if precision + _TIE_TOLERANCE < precision_floor:
+            continue
+        meeting_floor += 1
+        candidate = {
+            "enabled": True,
+            "threshold": float(threshold),
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+        }
+        if _is_better_precision_floor_candidate(candidate, best):
+            best = candidate
+    if best is None:
+        return {
+            "enabled": False,
+            "threshold": None,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "precision_floor": float(precision_floor),
+            "n_candidates": int(len(candidates)),
+            "n_candidates_meeting_floor": 0,
+            "fallback": "disabled_no_candidate_meets_precision_floor",
+        }
+    best["precision_floor"] = float(precision_floor)
+    best["n_candidates"] = int(len(candidates))
+    best["n_candidates_meeting_floor"] = int(meeting_floor)
+    return best
+
+
+def optimize_precision_floor_thresholds(
+    probabilities: np.ndarray,
+    targets: np.ndarray,
+    *,
+    down_candidates: np.ndarray,
+    up_candidates: np.ndarray,
+    down_precision_floor: float,
+    up_precision_floor: float,
+    down_id: int,
+    neutral_id: int,
+    up_id: int,
+    delta: float = 0.0,
+) -> DirectionalThresholdSelection:
+    """Select independent down/up thresholds under precision floors."""
+    probs = np.asarray(probabilities, dtype=np.float32)
+    target_array = np.asarray(targets, dtype=np.int64).reshape(-1)
+    if probs.ndim != 2:
+        raise ValueError("probabilities must be a 2D array.")
+    if probs.shape[0] != target_array.shape[0]:
+        raise ValueError("probabilities and targets must have the same number of rows.")
+    max_id = max(down_id, neutral_id, up_id)
+    if probs.shape[1] <= max_id:
+        raise ValueError("probabilities has fewer columns than the requested class ids.")
+
+    down_selection = _select_precision_floor_threshold(
+        probs[:, int(down_id)],
+        target_array,
+        candidates=down_candidates,
+        class_id=int(down_id),
+        precision_floor=float(down_precision_floor),
+    )
+    up_selection = _select_precision_floor_threshold(
+        probs[:, int(up_id)],
+        target_array,
+        candidates=up_candidates,
+        class_id=int(up_id),
+        precision_floor=float(up_precision_floor),
+    )
+    predictions = apply_directional_threshold_policy(
+        probs,
+        threshold_down=down_selection["threshold"],
+        threshold_up=up_selection["threshold"],
+        down_id=down_id,
+        neutral_id=neutral_id,
+        up_id=up_id,
+        delta=delta,
+        down_enabled=bool(down_selection["enabled"]),
+        up_enabled=bool(up_selection["enabled"]),
+    )
+    score, rate_penalty, min_directional_precision = _directional_selection_metrics(
+        target_array,
+        predictions,
+        down_id=down_id,
+        up_id=up_id,
+    )
+    return DirectionalThresholdSelection(
+        threshold_down=down_selection["threshold"],
+        threshold_up=up_selection["threshold"],
+        score=score,
+        rate_penalty=rate_penalty,
+        min_directional_precision=min_directional_precision,
+        n_candidates=int(len(down_candidates) + len(up_candidates)),
+        down_enabled=bool(down_selection["enabled"]),
+        up_enabled=bool(up_selection["enabled"]),
+        selection_details={
+            "down": down_selection,
+            "up": up_selection,
+        },
     )
 
 
@@ -390,11 +584,14 @@ def thresholded_metric_summary(
 def apply_thresholds_and_summarize(
     outputs: dict[str, Any],
     *,
-    threshold_down: float,
-    threshold_up: float,
+    threshold_down: float | None,
+    threshold_up: float | None,
     down_id: int,
     neutral_id: int,
     up_id: int,
+    delta: float = 0.0,
+    down_enabled: bool = True,
+    up_enabled: bool = True,
 ) -> dict[str, float]:
     """Apply directional thresholds to collected outputs and summarize metrics."""
     probabilities = np.asarray(outputs.get("probabilities", []), dtype=np.float32)
@@ -406,6 +603,9 @@ def apply_thresholds_and_summarize(
         down_id=down_id,
         neutral_id=neutral_id,
         up_id=up_id,
+        delta=delta,
+        down_enabled=down_enabled,
+        up_enabled=up_enabled,
     )
     return thresholded_metric_summary(
         targets,

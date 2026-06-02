@@ -179,9 +179,13 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         },
         "directional_thresholds": {
             "enabled": None,
+            "method": None,
             "min": None,
             "max": None,
             "step": None,
+            "delta": None,
+            "up_precision_floor": None,
+            "down_precision_floor": None,
         },
         "sampling": {
             "neutral_to_directional_ratio": None,
@@ -204,9 +208,13 @@ OPTIONAL_CONFIG_KEYS = {
     "training.temperature_scaling.enabled",
     "training.directional_thresholds",
     "training.directional_thresholds.enabled",
+    "training.directional_thresholds.method",
     "training.directional_thresholds.min",
     "training.directional_thresholds.max",
     "training.directional_thresholds.step",
+    "training.directional_thresholds.delta",
+    "training.directional_thresholds.up_precision_floor",
+    "training.directional_thresholds.down_precision_floor",
     "training.sampling",
 }
 
@@ -1160,12 +1168,21 @@ class TrainingMonitorParamsConfig:
 @dataclass(slots=True)
 class TrainingDirectionalThresholdConfig:
     enabled: bool = False
+    method: str = "joint_up_down"
     min_threshold: float = 0.05
     max_threshold: float = 0.95
     step: float = 0.05
+    delta: float = 0.0
+    up_precision_floor: float | None = None
+    down_precision_floor: float | None = None
 
     def __post_init__(self) -> None:
         """Check optional post-training directional threshold settings."""
+        self.method = self.method.lower()
+        if self.method not in {"joint_up_down", "precision_floor"}:
+            raise ValueError(
+                "training.directional_thresholds.method must be 'joint_up_down' or 'precision_floor'."
+            )
         if not 0.0 <= self.min_threshold <= 1.0:
             raise ValueError("training.directional_thresholds.min must be in [0, 1].")
         if not 0.0 <= self.max_threshold <= 1.0:
@@ -1174,6 +1191,26 @@ class TrainingDirectionalThresholdConfig:
             raise ValueError("training.directional_thresholds.min must be <= max.")
         if self.step <= 0.0:
             raise ValueError("training.directional_thresholds.step must be > 0.")
+        if self.delta < 0.0:
+            raise ValueError("training.directional_thresholds.delta must be >= 0.")
+        for name, value in (
+            ("up_precision_floor", self.up_precision_floor),
+            ("down_precision_floor", self.down_precision_floor),
+        ):
+            if value is not None and not 0.0 <= value <= 1.0:
+                raise ValueError(f"training.directional_thresholds.{name} must be in [0, 1] or null.")
+        if self.method == "joint_up_down":
+            if self.up_precision_floor is not None or self.down_precision_floor is not None:
+                raise ValueError(
+                    "training.directional_thresholds up/down precision floors must be null "
+                    "when method is joint_up_down."
+                )
+        if self.method == "precision_floor":
+            if self.up_precision_floor is None or self.down_precision_floor is None:
+                raise ValueError(
+                    "training.directional_thresholds up_precision_floor and down_precision_floor "
+                    "must be set when method is precision_floor."
+                )
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingDirectionalThresholdConfig":
@@ -1183,9 +1220,13 @@ class TrainingDirectionalThresholdConfig:
         defaults = cls()
         return cls(
             enabled=bool(payload.get("enabled", False)),
+            method=str(payload.get("method", defaults.method)),
             min_threshold=float(payload.get("min", defaults.min_threshold)),
             max_threshold=float(payload.get("max", defaults.max_threshold)),
             step=float(payload.get("step", defaults.step)),
+            delta=float(payload.get("delta", defaults.delta)),
+            up_precision_floor=_optional_float(payload.get("up_precision_floor")),
+            down_precision_floor=_optional_float(payload.get("down_precision_floor")),
         )
 
 

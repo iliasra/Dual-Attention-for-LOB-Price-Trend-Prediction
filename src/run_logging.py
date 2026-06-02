@@ -271,9 +271,13 @@ def save_run_config_snapshot(
             },
             "directional_thresholds": {
                 "enabled": config.training.directional_thresholds.enabled,
+                "method": config.training.directional_thresholds.method,
                 "min": config.training.directional_thresholds.min_threshold,
                 "max": config.training.directional_thresholds.max_threshold,
                 "step": config.training.directional_thresholds.step,
+                "delta": config.training.directional_thresholds.delta,
+                "up_precision_floor": config.training.directional_thresholds.up_precision_floor,
+                "down_precision_floor": config.training.directional_thresholds.down_precision_floor,
             },
             "model_parameters": model_parameters or {},
             "fast_smoothing_lambdas": fast_smoothing_lambda_summary(config, preprocessing_metadata),
@@ -1036,6 +1040,9 @@ def save_run_log(
             for key in (
                 "threshold_down",
                 "threshold_up",
+                "down_enabled",
+                "up_enabled",
+                "method",
                 "score",
                 "rate_penalty",
                 "min_directional_precision",
@@ -1047,6 +1054,9 @@ def save_run_log(
                 "grid_max",
                 "grid_step",
                 "refinement_steps",
+                "delta",
+                "down_precision_floor",
+                "up_precision_floor",
                 "n_candidates",
             ):
                 if key in threshold_summary:
@@ -1054,6 +1064,9 @@ def save_run_log(
             stages = threshold_summary.get("optimization_stages")
             if isinstance(stages, list):
                 handle.write(f"optimization_stages: {len(stages)}\n")
+            details = threshold_summary.get("selection_details")
+            if isinstance(details, dict) and details:
+                handle.write(f"selection_details: {details}\n")
             if directional_thresholds_path is not None:
                 handle.write(f"artifact: {directional_thresholds_path}\n")
         handle.write("\nTraining sampling\n")
