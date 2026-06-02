@@ -516,6 +516,8 @@ def test_lob_trainer_evaluate_can_collect_probability_outputs() -> None:
     )
 
     assert result.prediction_outputs is not None
+    assert result.prediction_outputs["logits"].shape == (3, 3)
+    assert result.prediction_outputs["logits"].dtype == np.float32
     assert result.prediction_outputs["probabilities"].shape == (3, 3)
     assert result.prediction_outputs["probabilities"].dtype == np.float32
     assert result.prediction_outputs["targets"].tolist() == [0, 1, 2]

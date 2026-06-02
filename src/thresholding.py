@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -16,6 +16,7 @@ class DirectionalThresholdSelection:
     rate_penalty: float
     min_directional_precision: float
     n_candidates: int
+    stage_summaries: tuple[dict[str, Any], ...] = ()
 
 
 _TIE_TOLERANCE = 1e-12
@@ -33,6 +34,32 @@ def threshold_candidates(min_threshold: float, max_threshold: float, step: float
         values.append(round(current, 12))
         current += float(step)
     return np.asarray(values, dtype=np.float64)
+
+
+def _inferred_grid_step(candidates: np.ndarray) -> float | None:
+    """Infer the smallest positive spacing in a threshold grid."""
+    values = np.unique(np.asarray(candidates, dtype=np.float64))
+    if values.size < 2:
+        return None
+    diffs = np.diff(values)
+    positive_diffs = diffs[diffs > _TIE_TOLERANCE]
+    if positive_diffs.size == 0:
+        return None
+    return float(np.min(positive_diffs))
+
+
+def _refined_threshold_candidates(
+    center: float,
+    *,
+    radius: float,
+    step: float,
+    min_threshold: float,
+    max_threshold: float,
+) -> np.ndarray:
+    """Build a clipped local threshold grid around a selected center."""
+    lower = max(float(min_threshold), float(center) - float(radius))
+    upper = min(float(max_threshold), float(center) + float(radius))
+    return threshold_candidates(lower, upper, step)
 
 
 def apply_directional_threshold_policy(
@@ -151,7 +178,7 @@ def _is_better_selection(
     return _threshold_key(candidate) > _threshold_key(best)
 
 
-def optimize_directional_thresholds(
+def _select_best_on_grid(
     probabilities: np.ndarray,
     targets: np.ndarray,
     *,
@@ -161,7 +188,7 @@ def optimize_directional_thresholds(
     neutral_id: int,
     up_id: int,
 ) -> DirectionalThresholdSelection:
-    """Select thresholds using F1, rate, precision, then high-threshold tie-breaks."""
+    """Search one down/up grid and return its best threshold pair."""
     best: DirectionalThresholdSelection | None = None
     n_candidates = int(len(down_candidates) * len(up_candidates))
     for threshold_down in down_candidates:
@@ -193,6 +220,129 @@ def optimize_directional_thresholds(
     if best is None:
         raise ValueError("threshold grid is empty.")
     return best
+
+
+def _stage_summary(
+    *,
+    stage_index: int,
+    stage_name: str,
+    down_candidates: np.ndarray,
+    up_candidates: np.ndarray,
+    best: DirectionalThresholdSelection,
+) -> dict[str, Any]:
+    """Return a compact summary for one threshold-search stage."""
+    return {
+        "stage": int(stage_index),
+        "name": stage_name,
+        "step_down": _inferred_grid_step(down_candidates),
+        "step_up": _inferred_grid_step(up_candidates),
+        "down_min": float(down_candidates[0]),
+        "down_max": float(down_candidates[-1]),
+        "up_min": float(up_candidates[0]),
+        "up_max": float(up_candidates[-1]),
+        "down_candidates": int(len(down_candidates)),
+        "up_candidates": int(len(up_candidates)),
+        "n_candidates": int(len(down_candidates) * len(up_candidates)),
+        "best_threshold_down": float(best.threshold_down),
+        "best_threshold_up": float(best.threshold_up),
+        "best_score": float(best.score),
+        "best_rate_penalty": float(best.rate_penalty),
+        "best_min_directional_precision": float(best.min_directional_precision),
+    }
+
+
+def optimize_directional_thresholds(
+    probabilities: np.ndarray,
+    targets: np.ndarray,
+    *,
+    down_candidates: np.ndarray,
+    up_candidates: np.ndarray,
+    down_id: int,
+    neutral_id: int,
+    up_id: int,
+    refinement_steps: tuple[float, ...] = (),
+) -> DirectionalThresholdSelection:
+    """Select thresholds using F1, rate, precision, then high-threshold tie-breaks."""
+    down_grid = np.asarray(down_candidates, dtype=np.float64)
+    up_grid = np.asarray(up_candidates, dtype=np.float64)
+    if down_grid.size == 0 or up_grid.size == 0:
+        raise ValueError("threshold grid is empty.")
+
+    min_down_threshold = float(np.min(down_grid))
+    max_down_threshold = float(np.max(down_grid))
+    min_up_threshold = float(np.min(up_grid))
+    max_up_threshold = float(np.max(up_grid))
+    current_radius = max(
+        _inferred_grid_step(down_grid) or 0.0,
+        _inferred_grid_step(up_grid) or 0.0,
+    )
+    best = _select_best_on_grid(
+        probabilities,
+        targets,
+        down_candidates=down_grid,
+        up_candidates=up_grid,
+        down_id=down_id,
+        neutral_id=neutral_id,
+        up_id=up_id,
+    )
+    stage_summaries = [
+        _stage_summary(
+            stage_index=0,
+            stage_name="coarse",
+            down_candidates=down_grid,
+            up_candidates=up_grid,
+            best=best,
+        )
+    ]
+    total_candidates = int(best.n_candidates)
+
+    for stage_index, step in enumerate(refinement_steps, start=1):
+        if step <= 0.0:
+            raise ValueError("refinement threshold steps must be > 0.")
+        if current_radius <= 0.0:
+            break
+        down_grid = _refined_threshold_candidates(
+            best.threshold_down,
+            radius=current_radius,
+            step=float(step),
+            min_threshold=min_down_threshold,
+            max_threshold=max_down_threshold,
+        )
+        up_grid = _refined_threshold_candidates(
+            best.threshold_up,
+            radius=current_radius,
+            step=float(step),
+            min_threshold=min_up_threshold,
+            max_threshold=max_up_threshold,
+        )
+        stage_best = _select_best_on_grid(
+            probabilities,
+            targets,
+            down_candidates=down_grid,
+            up_candidates=up_grid,
+            down_id=down_id,
+            neutral_id=neutral_id,
+            up_id=up_id,
+        )
+        total_candidates += int(stage_best.n_candidates)
+        if _is_better_selection(stage_best, best):
+            best = stage_best
+        stage_summaries.append(
+            _stage_summary(
+                stage_index=stage_index,
+                stage_name=f"refine_{step:.6g}",
+                down_candidates=down_grid,
+                up_candidates=up_grid,
+                best=stage_best,
+            )
+        )
+        current_radius = float(step)
+
+    return replace(
+        best,
+        n_candidates=total_candidates,
+        stage_summaries=tuple(stage_summaries),
+    )
 
 
 def thresholded_metric_summary(

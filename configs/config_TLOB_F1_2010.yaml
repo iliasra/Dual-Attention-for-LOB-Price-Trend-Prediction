@@ -157,6 +157,8 @@ training:
   model_dir: ../results
   use_amp: true
   deterministic_torch: false
+  temperature_scaling:
+    enabled: false
   directional_thresholds:
     enabled: false
     min: 0.05

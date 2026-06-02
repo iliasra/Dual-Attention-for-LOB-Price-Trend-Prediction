@@ -185,6 +185,8 @@ training:
   model_dir: ../results
   use_amp: true
   deterministic_torch: false
+  temperature_scaling:
+    enabled: true
   directional_thresholds: #choose best probability thresholds to classify, based on the grid below
     enabled: true
     min: 0.05

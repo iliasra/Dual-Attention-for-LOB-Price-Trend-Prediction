@@ -174,6 +174,9 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "model_dir": None,
         "use_amp": None,
         "deterministic_torch": None,
+        "temperature_scaling": {
+            "enabled": None,
+        },
         "directional_thresholds": {
             "enabled": None,
             "min": None,
@@ -197,6 +200,8 @@ OPTIONAL_CONFIG_KEYS = {
     "training.early_stopping_warmup",
     "training.early_stopping_min_delta",
     "training.optimizer",
+    "training.temperature_scaling",
+    "training.temperature_scaling.enabled",
     "training.directional_thresholds",
     "training.directional_thresholds.enabled",
     "training.directional_thresholds.min",
@@ -1185,6 +1190,24 @@ class TrainingDirectionalThresholdConfig:
 
 
 @dataclass(slots=True)
+class TrainingTemperatureScalingConfig:
+    enabled: bool = False
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingTemperatureScalingConfig":
+        """Build optional temperature scaling settings from YAML."""
+        if payload is None:
+            return cls()
+        unexpected = sorted(set(payload) - {"enabled"})
+        if unexpected:
+            raise ValueError(
+                "Invalid experiment config; unexpected key(s) in training.temperature_scaling: "
+                f"{unexpected}"
+            )
+        return cls(enabled=bool(payload.get("enabled", False)))
+
+
+@dataclass(slots=True)
 class TrainingConfig:
     device: str
     epochs: int
@@ -1209,6 +1232,7 @@ class TrainingConfig:
     model_dir: str
     use_amp: bool
     deterministic_torch: bool
+    temperature_scaling: TrainingTemperatureScalingConfig
     directional_thresholds: TrainingDirectionalThresholdConfig
     sampling: TrainingSamplingConfig
     class_weights: list[float] | None = None
@@ -1313,6 +1337,9 @@ class TrainingConfig:
             model_dir=str(payload["model_dir"]),
             use_amp=bool(payload["use_amp"]),
             deterministic_torch=bool(payload["deterministic_torch"]),
+            temperature_scaling=TrainingTemperatureScalingConfig.from_dict(
+                payload.get("temperature_scaling"),
+            ),
             directional_thresholds=TrainingDirectionalThresholdConfig.from_dict(
                 payload.get("directional_thresholds"),
             ),

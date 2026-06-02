@@ -736,16 +736,19 @@ class ClassificationMetricAccumulator:
 
 
 class PredictionOutputAccumulator:
-    """Collect evaluation outputs for probability and PR artifacts."""
+    """Collect evaluation outputs for probability, logit, and PR artifacts."""
 
     def __init__(self) -> None:
+        self.logit_chunks: list[np.ndarray] = []
         self.probability_chunks: list[np.ndarray] = []
         self.target_chunks: list[np.ndarray] = []
         self.prediction_chunks: list[np.ndarray] = []
 
     def update(self, logits: torch.Tensor, targets: torch.Tensor) -> None:
-        """Collect post-softmax probabilities and labels for one batch."""
-        probabilities = torch.softmax(logits.detach().float(), dim=-1)
+        """Collect logits, post-softmax probabilities, and labels for one batch."""
+        detached_logits = logits.detach().float()
+        self.logit_chunks.append(detached_logits.cpu().numpy().astype(np.float32, copy=False))
+        probabilities = torch.softmax(detached_logits, dim=-1)
         predictions = torch.argmax(probabilities, dim=-1)
         self.probability_chunks.append(probabilities.cpu().numpy().astype(np.float32, copy=False))
         self.target_chunks.append(targets.detach().to("cpu", dtype=torch.long).numpy())
@@ -759,7 +762,9 @@ class PredictionOutputAccumulator:
                 "targets": np.asarray([], dtype=np.int64),
                 "predictions": np.asarray([], dtype=np.int64),
                 "probabilities": np.empty((0, 0), dtype=np.float32),
+                "logits": np.empty((0, 0), dtype=np.float32),
             }
+        logits = np.concatenate(self.logit_chunks, axis=0)
         probabilities = np.concatenate(self.probability_chunks, axis=0)
         targets = np.concatenate(self.target_chunks, axis=0).astype(np.int64, copy=False)
         predictions = np.concatenate(self.prediction_chunks, axis=0).astype(np.int64, copy=False)
@@ -768,6 +773,7 @@ class PredictionOutputAccumulator:
             "targets": targets,
             "predictions": predictions,
             "probabilities": probabilities,
+            "logits": logits,
         }
 
 

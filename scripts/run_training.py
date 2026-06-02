@@ -17,6 +17,11 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from configuration import ExperimentConfig, load_config
+from calibration import (
+    apply_temperature_to_outputs,
+    fit_temperature_scaling,
+    save_temperature_scaling_artifact,
+)
 from datasets import EpochNeutralDownsamplingSampler, LOBDataset, sequence_window_labels
 from model import build_model
 from monitoring import epoch_monitor_value as configured_epoch_monitor_value
@@ -311,6 +316,64 @@ def metrics_from_prediction_outputs(
     )
 
 
+def fit_and_apply_temperature_scaling(
+    *,
+    config: ExperimentConfig,
+    validation_outputs: dict[str, Any],
+    test_outputs: dict[str, Any] | None,
+    best_epoch: int,
+    fold: str,
+    target_path: Path,
+) -> tuple[
+    dict[str, Any],
+    ClassificationMetrics,
+    ClassificationMetrics | None,
+    dict[str, Any],
+    dict[str, Any] | None,
+]:
+    """Fit validation temperature scaling and return calibrated artifacts."""
+    calibration_start = perf_counter()
+    result = fit_temperature_scaling(
+        np.asarray(validation_outputs["logits"], dtype=np.float32),
+        np.asarray(validation_outputs["targets"], dtype=np.int64),
+        device=config.training.device,
+    )
+    fit_seconds = perf_counter() - calibration_start
+
+    validation_outputs_calibrated = apply_temperature_to_outputs(
+        validation_outputs,
+        result.temperature,
+    )
+    validation_metrics = metrics_from_prediction_outputs(
+        config,
+        validation_outputs_calibrated,
+        np.asarray(validation_outputs_calibrated["predictions"], dtype=np.int64),
+    )
+    test_outputs_calibrated = None
+    test_metrics = None
+    if test_outputs is not None:
+        test_outputs_calibrated = apply_temperature_to_outputs(test_outputs, result.temperature)
+        test_metrics = metrics_from_prediction_outputs(
+            config,
+            test_outputs_calibrated,
+            np.asarray(test_outputs_calibrated["predictions"], dtype=np.int64),
+        )
+
+    payload = {
+        "enabled": True,
+        "fold": fold,
+        "best_epoch": int(best_epoch),
+        "selection_split": "validation",
+        "probability_source": "temperature_scaled_logits",
+        "note": "Temperature is fitted with unweighted cross-entropy on the natural validation distribution.",
+        **result.to_dict(),
+        "fit_seconds": round(fit_seconds, 6),
+        "fit_duration": format_duration(fit_seconds),
+    }
+    save_temperature_scaling_artifact(payload, target_path)
+    return payload, validation_metrics, test_metrics, validation_outputs_calibrated, test_outputs_calibrated
+
+
 def fit_and_apply_directional_thresholds(
     *,
     config: ExperimentConfig,
@@ -339,6 +402,11 @@ def fit_and_apply_directional_thresholds(
         threshold_config.max_threshold,
         threshold_config.step,
     )
+    refinement_steps = tuple(
+        step
+        for step in (0.01, 0.005)
+        if step < float(threshold_config.step) - 1e-12
+    )
     selection = optimize_directional_thresholds(
         np.asarray(validation_outputs["probabilities"], dtype=np.float32),
         np.asarray(validation_outputs["targets"], dtype=np.int64),
@@ -347,6 +415,7 @@ def fit_and_apply_directional_thresholds(
         down_id=down_id,
         neutral_id=neutral_id,
         up_id=up_id,
+        refinement_steps=refinement_steps,
     )
     validation_predictions = apply_directional_threshold_policy(
         np.asarray(validation_outputs["probabilities"], dtype=np.float32),
@@ -414,7 +483,9 @@ def fit_and_apply_directional_thresholds(
         "grid_min": float(threshold_config.min_threshold),
         "grid_max": float(threshold_config.max_threshold),
         "grid_step": float(threshold_config.step),
+        "refinement_steps": [float(step) for step in refinement_steps],
         "n_candidates": int(selection.n_candidates),
+        "optimization_stages": list(selection.stage_summaries),
         "decision_tie_break": "max_margin_over_threshold",
         "selection_final_tie_break": "highest_threshold_sum_then_down_then_up",
         "class_ids": {
@@ -596,6 +667,7 @@ def train_fold(
     run_expert_usage_path = fold_log_dir / "expert_usage.yaml"
     run_pr_thresholds_path = fold_log_dir / "pr_thresholds.yaml"
     run_directional_thresholds_path = fold_log_dir / "directional_thresholds.yaml"
+    run_temperature_scaling_path = fold_log_dir / "temperature_scaling.yaml"
     run_pr_curves_dir = fold_log_dir / "pr_curves"
     run_probabilities_dir = fold_log_dir / "probabilities"
     config.training.model_dir = str(fold_result_dir)
@@ -755,6 +827,33 @@ def train_fold(
         raise RuntimeError("Best model validation evaluation did not collect probability outputs.")
     validation_outputs_for_artifacts = best_evaluation["validation_outputs"]
     test_outputs_for_artifacts = best_evaluation["test_outputs"]
+    temperature_scaling_summary: dict[str, Any] = {
+        "enabled": bool(config.training.temperature_scaling.enabled),
+    }
+    if config.training.temperature_scaling.enabled:
+        best_history = history[best_epoch - 1]
+        (
+            temperature_scaling_summary,
+            val_calibrated_metrics,
+            test_calibrated_metrics,
+            validation_outputs_for_artifacts,
+            test_outputs_for_artifacts,
+        ) = fit_and_apply_temperature_scaling(
+            config=config,
+            validation_outputs=validation_outputs_for_artifacts,
+            test_outputs=test_outputs_for_artifacts,
+            best_epoch=best_epoch,
+            fold=fold_id,
+            target_path=run_temperature_scaling_path,
+        )
+        best_history.val_metrics = val_calibrated_metrics
+        best_history.test_metrics = test_calibrated_metrics
+        print(
+            f"Fold {fold_id} temperature scaling fitted on validation: "
+            f"T={temperature_scaling_summary['temperature']:.6g}, "
+            f"val_unweighted_ce_before={temperature_scaling_summary['validation_nll_before']:.6f}, "
+            f"val_unweighted_ce_after={temperature_scaling_summary['validation_nll_after']:.6f}."
+        )
     directional_threshold_summary: dict[str, Any] = {
         "enabled": bool(config.training.directional_thresholds.enabled),
     }
@@ -814,6 +913,9 @@ def train_fold(
         "best_model_evaluation_seconds": round(best_evaluation["total_seconds"], 6),
         "best_model_evaluation_duration": format_duration(best_evaluation["total_seconds"]),
     }
+    if temperature_scaling_summary.get("enabled"):
+        timing["temperature_scaling_fit_seconds"] = temperature_scaling_summary.get("fit_seconds")
+        timing["temperature_scaling_fit_duration"] = temperature_scaling_summary.get("fit_duration")
 
     save_epoch_history(history, run_losses_path, config=config, fold=fold_id)
     save_confusion_matrices(history, run_confusion_matrices_path, fold=fold_id)
@@ -833,6 +935,10 @@ def train_fold(
         pr_thresholds_path=run_pr_thresholds_path,
         pr_curves_dir=run_pr_curves_dir,
         probabilities_dir=run_probabilities_dir,
+        temperature_scaling_path=(
+            run_temperature_scaling_path if temperature_scaling_summary.get("enabled") else None
+        ),
+        temperature_scaling_summary=temperature_scaling_summary,
         directional_thresholds_path=(
             run_directional_thresholds_path if directional_threshold_summary.get("enabled") else None
         ),
@@ -852,6 +958,8 @@ def train_fold(
     )
     print(f"Fold {fold_id} run log saved to: {run_log_path}")
     print(f"Fold {fold_id} PR thresholds saved to: {run_pr_thresholds_path}")
+    if temperature_scaling_summary.get("enabled"):
+        print(f"Fold {fold_id} temperature scaling saved to: {run_temperature_scaling_path}")
     if directional_threshold_summary.get("enabled"):
         print(f"Fold {fold_id} directional thresholds saved to: {run_directional_thresholds_path}")
     if test_probabilities_path is None:
@@ -914,6 +1022,9 @@ def train_fold(
             "confusion_matrices": str(run_confusion_matrices_path),
             "expert_usage": str(run_expert_usage_path),
             "pr_thresholds": str(run_pr_thresholds_path),
+            "temperature_scaling": (
+                str(run_temperature_scaling_path) if temperature_scaling_summary.get("enabled") else None
+            ),
             "directional_thresholds": (
                 str(run_directional_thresholds_path) if directional_threshold_summary.get("enabled") else None
             ),
@@ -922,6 +1033,7 @@ def train_fold(
             "test_probabilities": None if test_probabilities_path is None else str(test_probabilities_path),
         },
         "pr_artifacts": pr_artifacts,
+        "temperature_scaling": temperature_scaling_summary,
         "directional_thresholds": directional_threshold_summary,
     }
 

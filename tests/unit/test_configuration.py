@@ -133,6 +133,7 @@ def test_tlob_fi2010_config_loads() -> None:
     assert config.training.optimizer == "adam"
     assert config.training.early_stopping_min_delta >= 0.0
     assert config.training.monitor == "val_loss"
+    assert config.training.temperature_scaling.enabled is False
 
 
 def test_training_class_weight_parameters_are_validated(artifact_dir: Path) -> None:
@@ -610,6 +611,7 @@ def test_training_data_loader_settings_are_loaded() -> None:
     assert config.training.monitor_mode == "max"
     assert config.training.monitor_params.lambda_ece == 0.1
     assert config.training.monitor_params.lambda_rate == 0.2
+    assert config.training.temperature_scaling.enabled is False
     assert config.training.directional_thresholds.enabled is True
     assert config.training.directional_thresholds.min_threshold == 0.05
     assert config.training.directional_thresholds.max_threshold == 0.95
@@ -739,6 +741,24 @@ def test_directional_threshold_config_is_optional(artifact_dir: Path) -> None:
     assert loaded.training.directional_thresholds.min_threshold == 0.05
     assert loaded.training.directional_thresholds.max_threshold == 0.95
     assert loaded.training.directional_thresholds.step == 0.05
+
+
+def test_temperature_scaling_config_is_optional(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"].pop("temperature_scaling", None)
+
+    config_path = artifact_dir / "no_temperature_scaling.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.temperature_scaling.enabled is False
+
+    payload["training"]["temperature_scaling"] = {"enabled": True}
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.temperature_scaling.enabled is True
 
 
 def test_directional_threshold_config_uses_grid_defaults(artifact_dir: Path) -> None:

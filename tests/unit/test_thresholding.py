@@ -84,6 +84,50 @@ def test_optimize_directional_thresholds_finds_best_pair() -> None:
     assert selection.n_candidates == 4
 
 
+def test_optimize_directional_thresholds_refines_around_best_region() -> None:
+    probabilities = np.asarray(
+        [
+            [0.56, 0.34, 0.10],
+            [0.57, 0.33, 0.10],
+            [0.10, 0.34, 0.56],
+            [0.10, 0.33, 0.57],
+            [0.52, 0.38, 0.10],
+            [0.10, 0.38, 0.52],
+        ],
+        dtype=np.float32,
+    )
+    targets = np.asarray([0, 0, 2, 2, 1, 1])
+
+    coarse = optimize_directional_thresholds(
+        probabilities,
+        targets,
+        down_candidates=np.asarray([0.5, 0.6]),
+        up_candidates=np.asarray([0.5, 0.6]),
+        down_id=0,
+        neutral_id=1,
+        up_id=2,
+    )
+    refined = optimize_directional_thresholds(
+        probabilities,
+        targets,
+        down_candidates=np.asarray([0.5, 0.6]),
+        up_candidates=np.asarray([0.5, 0.6]),
+        down_id=0,
+        neutral_id=1,
+        up_id=2,
+        refinement_steps=(0.01, 0.005),
+    )
+
+    assert coarse.score < 1.0
+    assert refined.score == pytest.approx(1.0)
+    assert 0.53 <= refined.threshold_down <= 0.56
+    assert 0.53 <= refined.threshold_up <= 0.56
+    assert refined.n_candidates > coarse.n_candidates
+    assert len(refined.stage_summaries) == 3
+    assert refined.stage_summaries[0]["name"] == "coarse"
+    assert refined.stage_summaries[-1]["name"] == "refine_0.005"
+
+
 def test_optimize_directional_thresholds_prefers_rate_penalty_on_score_tie() -> None:
     probabilities = np.asarray(
         [

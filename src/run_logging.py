@@ -266,6 +266,9 @@ def save_run_config_snapshot(
                 },
             },
             "training_sampling": sampling_summary or {"enabled": False},
+            "temperature_scaling": {
+                "enabled": config.training.temperature_scaling.enabled,
+            },
             "directional_thresholds": {
                 "enabled": config.training.directional_thresholds.enabled,
                 "min": config.training.directional_thresholds.min_threshold,
@@ -947,6 +950,8 @@ def save_run_log(
     pr_thresholds_path: Path | None = None,
     pr_curves_dir: Path | None = None,
     probabilities_dir: Path | None = None,
+    temperature_scaling_path: Path | None = None,
+    temperature_scaling_summary: dict[str, Any] | None = None,
     directional_thresholds_path: Path | None = None,
     directional_threshold_summary: dict[str, Any] | None = None,
     selected_best_epoch: int | None = None,
@@ -974,6 +979,8 @@ def save_run_log(
             handle.write(f"PR curves directory: {pr_curves_dir}\n")
         if probabilities_dir is not None:
             handle.write(f"Probability outputs directory: {probabilities_dir}\n")
+        if temperature_scaling_path is not None:
+            handle.write(f"Temperature scaling: {temperature_scaling_path}\n")
         if directional_thresholds_path is not None:
             handle.write(f"Directional thresholds: {directional_thresholds_path}\n")
         handle.write(f"Model directory: {config.training.model_dir}\n")
@@ -995,6 +1002,27 @@ def save_run_log(
         if config.training.monitor_params.complete:
             handle.write(f"monitor_lambda_ece: {config.training.monitor_params.lambda_ece:.10g}\n")
             handle.write(f"monitor_lambda_rate: {config.training.monitor_params.lambda_rate:.10g}\n")
+        handle.write("\nTemperature scaling\n")
+        calibration_summary = temperature_scaling_summary or {"enabled": False}
+        handle.write(f"enabled: {calibration_summary.get('enabled', False)}\n")
+        if calibration_summary.get("enabled"):
+            handle.write("probability_source: temperature_scaled_logits\n")
+            handle.write("calibration_loss: unweighted_cross_entropy\n")
+            handle.write("selection_split: validation\n")
+            for key in (
+                "temperature",
+                "validation_nll_before",
+                "validation_nll_after",
+                "n_samples",
+                "n_classes",
+                "optimizer_evaluations",
+                "fit_seconds",
+                "fit_duration",
+            ):
+                if key in calibration_summary:
+                    handle.write(f"{key}: {calibration_summary[key]}\n")
+            if temperature_scaling_path is not None:
+                handle.write(f"artifact: {temperature_scaling_path}\n")
         handle.write("\nDirectional thresholds\n")
         threshold_summary = directional_threshold_summary or {"enabled": False}
         handle.write(f"enabled: {threshold_summary.get('enabled', False)}\n")
@@ -1018,10 +1046,14 @@ def save_run_log(
                 "grid_min",
                 "grid_max",
                 "grid_step",
+                "refinement_steps",
                 "n_candidates",
             ):
                 if key in threshold_summary:
                     handle.write(f"{key}: {threshold_summary[key]}\n")
+            stages = threshold_summary.get("optimization_stages")
+            if isinstance(stages, list):
+                handle.write(f"optimization_stages: {len(stages)}\n")
             if directional_thresholds_path is not None:
                 handle.write(f"artifact: {directional_thresholds_path}\n")
         handle.write("\nTraining sampling\n")
