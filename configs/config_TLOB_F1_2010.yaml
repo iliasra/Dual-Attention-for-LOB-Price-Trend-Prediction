@@ -1,5 +1,8 @@
 seed: 42
 
+experiment:
+  name: TLOB_feature_embed_32
+
 data:
   raw_data_dir: ../data/F1_2010
   processed_data_dir: ../data/processed_dataframes_fi2010
@@ -8,7 +11,9 @@ data:
   tick_size: 1.0
   time_column: time
   label_column: trend_label
-  label_mapping: {0: 0, 1: 1, 2: 2}
+  # FI-2010 labels are saved as raw_label - 1: class 0=up, 1=neutral, 2=down.
+  # This mapping gives the shared logging/threshold code the usual raw semantics.
+  label_mapping: {-1: 2, 0: 1, 1: 0}
   price_columns: auto
   volume_columns: auto
   feature_exclude_columns: []
@@ -110,8 +115,8 @@ preprocessing:
 
 model:
   d_input: 144
-  d_model: 144
-  feature_embed_dim: 16
+  d_model: 128
+  feature_embed_dim: 32
   feature_num_frequencies: 8
   feature_sigma: 1.0
   num_heads: 4
@@ -132,12 +137,12 @@ model:
 training:
   device: cuda
   epochs: 10
-  batch_size: 64
+  batch_size: 128
   eval_batch_size: 256
   num_workers: 8
-  early_stopping_patience: 1
+  early_stopping_patience: 3
   early_stopping_warmup: 0
-  early_stopping_min_delta: 0.002
+  early_stopping_min_delta: 0.0
   monitor: val_loss
   monitor_mode: min
   persistent_workers: true

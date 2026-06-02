@@ -15,9 +15,46 @@ TRAINING_CONFIG="${TRAINING_CONFIG:-configs/pipeline_config.yaml}"
 FOLDS_FILE="${FOLDS_FILE:-configs/folds.txt}"
 PROJECT_FOLDS_FILE="$PROJECT_DIR/$FOLDS_FILE"
 WORK_CONFIG_PATH="$WORK_DIR/$TRAINING_CONFIG"
+RUN_LAUNCH_TIMESTAMP="${RUN_LAUNCH_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
 
 JOB_ID="${PBS_JOBID:-$(date +%Y%m%d_%H%M%S)}"
-RUN_STEM="${TRAINING_RUN_STEM:-training_${JOB_ID}}"
+
+experiment_name_from_config() {
+  config_path="$1"
+  if [ ! -f "$config_path" ]; then
+    return 0
+  fi
+  awk '
+    /^[[:space:]]*experiment:[[:space:]]*($|#)/ { in_experiment=1; next }
+    in_experiment && /^[^[:space:]#][^:]*:/ { in_experiment=0 }
+    in_experiment && /^[[:space:]]+name:[[:space:]]*/ {
+      line=$0
+      sub(/^[[:space:]]+name:[[:space:]]*/, "", line)
+      sub(/[[:space:]]+#.*$/, "", line)
+      gsub(/^[[:space:]"\047]+|[[:space:]"\047]+$/, "", line)
+      print line
+      exit
+    }
+  ' "$config_path"
+}
+
+sanitize_run_name() {
+  sanitized="$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | sed -e 's/_\+/_/g' -e 's/^[._-]\+//' -e 's/[._-]\+$//')"
+  if [ -z "$sanitized" ]; then
+    sanitized="experiment"
+  fi
+  printf '%s' "$sanitized"
+}
+
+default_run_stem() {
+  experiment_name="$(experiment_name_from_config "$PROJECT_DIR/$TRAINING_CONFIG")"
+  if [ -z "$experiment_name" ]; then
+    experiment_name="training"
+  fi
+  printf '%s_%s' "$(sanitize_run_name "$experiment_name")" "$RUN_LAUNCH_TIMESTAMP"
+}
+
+RUN_STEM="${TRAINING_RUN_STEM:-$(default_run_stem)}"
 RUN_OUTPUT_DIR="$HOME/run_outputs/$RUN_STEM"
 PROJECT_JOB_LOG_DIR="$PROJECT_DIR/logs/$RUN_STEM/pbs"
 LOG_FILE="run_logs.txt"
@@ -176,6 +213,7 @@ echo "===== TRAINING SEQUENTIAL JOB START ====="
 date
 echo "PBS_JOBID=${PBS_JOBID:-}"
 echo "RUN_STEM=$RUN_STEM"
+echo "RUN_LAUNCH_TIMESTAMP=$RUN_LAUNCH_TIMESTAMP"
 echo "FOLDS_FILE=$FOLDS_FILE"
 echo "PROJECT_FOLDS_FILE=$PROJECT_FOLDS_FILE"
 echo "TRAINING_CONFIG=$TRAINING_CONFIG"

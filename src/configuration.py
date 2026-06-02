@@ -186,7 +186,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
     },
 }
 
-OPTIONAL_TOP_LEVEL_KEYS = {"folds", "run_metadata"}
+OPTIONAL_TOP_LEVEL_KEYS = {"experiment", "folds", "run_metadata"}
 OPTIONAL_CONFIG_KEYS = {
     "preprocessing.labels.smoothing.adaptive_threshold",
     "preprocessing.price_static.tau_clip",
@@ -398,6 +398,29 @@ def _validate_allowed_values(payload: dict[str, Any]) -> None:
 
     if invalid:
         raise ValueError("Invalid experiment config; invalid values: " + "; ".join(invalid))
+
+
+@dataclass(slots=True)
+class ExperimentMetadataConfig:
+    name: str
+
+    def __post_init__(self) -> None:
+        """Check experiment metadata used for readable run names."""
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError("experiment.name must be a non-empty string.")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None, *, default_name: str) -> "ExperimentMetadataConfig":
+        """Build experiment metadata with a backwards-compatible default."""
+        if payload is None:
+            return cls(name=default_name)
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid experiment config; experiment must be a mapping.")
+        unexpected = sorted(set(payload) - {"name"})
+        if unexpected:
+            raise ValueError(f"Invalid experiment config; unexpected key(s) in experiment: {unexpected}")
+        return cls(name=str(_require_explicit_value(payload.get("name"), "experiment.name")))
 
 
 @dataclass(slots=True)
@@ -1300,6 +1323,7 @@ class TrainingConfig:
 @dataclass(slots=True)
 class ExperimentConfig:
     path: Path
+    experiment: ExperimentMetadataConfig
     seed: int
     data: DataConfig
     dataset_splits: DatasetSplitConfig
@@ -1332,12 +1356,17 @@ class ExperimentConfig:
 
         data_config = DataConfig.from_dict(payload["data"])
         dataset_splits = DatasetSplitConfig.from_dict(payload["dataset_splits"])
+        experiment_config = ExperimentMetadataConfig.from_dict(
+            payload.get("experiment"),
+            default_name=config_path.stem,
+        )
         seed = int(_require_explicit_value(payload["seed"], "seed"))
         if seed < 0:
             raise ValueError("Invalid experiment config; seed must be >= 0.")
 
         return cls(
             path=config_path.resolve(),
+            experiment=experiment_config,
             seed=seed,
             data=data_config,
             dataset_splits=dataset_splits,

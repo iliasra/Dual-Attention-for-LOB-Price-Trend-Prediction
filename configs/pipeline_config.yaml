@@ -1,5 +1,8 @@
 seed: 42
 
+experiment:
+  name: lob_price_trend
+
 data:
   raw_data_dir: ../data/LOBSTER
   processed_data_dir: ../data/processed_dataframes

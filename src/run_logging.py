@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover
 
 
 RUN_FILE_PATTERN = re.compile(r"^run_(\d+)(?:[._]|$)")
+RUN_STEM_TOKEN_PATTERN = re.compile(r"[^A-Za-z0-9._-]+")
 PREPROCESSING_METADATA_FILENAME = "preprocessing_metadata.yaml"
 METRIC_NAMES = (
     "accuracy",
@@ -71,6 +72,19 @@ def next_run_stem(logs_dir: Path) -> str:
         if match:
             max_run_id = max(max_run_id, int(match.group(1)))
     return f"run_{max_run_id + 1}"
+
+
+def sanitize_run_stem_token(value: str) -> str:
+    """Return a filesystem-friendly token for run directory names."""
+    token = RUN_STEM_TOKEN_PATTERN.sub("_", value.strip())
+    token = re.sub(r"_+", "_", token).strip("._-")
+    return token or "experiment"
+
+
+def timestamped_run_stem(experiment_name: str, launch_time: datetime | None = None) -> str:
+    """Build a readable run stem from an experiment name and launch timestamp."""
+    timestamp = (launch_time or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    return f"{sanitize_run_stem_token(experiment_name)}_{timestamp}"
 
 
 def load_config_snapshot(config: ExperimentConfig) -> dict[str, Any]:
@@ -946,6 +960,7 @@ def save_run_log(
 
     with target.open("w", encoding="utf-8") as handle:
         handle.write(f"Run: {run_stem}\n")
+        handle.write(f"Experiment: {config.experiment.name}\n")
         handle.write(f"Fold: {fold}\n")
         handle.write(f"Created at: {datetime.now().isoformat(timespec='seconds')}\n")
         handle.write(f"Config: {config.path}\n")

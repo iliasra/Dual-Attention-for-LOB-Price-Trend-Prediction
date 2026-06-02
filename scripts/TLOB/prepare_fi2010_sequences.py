@@ -18,6 +18,11 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "data" / "sequences" / "fi2010_tlob"
 FOLD_ID = "fi2010_tlob"
 FEATURE_COUNT = 144
 HORIZON_TO_LABEL_ROW = {10: 144, 20: 145, 30: 146, 50: 147, 100: 148}
+CLASS_SEMANTICS = {
+    0: "up",
+    1: "neutral",
+    2: "down",
+}
 TRAIN_RELATIVE_PATH = Path(
     "NoAuction/1.NoAuction_Zscore/NoAuction_Zscore_Training/Train_Dst_NoAuction_ZScore_CF_7.txt"
 )
@@ -143,6 +148,12 @@ def prepare_fi2010_sequences(
         "horizon": int(horizon),
         "seq_size": int(seq_size),
         "train_ratio": float(train_ratio),
+        "label_encoding": {
+            "source": "FI-2010 raw labels {1, 2, 3}",
+            "conversion": "class_id = raw_label - 1",
+            "class_semantics": CLASS_SEMANTICS,
+            "recommended_project_label_mapping": {-1: 2, 0: 1, 1: 0},
+        },
         "splits": {},
     }
     outputs["splits"]["train"] = save_arrays(output_dir / "train", "fi2010_cf7_train", *train_payload)

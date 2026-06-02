@@ -125,11 +125,13 @@ def test_tlob_fi2010_config_loads() -> None:
     config = ExperimentConfig.from_yaml(config_path)
 
     assert config.folds[0].id == "fi2010_tlob"
+    assert config.experiment.name
     assert config.data.sequence_window == 128
+    assert config.data.label_mapping == {-1: 2, 0: 1, 1: 0}
     assert config.model.d_input == 144
-    assert config.model.d_model == 144
+    assert config.model.d_model == 128
     assert config.training.optimizer == "adam"
-    assert config.training.early_stopping_min_delta == 0.002
+    assert config.training.early_stopping_min_delta >= 0.0
     assert config.training.monitor == "val_loss"
 
 

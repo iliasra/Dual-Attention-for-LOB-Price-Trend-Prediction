@@ -25,7 +25,6 @@ from run_logging import (
     format_duration,
     load_preprocessing_metadata,
     model_parameter_summary,
-    next_run_stem,
     resolve_config_path,
     save_confusion_matrices,
     save_directional_threshold_artifact,
@@ -36,6 +35,7 @@ from run_logging import (
     save_run_config_snapshot,
     save_run_log,
     save_run_summary,
+    timestamped_run_stem,
 )
 from thresholding import (
     apply_directional_threshold_policy,
@@ -952,7 +952,7 @@ def main() -> None:
     run_stem = (
         args.run_stem
         or os.environ.get("TRAINING_RUN_STEM")
-        or next_run_stem(logs_dir)
+        or timestamped_run_stem(config.experiment.name)
     )
 
     run_log_dir = logs_dir / run_stem
