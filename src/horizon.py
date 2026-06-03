@@ -366,8 +366,11 @@ class TargetLabelPipeline:
                 config=config.adaptive_threshold,
             )
         elif threshold is None:
-            spread = calculate_spread(result, bid_col=config.bid_column, ask_col=config.ask_column)
-            threshold = float((spread / midprices).mean())
+            raise ValueError(
+                "Smoothing label threshold cannot be null unless adaptive method-C thresholding is enabled. "
+                "Set a numeric threshold, use mean_spread/mean_pct through the preprocessing pipeline, "
+                "or enable adaptive_threshold."
+            )
         elif is_train_fitted_smoothing_threshold(threshold):
             raise ValueError(
                 "preprocessing.labels.smoothing.threshold is train-fitted; "

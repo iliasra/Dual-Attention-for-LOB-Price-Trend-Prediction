@@ -913,6 +913,21 @@ class LabelConfig:
     smoothing: SmoothingLabelConfig
     triple_barrier: TripleBarrierLabelConfig
 
+    def __post_init__(self) -> None:
+        """Check that the active labeling strategy has a usable threshold rule."""
+        if self.strategy.lower() != "smoothing":
+            return
+        adaptive_enabled = (
+            self.smoothing.adaptive_threshold is not None
+            and self.smoothing.adaptive_threshold.enabled
+        )
+        if self.smoothing.threshold is None and not adaptive_enabled:
+            raise ValueError(
+                "preprocessing.labels.smoothing.threshold cannot be null when "
+                "adaptive_threshold.enabled is false; set a numeric/train-fitted threshold "
+                "or enable adaptive_threshold."
+            )
+
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "LabelConfig":
         """Build label settings from a YAML subsection."""

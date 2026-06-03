@@ -424,6 +424,7 @@ def test_adaptive_threshold_config_is_optional_for_legacy_configs(artifact_dir: 
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
     payload["preprocessing"]["labels"]["smoothing"].pop("adaptive_threshold", None)
+    payload["preprocessing"]["labels"]["smoothing"]["threshold"] = 0.001
 
     config_path = artifact_dir / "no_adaptive_threshold.yaml"
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
@@ -431,6 +432,26 @@ def test_adaptive_threshold_config_is_optional_for_legacy_configs(artifact_dir: 
     loaded = ExperimentConfig.from_yaml(config_path)
 
     assert loaded.preprocessing.labels.smoothing.adaptive_threshold is None
+    assert loaded.preprocessing.labels.smoothing.threshold == pytest.approx(0.001)
+
+
+def test_smoothing_config_rejects_null_threshold_without_adaptive_threshold(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["threshold"] = None
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = False
+
+    config_path = artifact_dir / "null_threshold_no_adaptive.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="threshold cannot be null"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["preprocessing"]["labels"]["smoothing"].pop("adaptive_threshold", None)
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="threshold cannot be null"):
+        ExperimentConfig.from_yaml(config_path)
 
 
 def test_adaptive_threshold_config_validates_window_lengths(artifact_dir: Path) -> None:

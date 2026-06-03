@@ -184,6 +184,27 @@ def test_target_label_pipeline_adds_smoothing_labels() -> None:
     assert result["trend_label"].tolist() == [1, 1, 1, 1]
 
 
+def test_target_label_pipeline_rejects_null_smoothing_threshold_without_adaptive() -> None:
+    df = pd.DataFrame(
+        {
+            "bid_price_1": [99.0, 100.0, 101.0, 102.0],
+            "ask_price_1": [101.0, 102.0, 103.0, 104.0],
+        }
+    )
+    smoothing = SmoothingLabelConfig(
+        method="A",
+        threshold=None,
+        k=1,
+        h=10,
+        bid_column="bid_price_1",
+        ask_column="ask_price_1",
+        adaptive_threshold=None,
+    )
+
+    with pytest.raises(ValueError, match="threshold cannot be null"):
+        TargetLabelPipeline(make_triple_barrier_config())._add_smoothing_labels(df, smoothing)
+
+
 def test_target_label_pipeline_keeps_constant_threshold_when_adaptive_threshold_is_disabled() -> None:
     df = pd.DataFrame(
         {
