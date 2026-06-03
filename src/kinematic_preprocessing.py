@@ -453,8 +453,16 @@ def _detect_price_volume_columns(
     price_cols: list[str] | None,
     volume_cols: list[str] | None,
 ) -> tuple[list[str], list[str]]:
-    resolved_price = price_cols or [column for column in df.columns if "_price_" in column.lower()]
-    resolved_volume = volume_cols or [column for column in df.columns if "_size_" in column.lower()]
+    resolved_price = price_cols or [
+        column
+        for column in df.columns
+        if (metadata := _price_level_metadata(column)) is not None and metadata[1] == "price"
+    ]
+    resolved_volume = volume_cols or [
+        column
+        for column in df.columns
+        if (metadata := _price_level_metadata(column)) is not None and metadata[1] == "size"
+    ]
     return resolved_price, resolved_volume
 
 
@@ -989,8 +997,14 @@ class SnapshotWindowProcessor:
             result["time_rel"] = final_time - float(window[time_column].iloc[0])
 
         if self.preprocessing_config.temporal_features.add_day_sincos:
+            sincos_time = final_time
+            if (
+                self.preprocessing_config.sample_clock.enabled
+                and "volume_wall_time" in window.columns
+            ):
+                sincos_time = float(window["volume_wall_time"].iloc[-1])
             sincos_day = time_to_sincos(
-                np.array([final_time]),
+                np.array([sincos_time]),
                 freq=self.preprocessing_config.temporal_features.day_frequency,
             )[0]
             result["time_day_sin"] = float(sincos_day[0])
@@ -1099,8 +1113,14 @@ class SnapshotBatchProcessor:
             result["time_rel"] = final_time - start_time
 
         if self.preprocessing_config.temporal_features.add_day_sincos:
+            sincos_source = final_time
+            if (
+                self.preprocessing_config.sample_clock.enabled
+                and "volume_wall_time" in df.columns
+            ):
+                sincos_source = end_rows["volume_wall_time"].to_numpy(dtype=float)
             sincos_day = time_to_sincos(
-                final_time,
+                sincos_source,
                 freq=self.preprocessing_config.temporal_features.day_frequency,
             )
             result["time_day_sin"] = sincos_day[:, 0]

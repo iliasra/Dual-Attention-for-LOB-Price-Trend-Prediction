@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import gc
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
 
@@ -40,6 +40,7 @@ try:
     )
     from lobster_io import read_lobster_message_csv, read_lobster_orderbook_csv
     from run_logging import format_duration, save_preprocessing_metadata
+    from volume_clock import VolumeBarFeatureProcessor, VolumeClockSampler
 except ImportError:  # pragma: no cover
     from .configuration import ExperimentConfig, FoldConfig, load_config
     from .datasets import DailySequenceBuilder
@@ -71,6 +72,7 @@ except ImportError:  # pragma: no cover
     )
     from .lobster_io import read_lobster_message_csv, read_lobster_orderbook_csv
     from .run_logging import format_duration, save_preprocessing_metadata
+    from .volume_clock import VolumeBarFeatureProcessor, VolumeClockSampler
 
 
 SPLIT_NAMES = ("train", "validation", "test")
@@ -157,6 +159,7 @@ class LobProcessingPipeline:
         self.config = config or load_config()
         self.root_dir = Path(__file__).resolve().parent.parent
         self.config_dir = self.config.path.parent
+        self.downstream_data_config = self._build_downstream_data_config()
         configured_data_dir = Path(self.config.data.raw_data_dir)
         self.data_dir = Path(data_dir) if data_dir is not None else self._resolve_path(configured_data_dir)
         self.processed_dir = self._resolve_path(Path(self.config.data.processed_data_dir))
@@ -182,11 +185,47 @@ class LobProcessingPipeline:
             time_column=self.config.data.time_column,
             message_config=self.config.preprocessing.message,
         )
-        self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
-        self.sequence_builder = DailySequenceBuilder(self.config.data)
+        self.volume_clock_sampler = VolumeClockSampler(
+            sample_clock_config=self.config.preprocessing.sample_clock,
+            message_config=self.config.preprocessing.message,
+            time_column=self.config.data.time_column,
+        )
+        self.volume_bar_processor = VolumeBarFeatureProcessor(
+            message_config=self.config.preprocessing.message,
+        )
+        self.snapshot_processor = SnapshotBatchProcessor(self.downstream_data_config, self.config.preprocessing)
+        self.sequence_builder = DailySequenceBuilder(self.downstream_data_config)
         self.fast_smoothing_lambda_results: dict[str, dict[str, float]] = {}
         self.price_static_plgs_results: dict[str, float] = {}
         self.volume_static_exp_results: dict[str, float] = {}
+        self.volume_bar_scaling_results: dict[str, dict[str, float | int]] = {}
+
+    def _build_downstream_data_config(self):
+        """Return the data config used after optional sample-clock conversion."""
+        if not self.config.preprocessing.sample_clock.enabled:
+            return self.config.data
+        excluded = list(dict.fromkeys([*self.config.data.feature_exclude_columns, "volume_wall_time"]))
+        return replace(
+            self.config.data,
+            time_column="volume_time",
+            feature_exclude_columns=excluded,
+        )
+
+    def uses_volume_clock(self) -> bool:
+        """Return whether preprocessing samples events into volume bars."""
+        return self.config.preprocessing.sample_clock.enabled
+
+    def _sample_clock_metadata(self) -> dict[str, object]:
+        """Return serializable sample-clock settings for preprocessing artifacts."""
+        sample_clock = self.config.preprocessing.sample_clock
+        return {
+            "mode": sample_clock.mode,
+            "volume_step_shares": sample_clock.volume_step_shares,
+            "volume_source": sample_clock.volume_source,
+            "trade_type_values": list(sample_clock.trade_type_values),
+            "downstream_time_column": self.downstream_data_config.time_column,
+            "wall_time_column": "volume_wall_time" if sample_clock.enabled else self.config.data.time_column,
+        }
 
     def _resolve_path(self, path: Path) -> Path:
         return path if path.is_absolute() else (self.config_dir / path).resolve()
@@ -425,19 +464,73 @@ class LobProcessingPipeline:
         print(f"Loaded and trimmed {pair.label}: {len(trimmed)} rows.")
         return trimmed
 
+    def _sample_clock_frame(self, df: pd.DataFrame, pair: LobFilePair) -> pd.DataFrame:
+        """Apply the configured sample clock after raw event trimming."""
+        if not self.uses_volume_clock():
+            return df
+        sampled = self.volume_clock_sampler.transform(df)
+        print(
+            f"Volume-clock sampled {pair.label}: {len(df)} events -> {len(sampled)} complete bars "
+            f"(step={self.config.preprocessing.sample_clock.volume_step_shares:g} shares)."
+        )
+        return sampled
+
+    def _message_features_from_labeled(self, labeled: pd.DataFrame) -> pd.DataFrame:
+        """Build model-facing pre-snapshot features for the active sample clock."""
+        if not self.uses_volume_clock():
+            return self.message_processor.transform(labeled)
+        if not self.volume_bar_processor.fitted:
+            return labeled.copy()
+        return self.volume_bar_processor.transform(labeled)
+
+    def _fit_volume_bar_features(self, train_days: list[ProcessedDay]) -> dict[str, dict[str, float | int]] | None:
+        """Fit train-only scalers for volume-bar aggregate features."""
+        if not self.uses_volume_clock():
+            return None
+        labeled_frames = [
+            self._require_frame(day, "labeled", "volume-bar feature scaling")
+            for day in train_days
+        ]
+        self.volume_bar_scaling_results = self.volume_bar_processor.fit(labeled_frames)
+        print(
+            "Fitted volume-bar feature scaling on train: "
+            + ", ".join(
+                f"{column}: k={float(stats['k']):.6g}"
+                for column, stats in sorted(self.volume_bar_scaling_results.items())
+            )
+        )
+        for day in train_days:
+            labeled = self._require_frame(day, "labeled", "volume-bar feature transformation")
+            day.message_features = self.volume_bar_processor.transform(labeled)
+        return self.volume_bar_scaling_results
+
+    def _sample_clock_counts_for_day(self, day: ProcessedDay) -> dict[str, int]:
+        """Return row counts before and after optional sample-clock conversion."""
+        raw = self._require_frame(day, "raw", "sample-clock count metadata")
+        joined = self._require_frame(day, "joined", "sample-clock count metadata")
+        labeled = self._require_frame(day, "labeled", "sample-clock count metadata")
+        message_features = self._require_frame(day, "message_features", "sample-clock count metadata")
+        return {
+            "raw_event_rows": int(len(raw)),
+            "sampled_rows": int(len(joined)),
+            "labeled_rows": int(len(labeled)),
+            "feature_rows": int(len(message_features)),
+        }
+
     def prepare_pair(self, pair: LobFilePair, split: str) -> ProcessedDay:
         print(f"Starting raw feature preparation for {pair.label} ({split}).")
         trimmed = self.load_and_trim_pair(pair)
+        sampled = self._sample_clock_frame(trimmed, pair)
         print(f"Starting label generation for {pair.label}.")
-        labeled = self.labeler.transform(trimmed)
+        labeled = self.labeler.transform(sampled)
         print(f"Starting message feature processing for {pair.label}.")
-        message_features = self.message_processor.transform(labeled)
+        message_features = self._message_features_from_labeled(labeled)
         print(f"Finished raw feature preparation for {pair.label}: {message_features.shape[0]} rows.")
         return ProcessedDay(
             split=split,
             pair=pair,
             raw=trimmed,
-            joined=trimmed,
+            joined=sampled,
             labeled=labeled,
             message_features=message_features,
         )
@@ -576,7 +669,7 @@ class LobProcessingPipeline:
             return
         self._optimize_fast_stream_lambda(train_days, kind="price")
         self._optimize_fast_stream_lambda(train_days, kind="volume")
-        self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
+        self.snapshot_processor = SnapshotBatchProcessor(self.downstream_data_config, self.config.preprocessing)
 
     def _stream_config_for_kind(self, kind: str):
         if kind == "price":
@@ -602,11 +695,21 @@ class LobProcessingPipeline:
         preprocessing = self.config.preprocessing
         top_k = preprocessing.kinematic_tokenization.orderbook_top_k_levels
         top_token = "all" if top_k is None else str(int(top_k))
+        sample_clock = preprocessing.sample_clock
+        if sample_clock.enabled:
+            trade_types = "-".join(str(value) for value in sample_clock.trade_type_values)
+            clock_token = (
+                f"clockvolume_src{sample_clock.volume_source}"
+                f"_step{float(sample_clock.volume_step_shares):g}"
+                f"_types{trade_types}"
+            )
+        else:
+            clock_token = "clockevent"
         if kind == "price" and preprocessing.microprice.enabled:
             microprice_token = f"mp{int(preprocessing.microprice.levels)}"
         else:
             microprice_token = "mpoff"
-        return f"top{top_token}_{microprice_token}"
+        return f"{clock_token}_top{top_token}_{microprice_token}"
 
     def _try_optimize_fast_stream_lambda_from_cache(
         self,
@@ -688,12 +791,16 @@ class LobProcessingPipeline:
         self.config.preprocessing.price_kinematic.fast.selected_smoothing_lambda = None
         self.config.preprocessing.volume_kinematic.fast.selected_smoothing_lambda = None
         self.fast_smoothing_lambda_results = {}
+        self.volume_bar_scaling_results = {}
+        self.volume_bar_processor = VolumeBarFeatureProcessor(
+            message_config=self.config.preprocessing.message,
+        )
         self.config.preprocessing.price_static.tau_clip = None
         self.config.preprocessing.price_static.tau_max = None
         self.price_static_plgs_results = {}
         self.config.preprocessing.volume_static.k = None
         self.volume_static_exp_results = {}
-        self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
+        self.snapshot_processor = SnapshotBatchProcessor(self.downstream_data_config, self.config.preprocessing)
 
     def fit_price_static_plgs_parameters(self, train_days: list[ProcessedDay]) -> dict[str, float] | None:
         price_static_config = self.config.preprocessing.price_static
@@ -732,7 +839,7 @@ class LobProcessingPipeline:
         price_static_config.tau_clip = float(result["tau_clip"])
         price_static_config.tau_max = float(result["tau_max"])
         self.price_static_plgs_results = result
-        self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
+        self.snapshot_processor = SnapshotBatchProcessor(self.downstream_data_config, self.config.preprocessing)
 
         print(
             "Selected price static PLGS parameters from train: "
@@ -776,7 +883,7 @@ class LobProcessingPipeline:
         )
         volume_static_config.k = float(result["k"])
         self.volume_static_exp_results = result
-        self.snapshot_processor = SnapshotBatchProcessor(self.config.data, self.config.preprocessing)
+        self.snapshot_processor = SnapshotBatchProcessor(self.downstream_data_config, self.config.preprocessing)
 
         print(
             "Selected volume static exponential scaling from train: "
@@ -1067,10 +1174,11 @@ class LobProcessingPipeline:
                 f"missing columns={missing}, extra columns={extra}."
             )
 
+        data_config = getattr(self, "downstream_data_config", self.config.data)
         excluded_columns = {
-            self.config.data.time_column,
-            self.config.data.label_column,
-            *self.config.data.feature_exclude_columns,
+            data_config.time_column,
+            data_config.label_column,
+            *data_config.feature_exclude_columns,
         }
         non_feature_columns = [column for column in normalized.columns if column in excluded_columns]
         day.normalized = normalized.loc[:, non_feature_columns + ordered_feature_columns]
@@ -1125,6 +1233,7 @@ class LobProcessingPipeline:
                 "enabled": bool(self.config.preprocessing.microprice.enabled),
                 "levels": int(self.config.preprocessing.microprice.levels),
             },
+            "sample_clock": self._sample_clock_metadata(),
             "kinematic_columns": {
                 "price": price_labels,
                 "volume": volume_columns,
@@ -1282,6 +1391,10 @@ class LobProcessingPipeline:
         train_pairs = split_pairs.get("train", [])
         for pair in train_pairs:
             train_days.append(self.prepare_pair(pair, "train"))
+        volume_bar_scaling = self._fit_volume_bar_features(train_days)
+        sample_clock_counts: dict[str, dict[str, dict[str, int]]] = {split: {} for split in SPLIT_NAMES}
+        for day in train_days:
+            sample_clock_counts["train"][day.pair.output_stem] = self._sample_clock_counts_for_day(day)
 
         label_accumulator = self._new_label_distribution_accumulator() if self.uses_adaptive_method_c_labels() else None
         floor_comparison: dict[str, object] | None = None
@@ -1314,6 +1427,7 @@ class LobProcessingPipeline:
             for pair in split_pairs.get(split, []):
                 day = self.prepare_pair(pair, split)
                 try:
+                    sample_clock_counts[split][day.pair.output_stem] = self._sample_clock_counts_for_day(day)
                     if label_accumulator is not None:
                         self._accumulate_label_distribution(label_accumulator, split, day)
                     summary[split][day.pair.output_stem] = self._build_and_save_one_day(
@@ -1339,6 +1453,9 @@ class LobProcessingPipeline:
             label_distribution=label_distribution,
             price_static_plgs=plgs_parameters,
             volume_static_exp=volume_static_exp,
+            volume_bar_scaling=volume_bar_scaling,
+            sample_clock=self._sample_clock_metadata(),
+            sample_clock_counts=sample_clock_counts,
             timing={
                 "fold_preprocessing_seconds": round(fold_duration_seconds, 6),
                 "fold_preprocessing_duration": format_duration(fold_duration_seconds),

@@ -98,6 +98,11 @@ preprocessing:
     chunk_size: 100000 # shared by fast price and volume tokenization
     n_df_candidates: 25 # shared number of effective-df candidates explored by train GCV
     orderbook_top_k_levels: 5 # null = all levels; filters price/volume kinematic streams only
+  sample_clock:
+    mode: event # allowed: event, volume; event preserves one row per LOBSTER message
+    volume_step_shares: null # required positive value when mode=volume
+    volume_source: traded # allowed: traded, message_size
+    trade_type_values: [4, 5] # LOBSTER visible/hidden executions for traded-shares volume clock
   microprice:
     enabled: true # adds a price-like kinematic microprice stream only
     levels: 5 # number of LOB levels used to compute microprice

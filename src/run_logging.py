@@ -154,6 +154,9 @@ def save_preprocessing_metadata(
     label_distribution: dict[str, Any] | None = None,
     price_static_plgs: dict[str, Any] | None = None,
     volume_static_exp: dict[str, Any] | None = None,
+    volume_bar_scaling: dict[str, Any] | None = None,
+    sample_clock: dict[str, Any] | None = None,
+    sample_clock_counts: dict[str, Any] | None = None,
     timing: dict[str, Any] | None = None,
 ) -> Path:
     lambdas = fast_smoothing_lambda_summary(config)
@@ -167,6 +170,13 @@ def save_preprocessing_metadata(
         "config_path": str(config.path),
         "sequence_data_dir": str(sequence_dir),
         "save_processed_dataframes": bool(config.preprocessing.save_processed_dataframes),
+        "sample_clock": sample_clock
+        or {
+            "mode": config.preprocessing.sample_clock.mode,
+            "volume_step_shares": config.preprocessing.sample_clock.volume_step_shares,
+            "volume_source": config.preprocessing.sample_clock.volume_source,
+            "trade_type_values": list(config.preprocessing.sample_clock.trade_type_values),
+        },
         "fast_smoothing_lambdas": lambdas,
     }
     if label_distribution is not None:
@@ -175,6 +185,10 @@ def save_preprocessing_metadata(
         payload["price_static_plgs"] = price_static_plgs
     if volume_static_exp is not None:
         payload["volume_static_exp"] = volume_static_exp
+    if volume_bar_scaling is not None:
+        payload["volume_bar_scaling"] = volume_bar_scaling
+    if sample_clock_counts is not None:
+        payload["sample_clock_counts"] = sample_clock_counts
     if timing is not None:
         payload["timing"] = timing
     target = preprocessing_metadata_path(sequence_dir)

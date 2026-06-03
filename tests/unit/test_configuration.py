@@ -207,6 +207,11 @@ def test_fast_kinematic_config_values_are_loaded() -> None:
     assert config.preprocessing.kinematic_tokenization.chunk_size == 100000
     assert config.preprocessing.kinematic_tokenization.n_df_candidates == 25
     assert config.preprocessing.kinematic_tokenization.orderbook_top_k_levels == 5
+    assert config.preprocessing.sample_clock.mode == "event"
+    assert config.preprocessing.sample_clock.enabled is False
+    assert config.preprocessing.sample_clock.volume_step_shares is None
+    assert config.preprocessing.sample_clock.volume_source == "traded"
+    assert config.preprocessing.sample_clock.trade_type_values == [4, 5]
     assert config.preprocessing.microprice.enabled is True
     assert config.preprocessing.microprice.levels == 5
     assert config.preprocessing.price_kinematic.basis.alpha == 5.0
@@ -598,6 +603,57 @@ def test_kinematic_top_k_and_microprice_config_are_optional_and_validated(artifa
     payload["preprocessing"]["microprice"] = {"enabled": True, "levels": 2.5}
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="preprocessing\\.microprice\\.levels"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_sample_clock_config_is_optional_and_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"].pop("sample_clock", None)
+
+    config_path = artifact_dir / "legacy_without_sample_clock.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.preprocessing.sample_clock.mode == "event"
+    assert loaded.preprocessing.sample_clock.enabled is False
+    assert loaded.preprocessing.sample_clock.volume_step_shares is None
+    assert loaded.preprocessing.sample_clock.volume_source == "traded"
+    assert loaded.preprocessing.sample_clock.trade_type_values == [4, 5]
+
+    payload["preprocessing"]["sample_clock"] = {
+        "mode": "volume",
+        "volume_step_shares": 1000,
+        "volume_source": "traded",
+        "trade_type_values": [4, 5],
+    }
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.preprocessing.sample_clock.enabled is True
+    assert loaded.preprocessing.sample_clock.volume_step_shares == 1000.0
+
+    payload["preprocessing"]["sample_clock"]["volume_step_shares"] = None
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="volume_step_shares"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["preprocessing"]["sample_clock"]["volume_step_shares"] = 1000
+    payload["preprocessing"]["sample_clock"]["mode"] = "clock"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="sample_clock\\.mode"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["preprocessing"]["sample_clock"]["mode"] = "volume"
+    payload["preprocessing"]["sample_clock"]["volume_source"] = "not_a_source"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="sample_clock\\.volume_source"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["preprocessing"]["sample_clock"]["volume_source"] = "traded"
+    payload["preprocessing"]["sample_clock"]["trade_type_values"] = []
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="trade_type_values"):
         ExperimentConfig.from_yaml(config_path)
 
 

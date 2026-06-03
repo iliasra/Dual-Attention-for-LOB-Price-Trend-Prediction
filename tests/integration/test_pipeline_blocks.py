@@ -341,6 +341,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     payload["preprocessing"]["temporal_features"]["end_offset_minutes"] = 0
     payload["preprocessing"]["normalization"]["derivatives_stats_dir"] = "derivatives"
     payload["preprocessing"]["kinematic_tokenization"]["method"] = "basis"
+    payload["preprocessing"]["microprice"]["enabled"] = False
 
     config_path = artifact_dir / "fold_pipeline.yaml"
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
@@ -390,6 +391,77 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert volume_metadata["target"] == payload["preprocessing"]["volume_static"]["target"]
     assert volume_metadata["k"] > 0.0
     assert volume_metadata["n_values"] > 0
+
+
+def test_processing_pipeline_volume_clock_writes_bar_features(artifact_dir: Path) -> None:
+    raw_dir = artifact_dir / "raw"
+    write_lobster_day(raw_dir, "TEST", "2020-01-01", rows=30)
+    write_lobster_day(raw_dir, "TEST", "2020-01-02", rows=30)
+    write_lobster_day(raw_dir, "TEST", "2020-01-03", rows=30)
+
+    base_config = load_config()
+    payload = yaml.safe_load(base_config.path.read_text(encoding="utf-8"))
+    payload["data"]["raw_data_dir"] = "raw"
+    payload["data"]["processed_data_dir"] = "processed"
+    payload["data"]["sequence_data_dir"] = "sequences"
+    payload["data"]["logs_dir"] = "logs"
+    payload["data"]["tick_size"] = 1.0
+    payload["data"]["sequence_window"] = 2
+    payload["dataset_splits"] = {
+        "train_dates": ["2020-01-01"],
+        "validation_dates": ["2020-01-02"],
+        "test_dates": ["2020-01-03"],
+    }
+    payload["folds"] = [
+        {
+            "id": "fold_001",
+            "train_dates": ["2020-01-01"],
+            "validation_dates": ["2020-01-02"],
+            "test_dates": ["2020-01-03"],
+        }
+    ]
+    payload["preprocessing"]["snapshot_window"] = 2
+    payload["preprocessing"]["labels"]["smoothing"]["threshold"] = 0.0
+    payload["preprocessing"]["labels"]["smoothing"]["k"] = 1
+    payload["preprocessing"]["labels"]["smoothing"]["h"] = 2
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = False
+    payload["preprocessing"]["temporal_features"]["market_open_seconds"] = 0
+    payload["preprocessing"]["temporal_features"]["market_close_seconds"] = 100000
+    payload["preprocessing"]["temporal_features"]["start_offset_minutes"] = 0
+    payload["preprocessing"]["temporal_features"]["end_offset_minutes"] = 0
+    payload["preprocessing"]["normalization"]["derivatives_stats_dir"] = "derivatives"
+    payload["preprocessing"]["kinematic_tokenization"]["method"] = "basis"
+    payload["preprocessing"]["microprice"]["enabled"] = False
+    payload["preprocessing"]["sample_clock"] = {
+        "mode": "volume",
+        "volume_step_shares": 20.0,
+        "volume_source": "traded",
+        "trade_type_values": [4, 5],
+    }
+
+    config_path = artifact_dir / "volume_clock_pipeline.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    LobProcessingPipeline(ExperimentConfig.from_yaml(config_path)).run()
+
+    fold_sequence_dir = artifact_dir / "sequences" / "fold_001"
+    schema = yaml.safe_load((fold_sequence_dir / "feature_schema.yaml").read_text(encoding="utf-8"))
+    features = schema["ordered_feature_columns"]
+    times = np.load(fold_sequence_dir / "train" / "TEST_2020-01-01_times.npy")
+    metadata = yaml.safe_load((fold_sequence_dir / "preprocessing_metadata.yaml").read_text(encoding="utf-8"))
+    derivative_stats = yaml.safe_load(
+        (artifact_dir / "derivatives" / "fold_001" / "derivatives_stats.yaml").read_text(encoding="utf-8")
+    )
+
+    assert "bar_trade_count_log1p" in features
+    assert "bar_buy_trade_volume_log1p_exp" in features
+    assert "bar_signed_trade_volume_signed_log1p_exp" in features
+    assert "volume_wall_time" not in features
+    assert np.all(np.diff(times) > 0)
+    assert metadata["sample_clock"]["mode"] == "volume"
+    assert metadata["sample_clock_counts"]["train"]["TEST_2020-01-01"]["sampled_rows"] > 0
+    assert "volume_bar_scaling" in metadata
+    assert derivative_stats["__metadata__"]["sample_clock"]["mode"] == "volume"
 
 
 def test_feature_schema_rejects_missing_or_extra_split_columns(artifact_dir: Path) -> None:

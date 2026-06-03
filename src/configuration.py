@@ -87,6 +87,12 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "n_df_candidates": None,
             "orderbook_top_k_levels": None,
         },
+        "sample_clock": {
+            "mode": None,
+            "volume_step_shares": None,
+            "volume_source": None,
+            "trade_type_values": None,
+        },
         "microprice": {
             "enabled": None,
             "levels": None,
@@ -207,6 +213,11 @@ OPTIONAL_CONFIG_KEYS = {
     "training.monitor_params",
     "preprocessing.save_processed_dataframes",
     "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
+    "preprocessing.sample_clock",
+    "preprocessing.sample_clock.mode",
+    "preprocessing.sample_clock.volume_step_shares",
+    "preprocessing.sample_clock.volume_source",
+    "preprocessing.sample_clock.trade_type_values",
     "preprocessing.microprice",
     "preprocessing.microprice.enabled",
     "preprocessing.microprice.levels",
@@ -713,6 +724,64 @@ class MicropriceConfig:
 
 
 @dataclass(slots=True)
+class SampleClockConfig:
+    mode: str = "event"
+    volume_step_shares: float | None = None
+    volume_source: str = "traded"
+    trade_type_values: list[int] = field(default_factory=lambda: [4, 5])
+
+    def __post_init__(self) -> None:
+        """Check optional event/volume sampling clock settings."""
+        self.mode = self.mode.lower()
+        self.volume_source = self.volume_source.lower()
+        if self.mode not in {"event", "volume"}:
+            raise ValueError("preprocessing.sample_clock.mode must be 'event' or 'volume'.")
+        if self.volume_source not in {"traded", "message_size"}:
+            raise ValueError("preprocessing.sample_clock.volume_source must be 'traded' or 'message_size'.")
+        if self.volume_step_shares is not None and self.volume_step_shares <= 0:
+            raise ValueError("preprocessing.sample_clock.volume_step_shares must be > 0 when set.")
+        if not self.trade_type_values:
+            raise ValueError("preprocessing.sample_clock.trade_type_values must contain at least one integer.")
+        if self.mode == "volume" and self.volume_step_shares is None:
+            raise ValueError("preprocessing.sample_clock.volume_step_shares must be set when mode is 'volume'.")
+
+    @property
+    def enabled(self) -> bool:
+        """Return whether volume-clock sampling is active."""
+        return self.mode == "volume"
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "SampleClockConfig":
+        """Build optional sample-clock settings from a YAML subsection."""
+        if payload is None:
+            return cls()
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid experiment config; preprocessing.sample_clock must be a mapping.")
+        unexpected = sorted(set(payload) - {"mode", "volume_step_shares", "volume_source", "trade_type_values"})
+        if unexpected:
+            raise ValueError(f"Invalid experiment config; unexpected key(s) in preprocessing.sample_clock: {unexpected}")
+
+        raw_trade_types = payload.get("trade_type_values", [4, 5])
+        if raw_trade_types is None:
+            trade_type_values: list[int] = []
+        elif isinstance(raw_trade_types, (str, bytes)):
+            raise ValueError("preprocessing.sample_clock.trade_type_values must be a list of integers.")
+        else:
+            trade_type_values = []
+            for value in raw_trade_types:
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError("preprocessing.sample_clock.trade_type_values must be a list of integers.")
+                trade_type_values.append(int(value))
+
+        return cls(
+            mode=str(payload.get("mode", "event")),
+            volume_step_shares=_optional_float(payload.get("volume_step_shares")),
+            volume_source=str(payload.get("volume_source", "traded")),
+            trade_type_values=trade_type_values,
+        )
+
+
+@dataclass(slots=True)
 class AdaptiveThresholdConfig:
     enabled: bool
     exit_spread_window: int
@@ -1058,6 +1127,7 @@ class PreprocessingConfig:
     volume_kinematic: VolumeKinematicConfig
     volume_static: VolumeStaticConfig
     microprice: MicropriceConfig = field(default_factory=MicropriceConfig)
+    sample_clock: SampleClockConfig = field(default_factory=SampleClockConfig)
     save_processed_dataframes: bool = False
 
     def __post_init__(self) -> None:
@@ -1092,6 +1162,7 @@ class PreprocessingConfig:
             volume_kinematic=VolumeKinematicConfig.from_dict(payload["volume_kinematic"]),
             volume_static=VolumeStaticConfig.from_dict(payload["volume_static"]),
             microprice=MicropriceConfig.from_dict(payload.get("microprice")),
+            sample_clock=SampleClockConfig.from_dict(payload.get("sample_clock")),
             save_processed_dataframes=bool(payload.get("save_processed_dataframes", False)),
         )
 
