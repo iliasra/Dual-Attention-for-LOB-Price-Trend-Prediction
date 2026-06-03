@@ -393,6 +393,64 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert volume_metadata["n_values"] > 0
 
 
+def test_processing_pipeline_uses_train_fitted_smoothing_threshold(artifact_dir: Path) -> None:
+    raw_dir = artifact_dir / "raw"
+    write_lobster_day(raw_dir, "TEST", "2020-01-01", rows=18)
+    write_lobster_day(raw_dir, "TEST", "2020-01-02", rows=18)
+    write_lobster_day(raw_dir, "TEST", "2020-01-03", rows=18)
+
+    base_config = load_config()
+    payload = yaml.safe_load(base_config.path.read_text(encoding="utf-8"))
+    payload["data"]["raw_data_dir"] = "raw"
+    payload["data"]["processed_data_dir"] = "processed"
+    payload["data"]["sequence_data_dir"] = "sequences"
+    payload["data"]["logs_dir"] = "logs"
+    payload["data"]["tick_size"] = 1.0
+    payload["data"]["sequence_window"] = 3
+    payload["dataset_splits"] = {
+        "train_dates": ["2020-01-01"],
+        "validation_dates": ["2020-01-02"],
+        "test_dates": ["2020-01-03"],
+    }
+    payload["folds"] = [
+        {
+            "id": "fold_001",
+            "train_dates": ["2020-01-01"],
+            "validation_dates": ["2020-01-02"],
+            "test_dates": ["2020-01-03"],
+        }
+    ]
+    payload["preprocessing"]["snapshot_window"] = 4
+    payload["preprocessing"]["labels"]["smoothing"]["threshold"] = "mean_pct"
+    payload["preprocessing"]["labels"]["smoothing"]["k"] = 1
+    payload["preprocessing"]["labels"]["smoothing"]["h"] = 2
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = False
+    payload["preprocessing"]["temporal_features"]["market_open_seconds"] = 0
+    payload["preprocessing"]["temporal_features"]["market_close_seconds"] = 100000
+    payload["preprocessing"]["temporal_features"]["start_offset_minutes"] = 0
+    payload["preprocessing"]["temporal_features"]["end_offset_minutes"] = 0
+    payload["preprocessing"]["normalization"]["derivatives_stats_dir"] = "derivatives"
+    payload["preprocessing"]["kinematic_tokenization"]["method"] = "basis"
+    payload["preprocessing"]["microprice"]["enabled"] = False
+
+    config_path = artifact_dir / "train_fitted_threshold_pipeline.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    LobProcessingPipeline(ExperimentConfig.from_yaml(config_path)).run()
+
+    metadata_path = artifact_dir / "sequences" / "fold_001" / "preprocessing_metadata.yaml"
+    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+
+    threshold = metadata["smoothing_threshold"]
+    assert threshold["mode"] == "mean_pct"
+    assert threshold["fit_split"] == "train"
+    assert threshold["value"] > 0.0
+    assert threshold["n_values"] > 0
+    assert metadata["label_distribution"]["method"] == "smoothing_mean_pct_train_fitted"
+    for split in ("train", "validation", "test"):
+        assert metadata["label_distribution"][split]["total"] > 0
+
+
 def test_processing_pipeline_volume_clock_writes_bar_features(artifact_dir: Path) -> None:
     raw_dir = artifact_dir / "raw"
     write_lobster_day(raw_dir, "TEST", "2020-01-01", rows=30)

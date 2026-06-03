@@ -381,6 +381,30 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
+TRAIN_FITTED_SMOOTHING_THRESHOLDS = {"mean_spread", "mean_pct"}
+
+
+def _optional_smoothing_threshold(value: Any) -> float | str | None:
+    """Parse a smoothing threshold as null, float, or train-fitted mode."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"", "none", "null"}:
+            return None
+        if lowered in TRAIN_FITTED_SMOOTHING_THRESHOLDS:
+            return lowered
+        try:
+            return float(value)
+        except ValueError as exc:
+            allowed = sorted(TRAIN_FITTED_SMOOTHING_THRESHOLDS)
+            raise ValueError(
+                "preprocessing.labels.smoothing.threshold must be numeric, null, "
+                f"or one of {allowed}."
+            ) from exc
+    return float(value)
+
+
 def _optional_int(value: Any, dotted_path: str) -> int | None:
     """Convert an optional config value to int without accepting floats."""
     if value is None:
@@ -815,7 +839,7 @@ class AdaptiveThresholdConfig:
 @dataclass(slots=True)
 class SmoothingLabelConfig:
     method: str
-    threshold: float | None
+    threshold: float | str | None
     k: int
     h: int
     bid_column: str
@@ -830,6 +854,19 @@ class SmoothingLabelConfig:
             raise ValueError("preprocessing.labels.smoothing.h must be > 0.")
         if self.method.upper() == "C" and self.k >= self.h:
             raise ValueError("preprocessing.labels.smoothing method C requires k < h.")
+        if isinstance(self.threshold, str):
+            self.threshold = self.threshold.lower()
+            if self.threshold not in TRAIN_FITTED_SMOOTHING_THRESHOLDS:
+                allowed = sorted(TRAIN_FITTED_SMOOTHING_THRESHOLDS)
+                raise ValueError(
+                    "preprocessing.labels.smoothing.threshold must be numeric, null, "
+                    f"or one of {allowed}."
+                )
+            if self.adaptive_threshold is not None and self.adaptive_threshold.enabled:
+                raise ValueError(
+                    "preprocessing.labels.smoothing.threshold train-fitted modes cannot be combined "
+                    "with adaptive_threshold.enabled=true."
+                )
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SmoothingLabelConfig":
@@ -837,7 +874,7 @@ class SmoothingLabelConfig:
         adaptive_payload = payload.get("adaptive_threshold")
         return cls(
             method=str(payload["method"]),
-            threshold=_optional_float(payload["threshold"]),
+            threshold=_optional_smoothing_threshold(payload["threshold"]),
             k=int(payload["k"]),
             h=int(payload["h"]),
             bid_column=str(payload["bid_column"]),

@@ -54,7 +54,7 @@ def main() -> None:
         )
 
     pair = matches[0]
-    day = pipeline.prepare_pair(pair, split="lambda_cache")
+    day = pipeline.prepare_pair_for_lambda_cache(pair)
 
     preprocessing = config.preprocessing
     stream_config = (

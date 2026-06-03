@@ -12,6 +12,9 @@ except ImportError:  # pragma: no cover
     from .configuration import AdaptiveThresholdConfig, LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
 
 
+TRAIN_FITTED_SMOOTHING_THRESHOLDS = {"mean_spread", "mean_pct"}
+
+
 def calculate_midprice(
     df: pd.DataFrame,
     bid_col: str = "bid_price_1",
@@ -177,6 +180,83 @@ def classify_trend(l_values: pd.Series, threshold: float | pd.Series) -> pd.Seri
     return TrendThresholdClassifier(threshold=threshold)(l_values)
 
 
+def is_train_fitted_smoothing_threshold(value: object) -> bool:
+    """Return whether a smoothing threshold must be fitted on train."""
+    return isinstance(value, str) and value.strip().lower() in TRAIN_FITTED_SMOOTHING_THRESHOLDS
+
+
+def _finite_spread_midprice_arrays(
+    df: pd.DataFrame,
+    *,
+    bid_col: str,
+    ask_col: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return finite spread and midprice arrays from one orderbook frame."""
+    spread = calculate_spread(df, bid_col=bid_col, ask_col=ask_col).to_numpy(dtype=float)
+    midprice = calculate_midprice(df, bid_col=bid_col, ask_col=ask_col).to_numpy(dtype=float)
+    valid_mask = np.isfinite(spread) & np.isfinite(midprice) & (midprice != 0.0)
+    return spread[valid_mask], midprice[valid_mask]
+
+
+def fit_train_smoothing_threshold(
+    dataframes: list[pd.DataFrame],
+    config: SmoothingLabelConfig,
+) -> dict[str, object]:
+    """Fit a scalar smoothing threshold from train orderbook frames."""
+    if not is_train_fitted_smoothing_threshold(config.threshold):
+        raise ValueError("Smoothing threshold fitting requires threshold='mean_spread' or 'mean_pct'.")
+
+    mode = str(config.threshold).lower()
+    n_values = 0
+    spread_sum = 0.0
+    midprice_sum = 0.0
+    pct_sum = 0.0
+
+    for df in dataframes:
+        spread, midprice = _finite_spread_midprice_arrays(
+            df,
+            bid_col=config.bid_column,
+            ask_col=config.ask_column,
+        )
+        if spread.size == 0:
+            continue
+        n_values += int(spread.size)
+        spread_sum += float(spread.sum())
+        midprice_sum += float(midprice.sum())
+        pct_sum += float((spread / midprice).sum())
+
+    if n_values == 0:
+        raise ValueError("Cannot fit smoothing threshold: no finite train spread/midprice values found.")
+    if midprice_sum == 0.0:
+        raise ValueError("Cannot fit smoothing threshold: train midprice sum is zero.")
+
+    mean_spread = spread_sum / n_values
+    mean_midprice = midprice_sum / n_values
+    if mode == "mean_pct":
+        threshold = pct_sum / n_values
+        formula = "mean((ask_price - bid_price) / midprice)"
+    else:
+        threshold = mean_spread / mean_midprice
+        formula = "mean(ask_price - bid_price) / mean(midprice)"
+
+    if not np.isfinite(threshold) or threshold < 0.0:
+        raise ValueError(f"Fitted smoothing threshold must be finite and non-negative, got {threshold}.")
+
+    return {
+        "enabled": True,
+        "mode": mode,
+        "fit_split": "train",
+        "value": float(threshold),
+        "formula": formula,
+        "n_values": int(n_values),
+        "bid_column": config.bid_column,
+        "ask_column": config.ask_column,
+        "mean_spread": float(mean_spread),
+        "mean_midprice": float(mean_midprice),
+        "mean_pct": float(pct_sum / n_values),
+    }
+
+
 @dataclass(slots=True)
 class TripleBarrierLabeler:
     horizon: int = 10
@@ -229,10 +309,19 @@ class TargetLabelPipeline:
     def __init__(self, config: LabelConfig):
         self.config = config
 
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+    def transform(
+        self,
+        df: pd.DataFrame,
+        *,
+        smoothing_threshold_override: float | None = None,
+    ) -> pd.DataFrame:
         strategy = self.config.strategy.lower()
         if strategy == "smoothing":
-            return self._add_smoothing_labels(df, self.config.smoothing)
+            return self._add_smoothing_labels(
+                df,
+                self.config.smoothing,
+                threshold_override=smoothing_threshold_override,
+            )
         if strategy == "triple_barrier":
             return self._add_triple_barrier_labels(df, self.config.triple_barrier)
         raise ValueError(f"Unsupported labeling strategy: {self.config.strategy}")
@@ -241,6 +330,8 @@ class TargetLabelPipeline:
         self,
         df: pd.DataFrame,
         config: SmoothingLabelConfig,
+        *,
+        threshold_override: float | None = None,
     ) -> pd.DataFrame:
         result = df.copy()
         midprices = calculate_midprice(result, bid_col=config.bid_column, ask_col=config.ask_column)
@@ -255,7 +346,11 @@ class TargetLabelPipeline:
         else:
             raise ValueError(f"Unknown smoothing method: {config.method}")
 
-        threshold = config.threshold
+        threshold = config.threshold if threshold_override is None else float(threshold_override)
+        if threshold_override is not None and (
+            config.adaptive_threshold is not None and config.adaptive_threshold.enabled
+        ):
+            raise ValueError("A fitted smoothing threshold override cannot be combined with adaptive labels.")
         if (
             method_name == "C"
             and config.adaptive_threshold is not None
@@ -273,6 +368,11 @@ class TargetLabelPipeline:
         elif threshold is None:
             spread = calculate_spread(result, bid_col=config.bid_column, ask_col=config.ask_column)
             threshold = float((spread / midprices).mean())
+        elif is_train_fitted_smoothing_threshold(threshold):
+            raise ValueError(
+                "preprocessing.labels.smoothing.threshold is train-fitted; "
+                "fit it on train and pass smoothing_threshold_override before labeling."
+            )
 
         valid_mask = pct_changes.notna() & np.isfinite(pct_changes)
         if isinstance(threshold, pd.Series):

@@ -152,6 +152,7 @@ def save_preprocessing_metadata(
     *,
     lambda_results: dict[str, dict[str, float]] | None = None,
     label_distribution: dict[str, Any] | None = None,
+    smoothing_threshold: dict[str, Any] | None = None,
     price_static_plgs: dict[str, Any] | None = None,
     volume_static_exp: dict[str, Any] | None = None,
     volume_bar_scaling: dict[str, Any] | None = None,
@@ -181,6 +182,8 @@ def save_preprocessing_metadata(
     }
     if label_distribution is not None:
         payload["label_distribution"] = label_distribution
+    if smoothing_threshold is not None:
+        payload["smoothing_threshold"] = smoothing_threshold
     if price_static_plgs is not None:
         payload["price_static_plgs"] = price_static_plgs
     if volume_static_exp is not None:

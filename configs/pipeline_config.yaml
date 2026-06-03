@@ -54,7 +54,7 @@ preprocessing:
     strategy: smoothing # allowed: smoothing, triple_barrier
     smoothing:
       method: C # allowed: A, B, C
-      threshold: null # threshold is ignored if adaptive_threshold.enabled = true
+      threshold: null # numeric/null, or train-fitted mean_spread/mean_pct; ignored if adaptive_threshold.enabled = true
       k: 10
       h: 100
       bid_column: bid_price_1

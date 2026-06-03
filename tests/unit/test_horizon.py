@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from configuration import AdaptiveThresholdConfig, LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
 from horizon import (
@@ -14,12 +15,13 @@ from horizon import (
     calculate_adaptive_method_c_threshold_components,
     calculate_midprice,
     calculate_spread,
+    fit_train_smoothing_threshold,
 )
 
 
 def make_smoothing_config(
     method: str = "C",
-    threshold: float | None = None,
+    threshold: float | str | None = None,
     k: int = 5,
     h: int = 10,
     adaptive_threshold: AdaptiveThresholdConfig | None = None,
@@ -83,6 +85,39 @@ def test_calculate_midprice_and_spread() -> None:
 
     np.testing.assert_allclose(calculate_midprice(df), [100.0, 102.5])
     np.testing.assert_allclose(calculate_spread(df), [2.0, 3.0])
+
+
+def test_fit_train_smoothing_threshold_mean_pct() -> None:
+    frame = pd.DataFrame(
+        {
+            "bid_price_1": [99.0, 198.0],
+            "ask_price_1": [101.0, 202.0],
+        }
+    )
+    config = make_smoothing_config(method="C", threshold="mean_pct").smoothing
+
+    result = fit_train_smoothing_threshold([frame], config)
+
+    expected = np.mean([2.0 / 100.0, 4.0 / 200.0])
+    assert result["mode"] == "mean_pct"
+    assert result["value"] == pytest.approx(expected)
+    assert result["fit_split"] == "train"
+
+
+def test_fit_train_smoothing_threshold_mean_spread() -> None:
+    frame = pd.DataFrame(
+        {
+            "bid_price_1": [99.0, 196.0],
+            "ask_price_1": [101.0, 204.0],
+        }
+    )
+    config = make_smoothing_config(method="C", threshold="mean_spread").smoothing
+
+    result = fit_train_smoothing_threshold([frame], config)
+
+    expected = np.mean([2.0, 8.0]) / np.mean([100.0, 200.0])
+    assert result["mode"] == "mean_spread"
+    assert result["value"] == pytest.approx(expected)
 
 
 def test_smoothing_method_a_uses_future_rolling_mean() -> None:

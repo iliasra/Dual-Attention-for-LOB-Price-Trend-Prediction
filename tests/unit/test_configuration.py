@@ -342,6 +342,46 @@ def test_smoothing_threshold_string_none_is_loaded_as_none_with_adaptive_thresho
     assert loaded.preprocessing.labels.smoothing.adaptive_threshold.enabled is True
 
 
+def test_train_fitted_smoothing_threshold_modes_are_loaded(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = False
+
+    for mode in ("mean_spread", "mean_pct"):
+        payload["preprocessing"]["labels"]["smoothing"]["threshold"] = mode
+        config_path = artifact_dir / f"{mode}.yaml"
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        loaded = ExperimentConfig.from_yaml(config_path)
+
+        assert loaded.preprocessing.labels.smoothing.threshold == mode
+
+
+def test_train_fitted_smoothing_threshold_rejects_bad_modes(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = False
+    payload["preprocessing"]["labels"]["smoothing"]["threshold"] = "mean_magic"
+
+    config_path = artifact_dir / "bad_smoothing_threshold.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="smoothing\\.threshold"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_train_fitted_smoothing_threshold_rejects_adaptive_combo(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["threshold"] = "mean_pct"
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = True
+
+    config_path = artifact_dir / "bad_smoothing_threshold_adaptive.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="adaptive_threshold"):
+        ExperimentConfig.from_yaml(config_path)
+
+
 def test_smoothing_config_validates_non_negative_k(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
