@@ -63,6 +63,62 @@ def _price_level_metadata(column_name: str) -> tuple[str, str, int] | None:
     return side, kind, int(level)
 
 
+def orderbook_column_level(column_name: str) -> int | None:
+    """Return the LOB level encoded in a standard orderbook column name."""
+    metadata = _price_level_metadata(column_name)
+    return None if metadata is None else int(metadata[2])
+
+
+def filter_orderbook_top_k_columns(columns: list[str], top_k_levels: int | None) -> list[str]:
+    """Keep only standard LOB columns up to a configured depth."""
+    if top_k_levels is None:
+        return list(columns)
+    return [
+        column
+        for column in columns
+        if (level := orderbook_column_level(column)) is None or level <= int(top_k_levels)
+    ]
+
+
+def microprice_feature_name(levels: int) -> str:
+    """Return the generated feature stem for a multi-level microprice."""
+    return f"microprice_{int(levels)}"
+
+
+def calculate_microprice(df: pd.DataFrame, levels: int) -> pd.Series:
+    """Compute a multi-level microprice from paired price/size LOB columns."""
+    if levels < 1:
+        raise ValueError("microprice levels must be >= 1.")
+
+    required_columns: list[str] = []
+    for level in range(1, int(levels) + 1):
+        required_columns.extend(
+            [
+                f"ask_price_{level}",
+                f"bid_price_{level}",
+                f"ask_size_{level}",
+                f"bid_size_{level}",
+            ]
+        )
+    missing = [column for column in required_columns if column not in df.columns]
+    if missing:
+        raise ValueError(f"Cannot compute microprice_{levels}; missing columns: {missing}.")
+
+    numerator = np.zeros(len(df), dtype=np.float64)
+    denominator = np.zeros(len(df), dtype=np.float64)
+    for level in range(1, int(levels) + 1):
+        ask_price = df[f"ask_price_{level}"].to_numpy(dtype=np.float64)
+        bid_price = df[f"bid_price_{level}"].to_numpy(dtype=np.float64)
+        ask_size = df[f"ask_size_{level}"].to_numpy(dtype=np.float64)
+        bid_size = df[f"bid_size_{level}"].to_numpy(dtype=np.float64)
+        numerator += ask_price * bid_size + bid_price * ask_size
+        denominator += bid_size + ask_size
+
+    if np.any(denominator <= 0.0):
+        raise ValueError(f"Cannot compute microprice_{levels}; volume denominator must be positive.")
+    return pd.Series(numerator / denominator, index=df.index, name=microprice_feature_name(levels))
+
+
 def _ghost_level_columns(
     df: pd.DataFrame,
     dummy_values: list[float | int],
@@ -406,6 +462,35 @@ def _best_prices(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     return df["bid_price_1"], df["ask_price_1"]
 
 
+def price_kinematic_series(
+    df: pd.DataFrame,
+    columns: list[str],
+    *,
+    microprice_levels: int | None = None,
+) -> list[tuple[str, pd.Series]]:
+    """Return price-like series that should receive kinematic tokens."""
+    series = [(column, df[column]) for column in columns]
+    if microprice_levels is not None:
+        microprice = calculate_microprice(df, microprice_levels)
+        series.append((microprice_feature_name(microprice_levels), microprice))
+    return series
+
+
+def price_kinematic_values(
+    df: pd.DataFrame,
+    columns: list[str],
+    *,
+    microprice_levels: int | None = None,
+) -> tuple[np.ndarray, list[str]]:
+    """Return price-like kinematic values and their feature stems."""
+    series = price_kinematic_series(df, columns, microprice_levels=microprice_levels)
+    labels = [label for label, _ in series]
+    if not series:
+        return np.empty((len(df), 0), dtype=np.float64), labels
+    values = np.column_stack([value.to_numpy(dtype=np.float64) for _, value in series])
+    return values, labels
+
+
 @dataclass(slots=True)
 class ColumnResolver:
     data_config: DataConfig
@@ -456,15 +541,16 @@ class PriceKinematicProcessor:
     time_column: str
     tick_size: float
     extractor: KinematicTokenExtractor
+    microprice_levels: int | None = None
 
     def transform(self, df: pd.DataFrame, columns: list[str]) -> dict[str, float]:
         best_bid, best_ask = _best_prices(df)
         mid_price = float((best_bid.iloc[0] + best_ask.iloc[0]) * 0.5)
         tokens: dict[str, float] = {}
 
-        for column in columns:
-            centered = _kine_centering(df[column], mid_price, self.tick_size)
-            tokens.update(self.extractor.extract(centered, df[self.time_column], f"{column}_kin"))
+        for label, series in price_kinematic_series(df, columns, microprice_levels=self.microprice_levels):
+            centered = _kine_centering(series, mid_price, self.tick_size)
+            tokens.update(self.extractor.extract(centered, df[self.time_column], f"{label}_kin"))
 
         return tokens
 
@@ -546,20 +632,21 @@ def _fast_price_tokens(
     tick_size: float,
     fast_config: FastKinematicConfig,
     chunk_size: int,
+    microprice_levels: int | None = None,
     progress_desc: str | None = None,
-) -> np.ndarray:
+) -> tuple[np.ndarray, list[str]]:
     n_windows = len(df) - window + 1
-    if not columns:
-        return _empty_kinematic_tokens(n_windows)
+    values, labels = price_kinematic_values(df, columns, microprice_levels=microprice_levels)
+    if not labels:
+        return _empty_kinematic_tokens(n_windows), labels
     if tick_size <= 0:
         raise ValueError("tick_size must be > 0 for fast price kinematic centering.")
 
     tokenizer = _make_fast_tokenizer(window, fast_config, chunk_size)
-    values = df[columns].to_numpy(dtype=np.float64)
     best_bid, best_ask = _best_prices(df)
     centers = ((best_bid.to_numpy(dtype=np.float64) + best_ask.to_numpy(dtype=np.float64)) * 0.5)[:n_windows]
 
-    output = np.empty((n_windows, len(columns), len(KINEMATIC_SUFFIXES)), dtype=np.float64)
+    output = np.empty((n_windows, len(labels), len(KINEMATIC_SUFFIXES)), dtype=np.float64)
     progress = tqdm(total=n_windows, desc=progress_desc, unit="rows", mininterval=5) if progress_desc else None
 
     try:
@@ -580,7 +667,7 @@ def _fast_price_tokens(
         if progress is not None:
             progress.close()
 
-    return output
+    return output, labels
 
 
 def _fast_volume_tokens(
@@ -623,17 +710,19 @@ class FastPriceKinematicProcessor:
     tick_size: float
     fast_config: FastKinematicConfig
     chunk_size: int
+    microprice_levels: int | None = None
 
     def transform(self, df: pd.DataFrame, columns: list[str]) -> dict[str, float]:
-        tokens = _fast_price_tokens(
+        tokens, labels = _fast_price_tokens(
             df,
             columns,
             window=len(df),
             tick_size=self.tick_size,
             fast_config=self.fast_config,
             chunk_size=self.chunk_size,
+            microprice_levels=self.microprice_levels,
         )
-        return _kinematic_tokens_to_dict(tokens, columns)
+        return _kinematic_tokens_to_dict(tokens, labels)
 
 
 @dataclass(slots=True)
@@ -775,6 +864,32 @@ class SnapshotWindowProcessor:
             return self.column_resolver.price_columns(df, override=stream_config.columns)
         return self.column_resolver.volume_columns(df, override=stream_config.columns)
 
+    def _resolve_kinematic_columns(
+        self,
+        df: pd.DataFrame,
+        stream_config: object,
+        kind: Literal["price", "volume"],
+    ) -> list[str]:
+        """Resolve stream columns and apply the optional kinematic top-k filter."""
+        columns = self._resolve_stream_columns(df, stream_config, kind)
+        top_k_levels = self.preprocessing_config.kinematic_tokenization.orderbook_top_k_levels
+        return filter_orderbook_top_k_columns(columns, top_k_levels)
+
+    def _microprice_levels_for_price_kinematic(self) -> int | None:
+        """Return configured microprice levels when the price kinematic stream uses it."""
+        microprice = self.preprocessing_config.microprice
+        if not microprice.enabled:
+            return None
+        return int(microprice.levels)
+
+    def _price_kinematic_labels(self, columns: list[str]) -> list[str]:
+        """Return generated price kinematic feature stems for resolved columns."""
+        labels = list(columns)
+        microprice_levels = self._microprice_levels_for_price_kinematic()
+        if microprice_levels is not None:
+            labels.append(microprice_feature_name(microprice_levels))
+        return labels
+
     def _passthrough_columns(self, df: pd.DataFrame, price_cols: list[str], volume_cols: list[str]) -> list[str]:
         excluded = set(price_cols) | set(volume_cols)
         return [column for column in df.columns if column not in excluded]
@@ -820,6 +935,7 @@ class SnapshotWindowProcessor:
                     tick_size=self.preprocessing_config.price_kinematic.tick_size,
                     fast_config=self.preprocessing_config.price_kinematic.fast,
                     chunk_size=self.preprocessing_config.kinematic_tokenization.chunk_size,
+                    microprice_levels=self._microprice_levels_for_price_kinematic(),
                 )
             else:
                 processor = PriceKinematicProcessor(
@@ -829,11 +945,12 @@ class SnapshotWindowProcessor:
                         alpha=self.preprocessing_config.price_kinematic.basis.alpha,
                         reference=self.preprocessing_config.price_kinematic.reference,
                     ),
+                    microprice_levels=self._microprice_levels_for_price_kinematic(),
                 )
             result.update(
                 processor.transform(
                     window,
-                    self._resolve_stream_columns(window, self.preprocessing_config.price_kinematic, "price"),
+                    self._resolve_kinematic_columns(window, self.preprocessing_config.price_kinematic, "price"),
                 )
             )
 
@@ -854,7 +971,7 @@ class SnapshotWindowProcessor:
             result.update(
                 processor.transform(
                     window,
-                    self._resolve_stream_columns(window, self.preprocessing_config.volume_kinematic, "volume"),
+                    self._resolve_kinematic_columns(window, self.preprocessing_config.volume_kinematic, "volume"),
                 )
             )
 
@@ -1012,8 +1129,9 @@ class SnapshotBatchProcessor:
                     alpha=self.preprocessing_config.price_kinematic.basis.alpha,
                     reference=self.preprocessing_config.price_kinematic.reference,
                 ),
+                microprice_levels=self.window_processor._microprice_levels_for_price_kinematic(),
             )
-            price_columns = self.window_processor._resolve_stream_columns(
+            price_columns = self.window_processor._resolve_kinematic_columns(
                 df,
                 self.preprocessing_config.price_kinematic,
                 "price",
@@ -1029,7 +1147,7 @@ class SnapshotBatchProcessor:
                     reference=self.preprocessing_config.volume_kinematic.reference,
                 ),
             )
-            volume_columns = self.window_processor._resolve_stream_columns(
+            volume_columns = self.window_processor._resolve_kinematic_columns(
                 df,
                 self.preprocessing_config.volume_kinematic,
                 "volume",
@@ -1065,24 +1183,25 @@ class SnapshotBatchProcessor:
         print(f"Starting fast kinematic stream for {label}: {n_windows} rows.")
 
         if self.preprocessing_config.price_kinematic.enabled:
-            price_columns = self.window_processor._resolve_stream_columns(
+            price_columns = self.window_processor._resolve_kinematic_columns(
                 df,
                 self.preprocessing_config.price_kinematic,
                 "price",
             )
-            price_tokens = _fast_price_tokens(
+            price_tokens, price_labels = _fast_price_tokens(
                 df,
                 price_columns,
                 window=window_size,
                 tick_size=self.preprocessing_config.price_kinematic.tick_size,
                 fast_config=self.preprocessing_config.price_kinematic.fast,
                 chunk_size=chunk_size,
+                microprice_levels=self.window_processor._microprice_levels_for_price_kinematic(),
                 progress_desc=f"Fast price kinematic [{label}]",
             )
-            token_frames.append(_kinematic_tokens_to_frame(price_tokens, price_columns))
+            token_frames.append(_kinematic_tokens_to_frame(price_tokens, price_labels))
 
         if self.preprocessing_config.volume_kinematic.enabled:
-            volume_columns = self.window_processor._resolve_stream_columns(
+            volume_columns = self.window_processor._resolve_kinematic_columns(
                 df,
                 self.preprocessing_config.volume_kinematic,
                 "volume",
@@ -1166,7 +1285,12 @@ class DerivativeNormalizer:
     def __post_init__(self) -> None:
         self.method = _validate_derivative_scaling_method(self.method)
 
-    def fit(self, dataframes: list[pd.DataFrame]) -> "DerivativeNormalizer":
+    def fit(
+        self,
+        dataframes: list[pd.DataFrame],
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> "DerivativeNormalizer":
         """Fit exact train-only derivative stats for the selected scaling method."""
         if not dataframes:
             raise ValueError("Cannot fit derivative normalizer on an empty list of dataframes.")
@@ -1192,7 +1316,10 @@ class DerivativeNormalizer:
                 "n_inf": stats.n_inf,
             }
 
-        save_yaml(self.output_path, self.stats_)
+        payload: dict[str, object] = dict(self.stats_)
+        if metadata is not None:
+            payload["__metadata__"] = metadata
+        save_yaml(self.output_path, payload)
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:

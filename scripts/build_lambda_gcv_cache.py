@@ -92,6 +92,7 @@ def main() -> None:
         max_df=fast_config.df,
         scale=scale,
         n_df_candidates=n_df_candidates,
+        stream_signature=pipeline._lambda_cache_stream_signature(kind=args.kind),
     )
     cache_path = daily_lambda_gcv_cache_path(
         args.cache_dir,
@@ -127,6 +128,7 @@ def main() -> None:
             "n_basis": fast_config.n_basis,
             "max_df": fast_config.df,
             "scale": scale,
+            "stream_signature": pipeline._lambda_cache_stream_signature(kind=args.kind),
             "chunk_size": chunk_size,
             "n_df_candidates": n_df_candidates,
         },

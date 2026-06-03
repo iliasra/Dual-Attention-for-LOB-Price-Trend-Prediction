@@ -86,8 +86,12 @@ def main() -> None:
         kinds=kinds,
     ):
         plot_kind = confusion_kind_label(kind)
-        title = f"{fold_id} {epoch_name} {split} {plot_kind}"
-        filename = f"{slug(fold_id)}_{slug(epoch_name)}_{split}_{plot_kind}.{args.format}"
+        if fold_id == "files":
+            title = f"{epoch_name} {plot_kind}"
+            filename = f"{slug(epoch_name)}_{plot_kind}.{args.format}"
+        else:
+            title = f"{fold_id} {epoch_name} {split} {plot_kind}"
+            filename = f"{slug(fold_id)}_{slug(epoch_name)}_{split}_{plot_kind}.{args.format}"
         output_path = output_dir / filename
         plot_confusion_matrix(
             matrix,

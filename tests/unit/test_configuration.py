@@ -206,6 +206,9 @@ def test_fast_kinematic_config_values_are_loaded() -> None:
     assert config.preprocessing.kinematic_tokenization.method in {"basis", "fast"}
     assert config.preprocessing.kinematic_tokenization.chunk_size == 100000
     assert config.preprocessing.kinematic_tokenization.n_df_candidates == 25
+    assert config.preprocessing.kinematic_tokenization.orderbook_top_k_levels == 5
+    assert config.preprocessing.microprice.enabled is True
+    assert config.preprocessing.microprice.levels == 5
     assert config.preprocessing.price_kinematic.basis.alpha == 5.0
     assert config.preprocessing.price_kinematic.fast.n_basis == 20
     assert config.preprocessing.price_kinematic.fast.df == 12.0
@@ -565,6 +568,37 @@ def test_fast_kinematic_config_requires_explicit_values(artifact_dir: Path) -> N
 
     with pytest.raises(ValueError, match="preprocessing\\.price_kinematic\\.fast\\.n_basis"):
         ExperimentConfig.from_yaml(broken_config_path)
+
+
+def test_kinematic_top_k_and_microprice_config_are_optional_and_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["kinematic_tokenization"].pop("orderbook_top_k_levels", None)
+    payload["preprocessing"].pop("microprice", None)
+
+    config_path = artifact_dir / "legacy_without_top_k_microprice.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.preprocessing.kinematic_tokenization.orderbook_top_k_levels is None
+    assert loaded.preprocessing.microprice.enabled is False
+    assert loaded.preprocessing.microprice.levels == 1
+
+    payload["preprocessing"]["kinematic_tokenization"]["orderbook_top_k_levels"] = 0
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="orderbook_top_k_levels"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["preprocessing"]["kinematic_tokenization"]["orderbook_top_k_levels"] = 2
+    payload["preprocessing"]["microprice"] = {"enabled": True, "levels": 0}
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="preprocessing\\.microprice\\.levels"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["preprocessing"]["microprice"] = {"enabled": True, "levels": 2.5}
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="preprocessing\\.microprice\\.levels"):
+        ExperimentConfig.from_yaml(config_path)
 
 
 def test_fast_kinematic_method_requires_tick_reference(artifact_dir: Path) -> None:

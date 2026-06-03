@@ -161,3 +161,19 @@ def test_lambda_gcv_cache_key_includes_candidate_count() -> None:
         **common,
         n_df_candidates=5,
     )
+
+
+def test_lambda_gcv_cache_key_includes_stream_signature_when_provided() -> None:
+    common = {
+        "window": 10,
+        "n_basis": 6,
+        "max_df": 5.0,
+        "scale": 100.0,
+        "n_df_candidates": 4,
+    }
+
+    assert lambda_gcv_cache_key(**common, stream_signature="top5_mp5") != lambda_gcv_cache_key(
+        **common,
+        stream_signature="topall_mpoff",
+    )
+    assert lambda_gcv_cache_key(**common) == lambda_gcv_cache_key(**common, stream_signature=None)

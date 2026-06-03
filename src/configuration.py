@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +85,11 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "method": None,
             "chunk_size": None,
             "n_df_candidates": None,
+            "orderbook_top_k_levels": None,
+        },
+        "microprice": {
+            "enabled": None,
+            "levels": None,
         },
         "price_kinematic": {
             "enabled": None,
@@ -201,6 +206,10 @@ OPTIONAL_CONFIG_KEYS = {
     "model.max_dt",
     "training.monitor_params",
     "preprocessing.save_processed_dataframes",
+    "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
+    "preprocessing.microprice",
+    "preprocessing.microprice.enabled",
+    "preprocessing.microprice.levels",
     "training.early_stopping_warmup",
     "training.early_stopping_min_delta",
     "training.optimizer",
@@ -361,6 +370,24 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
+def _optional_int(value: Any, dotted_path: str) -> int | None:
+    """Convert an optional config value to int without accepting floats."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Invalid experiment config; {dotted_path} must be an integer or null.")
+    return int(value)
+
+
+def _required_int(value: Any, dotted_path: str) -> int:
+    """Convert a required config value to int without accepting floats."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Invalid experiment config; {dotted_path} must be an integer.")
+    return int(value)
+
+
 def _is_valid_training_device(value: Any) -> bool:
     """Check whether a training device string is accepted.
 
@@ -482,6 +509,7 @@ class KinematicTokenizationConfig:
     method: str
     chunk_size: int
     n_df_candidates: int
+    orderbook_top_k_levels: int | None = None
 
     def __post_init__(self) -> None:
         """Check kinematic tokenization settings."""
@@ -492,6 +520,8 @@ class KinematicTokenizationConfig:
             raise ValueError("preprocessing.kinematic_tokenization.chunk_size must be > 0.")
         if self.n_df_candidates <= 0:
             raise ValueError("preprocessing.kinematic_tokenization.n_df_candidates must be > 0.")
+        if self.orderbook_top_k_levels is not None and self.orderbook_top_k_levels < 1:
+            raise ValueError("preprocessing.kinematic_tokenization.orderbook_top_k_levels must be >= 1 or null.")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "KinematicTokenizationConfig":
@@ -506,6 +536,10 @@ class KinematicTokenizationConfig:
                     payload["n_df_candidates"],
                     "preprocessing.kinematic_tokenization.n_df_candidates",
                 )
+            ),
+            orderbook_top_k_levels=_optional_int(
+                payload.get("orderbook_top_k_levels"),
+                "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
             ),
         )
 
@@ -652,6 +686,31 @@ class VolumeStaticConfig:
             quantile=float(payload["quantile"]),
             target=float(payload["target"]),
         )
+
+
+@dataclass(slots=True)
+class MicropriceConfig:
+    enabled: bool = False
+    levels: int = 1
+
+    def __post_init__(self) -> None:
+        """Check optional microprice feature settings."""
+        if self.levels < 1:
+            raise ValueError("preprocessing.microprice.levels must be >= 1.")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "MicropriceConfig":
+        """Build optional microprice settings from a YAML subsection."""
+        if payload is None:
+            return cls()
+        unexpected = sorted(set(payload) - {"enabled", "levels"})
+        if unexpected:
+            raise ValueError(f"Invalid experiment config; unexpected key(s) in preprocessing.microprice: {unexpected}")
+        return cls(
+            enabled=bool(payload.get("enabled", False)),
+            levels=_required_int(payload.get("levels", 1), "preprocessing.microprice.levels"),
+        )
+
 
 @dataclass(slots=True)
 class AdaptiveThresholdConfig:
@@ -998,6 +1057,7 @@ class PreprocessingConfig:
     price_static: PriceStaticConfig
     volume_kinematic: VolumeKinematicConfig
     volume_static: VolumeStaticConfig
+    microprice: MicropriceConfig = field(default_factory=MicropriceConfig)
     save_processed_dataframes: bool = False
 
     def __post_init__(self) -> None:
@@ -1031,6 +1091,7 @@ class PreprocessingConfig:
             price_static=PriceStaticConfig.from_dict(payload["price_static"], tick_size=tick_size),
             volume_kinematic=VolumeKinematicConfig.from_dict(payload["volume_kinematic"]),
             volume_static=VolumeStaticConfig.from_dict(payload["volume_static"]),
+            microprice=MicropriceConfig.from_dict(payload.get("microprice")),
             save_processed_dataframes=bool(payload.get("save_processed_dataframes", False)),
         )
 

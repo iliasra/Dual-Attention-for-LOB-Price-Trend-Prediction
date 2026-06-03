@@ -46,15 +46,18 @@ def lambda_gcv_cache_key(
     max_df: float,
     scale: float,
     n_df_candidates: int,
+    stream_signature: str | None = None,
     degree: int = 3,
     ridge: float = 1e-8,
 ) -> str:
+    signature = "" if stream_signature is None else f"_sig{_token(stream_signature)}"
     return (
         f"v1_w{window}"
         f"_nb{n_basis}"
         f"_df{_token(f'{max_df:g}')}"
         f"_scale{_token(f'{scale:g}')}"
         f"_c{n_df_candidates}"
+        f"{signature}"
         f"_deg{degree}"
         f"_ridge{ridge:g}"
     )

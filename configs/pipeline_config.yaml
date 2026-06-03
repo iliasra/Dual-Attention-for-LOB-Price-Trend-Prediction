@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: lob_price_trend
+  name: top_5_micro_kin
 
 data:
   raw_data_dir: ../data/LOBSTER
@@ -97,6 +97,10 @@ preprocessing:
     method: fast # allowed: basis, fast
     chunk_size: 100000 # shared by fast price and volume tokenization
     n_df_candidates: 25 # shared number of effective-df candidates explored by train GCV
+    orderbook_top_k_levels: 5 # null = all levels; filters price/volume kinematic streams only
+  microprice:
+    enabled: true # adds a price-like kinematic microprice stream only
+    levels: 5 # number of LOB levels used to compute microprice
   price_kinematic:
     enabled: true
     columns: auto
@@ -139,8 +143,8 @@ model:
   # when not provided (None value), the value used is infered from the size
   # of tensor x which has shape=[batch, sequence, d_input]
   d_input:
-  d_model: 128
-  feature_embed_dim: 16
+  d_model: 256
+  feature_embed_dim: 32
   feature_num_frequencies: 8
   feature_sigma: 1.0
   num_heads: 4
@@ -168,11 +172,11 @@ training:
   early_stopping_patience: 5
   early_stopping_warmup: 3
   early_stopping_min_delta: 0.0
-  monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
+  monitor: val_directional_macro_f1 # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
   monitor_mode: max # allowed: min, max; tailored_score requires max
   monitor_params:
-    lambda_ece: 0.1
-    lambda_rate: 0.2
+    lambda_ece: null
+    lambda_rate: null
   persistent_workers: true
   optimizer: adamw # allowed: adam, adamw
   learning_rate: 1.0e-4
@@ -190,7 +194,7 @@ training:
   directional_thresholds:
     enabled: true
     method: joint_up_down # allowed: joint_up_down, precision_floor
-    min: 0.05 # lower bound for candidate probability thresholds
+    min: 0.1 # lower bound for candidate probability thresholds
     max: 0.95 # upper bound for candidate probability thresholds
     step: 0.05 # coarse grid step; joint_up_down also refines around the best region
     delta: 0.0 # logit-margin gap required to break up/down ties; otherwise neutral

@@ -136,11 +136,11 @@ model:
 
 training:
   device: cuda
-  epochs: 10
+  epochs: 50
   batch_size: 128
   eval_batch_size: 256
   num_workers: 8
-  early_stopping_patience: 3
+  early_stopping_patience: 8
   early_stopping_warmup: 0
   early_stopping_min_delta: 0.0
   monitor: val_loss

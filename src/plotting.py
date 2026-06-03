@@ -32,13 +32,13 @@ def slug(value: str) -> str:
 
 
 def load_confusion_yaml(path: Path) -> dict[str, Any]:
-    """Load a training confusion_matrices.yaml file."""
+    """Load a training or replayed confusion_matrices.yaml file."""
     if not path.exists():
         raise FileNotFoundError(f"Confusion matrix YAML not found: {path}")
     with path.open("r", encoding="utf-8") as handle:
         payload = yaml.safe_load(handle) or {}
-    if not isinstance(payload, dict) or "folds" not in payload:
-        raise ValueError(f"Invalid confusion matrix YAML: missing top-level 'folds' in {path}")
+    if not isinstance(payload, dict) or ("folds" not in payload and "files" not in payload):
+        raise ValueError(f"Invalid confusion matrix YAML: expected top-level 'folds' or 'files' in {path}")
     return payload
 
 
@@ -75,6 +75,14 @@ def iter_confusion_matrices(
     kinds: tuple[str, ...],
 ) -> Iterable[tuple[str, str, str, str, np.ndarray]]:
     """Yield confusion matrices matching fold, epoch, split, and kind filters."""
+    if "files" in payload:
+        yield from _iter_file_confusion_matrices(
+            payload,
+            split_filter=split_filter,
+            kinds=kinds,
+        )
+        return
+
     folds = payload.get("folds", {})
     if not isinstance(folds, dict):
         raise ValueError("Invalid confusion matrix YAML: 'folds' must be a mapping.")
@@ -100,6 +108,41 @@ def iter_confusion_matrices(
                     if matrix is None:
                         continue
                     yield fold_id, epoch_name, split, kind, np.asarray(matrix, dtype=float)
+
+
+def _split_from_file_key(file_key: str) -> str:
+    """Infer a split name from a replayed probability filename stem."""
+    if file_key.startswith("validation"):
+        return "validation"
+    if file_key.startswith("test"):
+        return "test"
+    if file_key.startswith("train"):
+        return "train"
+    return "file"
+
+
+def _iter_file_confusion_matrices(
+    payload: dict[str, Any],
+    *,
+    split_filter: str,
+    kinds: tuple[str, ...],
+) -> Iterable[tuple[str, str, str, str, np.ndarray]]:
+    """Yield matrices from threshold replay YAML files keyed by source CSV."""
+    files = payload.get("files", {})
+    if not isinstance(files, dict):
+        raise ValueError("Invalid confusion matrix YAML: 'files' must be a mapping.")
+
+    for file_key, file_payload in files.items():
+        if not isinstance(file_payload, dict):
+            continue
+        split = _split_from_file_key(str(file_key))
+        if split_filter != "all" and split != split_filter:
+            continue
+        for kind in kinds:
+            matrix = file_payload.get(kind)
+            if matrix is None:
+                continue
+            yield "files", str(file_key), split, kind, np.asarray(matrix, dtype=float)
 
 
 def confusion_kind_label(kind: str) -> str:

@@ -35,6 +35,7 @@ try:
         fit_exp_scaling_parameters,
         fit_plgs_parameters,
         handle_abnormal_prices,
+        price_kinematic_values,
         price_static_distance_frame,
     )
     from lobster_io import read_lobster_message_csv, read_lobster_orderbook_csv
@@ -65,6 +66,7 @@ except ImportError:  # pragma: no cover
         fit_exp_scaling_parameters,
         fit_plgs_parameters,
         handle_abnormal_prices,
+        price_kinematic_values,
         price_static_distance_frame,
     )
     from .lobster_io import read_lobster_message_csv, read_lobster_orderbook_csv
@@ -484,16 +486,24 @@ class LobProcessingPipeline:
         )
         for day in train_days:
             message_features = self._require_frame(day, "message_features", f"{kind} lambda optimization")
-            columns = self.snapshot_processor.window_processor._resolve_stream_columns(
+            columns = self.snapshot_processor.window_processor._resolve_kinematic_columns(
                 message_features,
                 stream_config,
                 kind,
             )
-            if not columns:
-                continue
-            values = message_features[columns].to_numpy(dtype=float)
-            if kind == "volume":
+            if kind == "price":
+                values, _ = price_kinematic_values(
+                    message_features,
+                    columns,
+                    microprice_levels=self.snapshot_processor.window_processor._microprice_levels_for_price_kinematic(),
+                )
+            else:
+                if not columns:
+                    continue
+                values = message_features[columns].to_numpy(dtype=float)
                 values = np.log1p(values)
+            if values.shape[1] == 0:
+                continue
             values_by_day.append(values)
             if centers_by_day is not None:
                 centers_by_day.append(calculate_midprice(message_features).to_numpy(dtype=float))
@@ -554,6 +564,7 @@ class LobProcessingPipeline:
             "selected_smoothing_lambda": float(result.smoothing_lambda),
             "effective_df": float(result.effective_df),
             "mean_gcv": float(result.gcv_score),
+            "stream_signature": self._lambda_cache_stream_signature(kind=kind),
         }
         print(
             f"Selected fast {kind} smoothing_lambda={result.smoothing_lambda:.8g} "
@@ -583,7 +594,19 @@ class LobProcessingPipeline:
             max_df=fast_config.df,
             scale=scale,
             n_df_candidates=preprocessing.kinematic_tokenization.n_df_candidates,
+            stream_signature=self._lambda_cache_stream_signature(kind=kind),
         )
+
+    def _lambda_cache_stream_signature(self, *, kind: str) -> str:
+        """Return the stream feature signature used by daily GCV caches."""
+        preprocessing = self.config.preprocessing
+        top_k = preprocessing.kinematic_tokenization.orderbook_top_k_levels
+        top_token = "all" if top_k is None else str(int(top_k))
+        if kind == "price" and preprocessing.microprice.enabled:
+            microprice_token = f"mp{int(preprocessing.microprice.levels)}"
+        else:
+            microprice_token = "mpoff"
+        return f"top{top_token}_{microprice_token}"
 
     def _try_optimize_fast_stream_lambda_from_cache(
         self,
@@ -647,6 +670,7 @@ class LobProcessingPipeline:
             "selected_smoothing_lambda": float(result.smoothing_lambda),
             "effective_df": float(result.effective_df),
             "mean_gcv": float(result.gcv_score),
+            "stream_signature": self._lambda_cache_stream_signature(kind=kind),
             "gcv_cache_total_count": int(total_count),
             "gcv_cache_days": int(len(caches)),
         }
@@ -1063,6 +1087,51 @@ class LobProcessingPipeline:
                 self._align_day_to_feature_schema(day, ordered_feature_columns)
         return ordered_feature_columns
 
+    def _derivative_stats_metadata(
+        self,
+        message_features: pd.DataFrame,
+        derivative_columns: list[str],
+    ) -> dict[str, object]:
+        """Return audit metadata saved next to derivative normalization stats."""
+        window_processor = self.snapshot_processor.window_processor
+        price_columns = (
+            window_processor._resolve_kinematic_columns(
+                message_features,
+                self.config.preprocessing.price_kinematic,
+                "price",
+            )
+            if self.config.preprocessing.price_kinematic.enabled
+            else []
+        )
+        volume_columns = (
+            window_processor._resolve_kinematic_columns(
+                message_features,
+                self.config.preprocessing.volume_kinematic,
+                "volume",
+            )
+            if self.config.preprocessing.volume_kinematic.enabled
+            else []
+        )
+        price_labels = (
+            window_processor._price_kinematic_labels(price_columns)
+            if self.config.preprocessing.price_kinematic.enabled
+            else []
+        )
+        return {
+            "kinematic_tokenization": {
+                "orderbook_top_k_levels": self.config.preprocessing.kinematic_tokenization.orderbook_top_k_levels,
+            },
+            "microprice": {
+                "enabled": bool(self.config.preprocessing.microprice.enabled),
+                "levels": int(self.config.preprocessing.microprice.levels),
+            },
+            "kinematic_columns": {
+                "price": price_labels,
+                "volume": volume_columns,
+            },
+            "derivative_columns": derivative_columns,
+        }
+
     def _fit_train_normalizer_streaming(
         self,
         train_days: list[ProcessedDay],
@@ -1082,6 +1151,7 @@ class LobProcessingPipeline:
         )
         derivative_frames: list[pd.DataFrame] = []
         first_schema_day: ProcessedDay | None = None
+        stats_metadata: dict[str, object] | None = None
 
         for day in train_days:
             message_features = self._require_frame(day, "message_features", "train snapshot fitting")
@@ -1093,6 +1163,8 @@ class LobProcessingPipeline:
             )
 
             derivative_columns = derivative_feature_columns(processed)
+            if stats_metadata is None:
+                stats_metadata = self._derivative_stats_metadata(message_features, derivative_columns)
             derivative_frames.append(processed.loc[:, derivative_columns].copy())
             if first_schema_day is None:
                 first_schema_day = day
@@ -1103,7 +1175,7 @@ class LobProcessingPipeline:
         if first_schema_day is None:
             raise ValueError("Cannot fit derivative normalizer: no training day is available.")
 
-        normalizer.fit(derivative_frames)
+        normalizer.fit(derivative_frames, metadata=stats_metadata)
         first_processed = self._require_frame(first_schema_day, "processed", "feature schema bootstrap")
         first_schema_day.normalized = normalizer.transform(first_processed)
         ordered_feature_columns = self._build_feature_schema_from_day(first_schema_day, schema_path)
