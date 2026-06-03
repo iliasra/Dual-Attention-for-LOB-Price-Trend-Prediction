@@ -22,6 +22,7 @@ from thresholding import (
     apply_directional_threshold_policy,
     optimize_directional_thresholds,
     optimize_precision_floor_thresholds,
+    optimize_top_quantile_thresholds,
     threshold_candidates,
     thresholded_metric_summary,
 )
@@ -205,6 +206,20 @@ def fit_thresholds(
             ),
             (),
         )
+    if threshold_config.method == "top_x_quantile":
+        return (
+            optimize_top_quantile_thresholds(
+                probabilities,
+                targets,
+                down_quantile=float(threshold_config.down_quantile),
+                up_quantile=float(threshold_config.up_quantile),
+                down_id=down_id,
+                neutral_id=neutral_id,
+                up_id=up_id,
+                delta=threshold_config.delta,
+            ),
+            (),
+        )
     raise ValueError(f"Unsupported thresholding method: {threshold_config.method}")
 
 
@@ -295,7 +310,11 @@ def threshold_artifact(
             "selection_metric": (
                 "directional_macro_f1"
                 if threshold_config.method == "joint_up_down"
-                else "per_class_precision_floor_then_recall"
+                else (
+                    "per_class_precision_floor_then_recall"
+                    if threshold_config.method == "precision_floor"
+                    else "top_probability_quantile"
+                )
             ),
             "method": threshold_config.method,
             "threshold_down": selection.threshold_down,
@@ -312,6 +331,9 @@ def threshold_artifact(
             "delta": threshold_config.delta,
             "down_precision_floor": threshold_config.down_precision_floor,
             "up_precision_floor": threshold_config.up_precision_floor,
+            "down_quantile": threshold_config.down_quantile,
+            "up_quantile": threshold_config.up_quantile,
+            "top_quantile_convention": "0.01 means the top 1% validation probabilities for that class.",
             "n_candidates": selection.n_candidates,
             "decision_tie_break": "logit_margin_gap_else_neutral",
             "class_ids": {"down": down_id, "neutral": neutral_id, "up": up_id},

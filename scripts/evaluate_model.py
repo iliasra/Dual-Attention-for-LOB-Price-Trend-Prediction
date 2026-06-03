@@ -242,8 +242,8 @@ def load_directional_thresholds(path: Path, config: ExperimentConfig) -> dict[st
     threshold_down = None if payload["threshold_down"] is None else float(payload["threshold_down"])
     threshold_up = None if payload["threshold_up"] is None else float(payload["threshold_up"])
     method = str(payload.get("method", "joint_up_down"))
-    if method not in {"joint_up_down", "precision_floor"}:
-        raise ValueError("Directional threshold method must be joint_up_down or precision_floor.")
+    if method not in {"joint_up_down", "precision_floor", "top_x_quantile"}:
+        raise ValueError("Directional threshold method must be joint_up_down, precision_floor, or top_x_quantile.")
     delta = float(payload.get("delta", 0.0))
     if delta < 0.0:
         raise ValueError("Directional threshold delta must be >= 0.")
@@ -255,6 +255,8 @@ def load_directional_thresholds(path: Path, config: ExperimentConfig) -> dict[st
         "down_enabled": bool(payload.get("down_enabled", threshold_down is not None)),
         "up_enabled": bool(payload.get("up_enabled", threshold_up is not None)),
         "delta": delta,
+        "down_quantile": payload.get("down_quantile"),
+        "up_quantile": payload.get("up_quantile"),
         "down_id": int(down_id),
         "neutral_id": int(neutral_id),
         "up_id": int(up_id),
@@ -342,6 +344,8 @@ def add_directional_threshold_fields(row: dict[str, Any], threshold_config: Mapp
             "threshold_down_enabled": bool(threshold_config.get("down_enabled", True)),
             "threshold_up_enabled": bool(threshold_config.get("up_enabled", True)),
             "threshold_delta": float(threshold_config.get("delta", 0.0)),
+            "threshold_down_quantile": threshold_config.get("down_quantile"),
+            "threshold_up_quantile": threshold_config.get("up_quantile"),
             "threshold_down_id": int(threshold_config["down_id"]),
             "threshold_neutral_id": int(threshold_config["neutral_id"]),
             "threshold_up_id": int(threshold_config["up_id"]),

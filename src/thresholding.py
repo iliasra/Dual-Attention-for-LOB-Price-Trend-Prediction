@@ -539,6 +539,89 @@ def optimize_precision_floor_thresholds(
     )
 
 
+def _top_quantile_threshold(
+    scores: np.ndarray,
+    *,
+    quantile: float,
+) -> dict[str, Any]:
+    """Return the threshold selecting the top quantile of scores."""
+    score_array = np.asarray(scores, dtype=np.float32).reshape(-1)
+    if score_array.size == 0:
+        raise ValueError("top quantile thresholding requires at least one score.")
+    if not 0.0 < float(quantile) <= 1.0:
+        raise ValueError("top quantile must be in (0, 1].")
+    requested_count = max(1, int(np.ceil(float(quantile) * score_array.size)))
+    sorted_scores = np.sort(score_array)[::-1]
+    threshold = float(sorted_scores[requested_count - 1])
+    selected_count = int(np.sum(score_array >= threshold))
+    return {
+        "enabled": True,
+        "threshold": threshold,
+        "quantile": float(quantile),
+        "requested_count": int(requested_count),
+        "selected_count": selected_count,
+        "n_scores": int(score_array.size),
+        "selection_rule": "threshold_at_ceil_quantile_top_score",
+    }
+
+
+def optimize_top_quantile_thresholds(
+    probabilities: np.ndarray,
+    targets: np.ndarray,
+    *,
+    down_quantile: float,
+    up_quantile: float,
+    down_id: int,
+    neutral_id: int,
+    up_id: int,
+    delta: float = 0.0,
+) -> DirectionalThresholdSelection:
+    """Select down/up thresholds from top probability quantiles."""
+    probs = np.asarray(probabilities, dtype=np.float32)
+    target_array = np.asarray(targets, dtype=np.int64).reshape(-1)
+    if probs.ndim != 2:
+        raise ValueError("probabilities must be a 2D array.")
+    if probs.shape[0] != target_array.shape[0]:
+        raise ValueError("probabilities and targets must have the same number of rows.")
+    max_id = max(down_id, neutral_id, up_id)
+    if probs.shape[1] <= max_id:
+        raise ValueError("probabilities has fewer columns than the requested class ids.")
+    if delta < 0.0:
+        raise ValueError("delta must be >= 0.")
+
+    down_selection = _top_quantile_threshold(probs[:, int(down_id)], quantile=float(down_quantile))
+    up_selection = _top_quantile_threshold(probs[:, int(up_id)], quantile=float(up_quantile))
+    predictions = apply_directional_threshold_policy(
+        probs,
+        threshold_down=down_selection["threshold"],
+        threshold_up=up_selection["threshold"],
+        down_id=down_id,
+        neutral_id=neutral_id,
+        up_id=up_id,
+        delta=delta,
+    )
+    score, rate_penalty, min_directional_precision = _directional_selection_metrics(
+        target_array,
+        predictions,
+        down_id=down_id,
+        up_id=up_id,
+    )
+    return DirectionalThresholdSelection(
+        threshold_down=down_selection["threshold"],
+        threshold_up=up_selection["threshold"],
+        score=score,
+        rate_penalty=rate_penalty,
+        min_directional_precision=min_directional_precision,
+        n_candidates=2,
+        down_enabled=True,
+        up_enabled=True,
+        selection_details={
+            "down": down_selection,
+            "up": up_selection,
+        },
+    )
+
+
 def thresholded_metric_summary(
     targets: np.ndarray,
     predictions: np.ndarray,

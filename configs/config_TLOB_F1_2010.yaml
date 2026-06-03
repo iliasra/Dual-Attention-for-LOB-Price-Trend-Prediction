@@ -161,12 +161,14 @@ training:
     enabled: false
   directional_thresholds:
     enabled: false
-    method: joint_up_down # allowed: joint_up_down, precision_floor
+    method: joint_up_down # allowed: joint_up_down, precision_floor, top_x_quantile
     min: 0.05 # lower bound for candidate probability thresholds
     max: 0.95 # upper bound for candidate probability thresholds
     step: 0.05 # coarse grid step; joint_up_down also refines around the best region
     delta: 0.0 # logit-margin gap required to break up/down ties; otherwise neutral
-    up_precision_floor: null # required only for precision_floor; null for joint_up_down
-    down_precision_floor: null # required only for precision_floor; null for joint_up_down
+    up_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
+    down_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
+    up_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
+    down_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
   sampling:
     neutral_to_directional_ratio:

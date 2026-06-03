@@ -47,6 +47,7 @@ from thresholding import (
     apply_thresholds_and_summarize,
     optimize_directional_thresholds,
     optimize_precision_floor_thresholds,
+    optimize_top_quantile_thresholds,
     threshold_candidates,
 )
 from training import (
@@ -458,6 +459,24 @@ def fit_and_apply_directional_thresholds(
             "maximize_per_class_threshold",
         ]
         selection_final_tie_break = "independent_class_threshold_selection"
+    elif threshold_config.method == "top_x_quantile":
+        selection = optimize_top_quantile_thresholds(
+            probabilities_validation,
+            targets_validation,
+            down_quantile=float(threshold_config.down_quantile),
+            up_quantile=float(threshold_config.up_quantile),
+            down_id=down_id,
+            neutral_id=neutral_id,
+            up_id=up_id,
+            delta=threshold_config.delta,
+        )
+        selection_metric = "top_probability_quantile"
+        tie_break_order = [
+            "threshold_down_from_top_down_quantile",
+            "threshold_up_from_top_up_quantile",
+            "decision_tie_break_by_logit_margin_delta",
+        ]
+        selection_final_tie_break = "not_applicable_fixed_quantiles"
     else:
         raise ValueError(f"Unsupported directional threshold method: {threshold_config.method}")
     validation_predictions = apply_directional_threshold_policy(
@@ -540,6 +559,9 @@ def fit_and_apply_directional_thresholds(
         "delta": float(threshold_config.delta),
         "down_precision_floor": threshold_config.down_precision_floor,
         "up_precision_floor": threshold_config.up_precision_floor,
+        "down_quantile": threshold_config.down_quantile,
+        "up_quantile": threshold_config.up_quantile,
+        "top_quantile_convention": "0.01 means the top 1% validation probabilities for that class.",
         "n_candidates": int(selection.n_candidates),
         "optimization_stages": list(selection.stage_summaries),
         "selection_details": selection.selection_details,

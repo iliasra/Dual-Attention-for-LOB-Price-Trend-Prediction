@@ -771,6 +771,8 @@ def test_training_data_loader_settings_are_loaded() -> None:
     assert config.training.directional_thresholds.delta == 0.0
     assert config.training.directional_thresholds.up_precision_floor is None
     assert config.training.directional_thresholds.down_precision_floor is None
+    assert config.training.directional_thresholds.up_quantile is None
+    assert config.training.directional_thresholds.down_quantile is None
     assert config.training.eval_batch_size == 256
     assert config.training.class_weights is None
     assert config.training.pin_memory is pin_memory
@@ -898,6 +900,8 @@ def test_directional_threshold_config_is_optional(artifact_dir: Path) -> None:
     assert loaded.training.directional_thresholds.max_threshold == 0.95
     assert loaded.training.directional_thresholds.step == 0.05
     assert loaded.training.directional_thresholds.delta == 0.0
+    assert loaded.training.directional_thresholds.up_quantile is None
+    assert loaded.training.directional_thresholds.down_quantile is None
 
 
 def test_temperature_scaling_config_is_optional(artifact_dir: Path) -> None:
@@ -1016,6 +1020,41 @@ def test_directional_threshold_config_validates_methods_and_floors(artifact_dir:
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="delta"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_directional_threshold_config_validates_top_quantile_method(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["directional_thresholds"] = {
+        "enabled": True,
+        "method": "top_x_quantile",
+        "min": 0.05,
+        "max": 0.95,
+        "step": 0.05,
+        "delta": 0.0,
+        "up_precision_floor": None,
+        "down_precision_floor": None,
+        "up_quantile": 0.01,
+        "down_quantile": 0.02,
+    }
+
+    config_path = artifact_dir / "top_quantile_thresholds.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.directional_thresholds.method == "top_x_quantile"
+    assert loaded.training.directional_thresholds.up_quantile == pytest.approx(0.01)
+    assert loaded.training.directional_thresholds.down_quantile == pytest.approx(0.02)
+
+    payload["training"]["directional_thresholds"]["up_quantile"] = None
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="up_quantile"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["directional_thresholds"]["up_quantile"] = 0.0
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="up_quantile"):
         ExperimentConfig.from_yaml(config_path)
 
 

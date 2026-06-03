@@ -295,6 +295,8 @@ def save_run_config_snapshot(
                 "delta": config.training.directional_thresholds.delta,
                 "up_precision_floor": config.training.directional_thresholds.up_precision_floor,
                 "down_precision_floor": config.training.directional_thresholds.down_precision_floor,
+                "up_quantile": config.training.directional_thresholds.up_quantile,
+                "down_quantile": config.training.directional_thresholds.down_quantile,
             },
             "model_parameters": model_parameters or {},
             "fast_smoothing_lambdas": fast_smoothing_lambda_summary(config, preprocessing_metadata),
@@ -1074,6 +1076,8 @@ def save_run_log(
                 "delta",
                 "down_precision_floor",
                 "up_precision_floor",
+                "down_quantile",
+                "up_quantile",
                 "n_candidates",
             ):
                 if key in threshold_summary:

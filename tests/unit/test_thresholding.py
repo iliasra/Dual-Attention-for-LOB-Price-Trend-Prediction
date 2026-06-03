@@ -10,6 +10,7 @@ from thresholding import (
     directional_macro_f1_from_predictions,
     optimize_directional_thresholds,
     optimize_precision_floor_thresholds,
+    optimize_top_quantile_thresholds,
     threshold_candidates,
     thresholded_metric_summary,
 )
@@ -249,6 +250,37 @@ def test_optimize_precision_floor_thresholds_disables_class_when_floor_is_unreac
     assert selection.threshold_down is None
     assert selection.up_enabled is True
     assert selection.selection_details["down"]["fallback"] == "disabled_no_candidate_meets_precision_floor"
+
+
+def test_optimize_top_quantile_thresholds_selects_top_probability_mass() -> None:
+    probabilities = np.asarray(
+        [
+            [0.90, 0.00, 0.10],
+            [0.80, 0.00, 0.20],
+            [0.70, 0.00, 0.30],
+            [0.10, 0.00, 0.90],
+            [0.20, 0.00, 0.80],
+            [0.30, 0.00, 0.70],
+        ],
+        dtype=np.float32,
+    )
+    targets = np.asarray([0, 0, 1, 2, 2, 1])
+
+    selection = optimize_top_quantile_thresholds(
+        probabilities,
+        targets,
+        down_quantile=0.5,
+        up_quantile=0.5,
+        down_id=0,
+        neutral_id=1,
+        up_id=2,
+    )
+
+    assert selection.threshold_down == pytest.approx(0.7)
+    assert selection.threshold_up == pytest.approx(0.7)
+    assert selection.selection_details["down"]["requested_count"] == 3
+    assert selection.selection_details["up"]["selected_count"] == 3
+    assert selection.n_candidates == 2
 
 
 def test_threshold_selection_prefers_min_precision_before_high_thresholds() -> None:

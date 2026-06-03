@@ -197,6 +197,8 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "delta": None,
             "up_precision_floor": None,
             "down_precision_floor": None,
+            "up_quantile": None,
+            "down_quantile": None,
         },
         "sampling": {
             "neutral_to_directional_ratio": None,
@@ -235,6 +237,8 @@ OPTIONAL_CONFIG_KEYS = {
     "training.directional_thresholds.delta",
     "training.directional_thresholds.up_precision_floor",
     "training.directional_thresholds.down_precision_floor",
+    "training.directional_thresholds.up_quantile",
+    "training.directional_thresholds.down_quantile",
     "training.sampling",
 }
 
@@ -1359,13 +1363,16 @@ class TrainingDirectionalThresholdConfig:
     delta: float = 0.0
     up_precision_floor: float | None = None
     down_precision_floor: float | None = None
+    up_quantile: float | None = None
+    down_quantile: float | None = None
 
     def __post_init__(self) -> None:
         """Check optional post-training directional threshold settings."""
         self.method = self.method.lower()
-        if self.method not in {"joint_up_down", "precision_floor"}:
+        if self.method not in {"joint_up_down", "precision_floor", "top_x_quantile"}:
             raise ValueError(
-                "training.directional_thresholds.method must be 'joint_up_down' or 'precision_floor'."
+                "training.directional_thresholds.method must be 'joint_up_down', "
+                "'precision_floor', or 'top_x_quantile'."
             )
         if not 0.0 <= self.min_threshold <= 1.0:
             raise ValueError("training.directional_thresholds.min must be in [0, 1].")
@@ -1383,17 +1390,29 @@ class TrainingDirectionalThresholdConfig:
         ):
             if value is not None and not 0.0 <= value <= 1.0:
                 raise ValueError(f"training.directional_thresholds.{name} must be in [0, 1] or null.")
-        if self.method == "joint_up_down":
+        for name, value in (
+            ("up_quantile", self.up_quantile),
+            ("down_quantile", self.down_quantile),
+        ):
+            if value is not None and not 0.0 < value <= 1.0:
+                raise ValueError(f"training.directional_thresholds.{name} must be in (0, 1] or null.")
+        if self.method in {"joint_up_down", "top_x_quantile"}:
             if self.up_precision_floor is not None or self.down_precision_floor is not None:
                 raise ValueError(
                     "training.directional_thresholds up/down precision floors must be null "
-                    "when method is joint_up_down."
+                    "unless method is precision_floor."
                 )
         if self.method == "precision_floor":
             if self.up_precision_floor is None or self.down_precision_floor is None:
                 raise ValueError(
                     "training.directional_thresholds up_precision_floor and down_precision_floor "
                     "must be set when method is precision_floor."
+                )
+        if self.method == "top_x_quantile":
+            if self.up_quantile is None or self.down_quantile is None:
+                raise ValueError(
+                    "training.directional_thresholds up_quantile and down_quantile "
+                    "must be set when method is top_x_quantile."
                 )
 
     @classmethod
@@ -1411,6 +1430,8 @@ class TrainingDirectionalThresholdConfig:
             delta=float(payload.get("delta", defaults.delta)),
             up_precision_floor=_optional_float(payload.get("up_precision_floor")),
             down_precision_floor=_optional_float(payload.get("down_precision_floor")),
+            up_quantile=_optional_float(payload.get("up_quantile")),
+            down_quantile=_optional_float(payload.get("down_quantile")),
         )
 
 
