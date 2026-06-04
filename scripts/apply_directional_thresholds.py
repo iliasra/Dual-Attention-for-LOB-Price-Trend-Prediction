@@ -299,48 +299,48 @@ def threshold_artifact(
     """Build a YAML payload describing the fitted thresholds."""
     threshold_config = config.training.directional_thresholds
     down_id, neutral_id, up_id = directional_class_ids(config)
-    return to_builtin(
-        {
-            "enabled": True,
-            "source": "scripts/apply_directional_thresholds.py",
-            "source_config": str(config.path),
-            "probabilities_dir": str(probabilities_dir),
-            "selection_split": "validation",
-            "selection_file": str(validation_file),
-            "selection_metric": (
-                "directional_macro_f1"
-                if threshold_config.method == "joint_up_down"
-                else (
-                    "per_class_precision_floor_then_recall"
-                    if threshold_config.method == "precision_floor"
-                    else "top_probability_quantile"
-                )
-            ),
-            "method": threshold_config.method,
-            "threshold_down": selection.threshold_down,
-            "threshold_up": selection.threshold_up,
-            "down_enabled": selection.down_enabled,
-            "up_enabled": selection.up_enabled,
-            "score": selection.score,
-            "rate_penalty": selection.rate_penalty,
-            "min_directional_precision": selection.min_directional_precision,
-            "grid_min": threshold_config.min_threshold,
-            "grid_max": threshold_config.max_threshold,
-            "grid_step": threshold_config.step,
-            "refinement_steps": refinement_steps,
-            "delta": threshold_config.delta,
-            "down_precision_floor": threshold_config.down_precision_floor,
-            "up_precision_floor": threshold_config.up_precision_floor,
-            "down_quantile": threshold_config.down_quantile,
-            "up_quantile": threshold_config.up_quantile,
-            "top_quantile_convention": "0.01 means the top 1% validation probabilities for that class.",
-            "n_candidates": selection.n_candidates,
-            "decision_tie_break": "logit_margin_gap_else_neutral",
-            "class_ids": {"down": down_id, "neutral": neutral_id, "up": up_id},
-            "optimization_stages": selection.stage_summaries,
-            "selection_details": selection.selection_details,
-        }
-    )
+    payload = {
+        "enabled": True,
+        "source": "scripts/apply_directional_thresholds.py",
+        "source_config": str(config.path),
+        "probabilities_dir": str(probabilities_dir),
+        "selection_split": "validation",
+        "selection_file": str(validation_file),
+        "selection_metric": (
+            "directional_macro_f1"
+            if threshold_config.method == "joint_up_down"
+            else (
+                "per_class_precision_floor_then_recall"
+                if threshold_config.method == "precision_floor"
+                else "top_probability_quantile"
+            )
+        ),
+        "method": threshold_config.method,
+        "threshold_down": selection.threshold_down,
+        "threshold_up": selection.threshold_up,
+        "down_enabled": selection.down_enabled,
+        "up_enabled": selection.up_enabled,
+        "score": selection.score,
+        "rate_penalty": selection.rate_penalty,
+        "grid_min": threshold_config.min_threshold,
+        "grid_max": threshold_config.max_threshold,
+        "grid_step": threshold_config.step,
+        "refinement_steps": refinement_steps,
+        "delta": threshold_config.delta,
+        "down_precision_floor": threshold_config.down_precision_floor,
+        "up_precision_floor": threshold_config.up_precision_floor,
+        "down_quantile": threshold_config.down_quantile,
+        "up_quantile": threshold_config.up_quantile,
+        "top_quantile_convention": "0.01 means the top 1% validation probabilities for that class.",
+        "n_candidates": selection.n_candidates,
+        "decision_tie_break": "logit_margin_gap_else_neutral",
+        "class_ids": {"down": down_id, "neutral": neutral_id, "up": up_id},
+        "optimization_stages": selection.stage_summaries,
+        "selection_details": selection.selection_details,
+    }
+    if threshold_config.method != "top_x_quantile":
+        payload["min_directional_precision"] = selection.min_directional_precision
+    return to_builtin(payload)
 
 
 def resolve_validation_file(probabilities_dir: Path, pattern: str) -> Path:

@@ -158,14 +158,18 @@ data/gcv_cache/lambda_gcv_tasks.txt
 data/gcv_cache/<cache_key>/<price|volume>/<symbol>_<date>.npz
 ```
 
-Training writes per-run and per-fold logs/checkpoints under:
+Training writes per-run and per-fold logs/checkpoints under the directories
+configured by `data.logs_dir` and `training.model_dir` (default: `logs/` and
+`results/`). The run directory is named from `TRAINING_RUN_STEM` when provided,
+or from `experiment.name` plus the launch timestamp in the PBS scripts.
 
 ```text
-logs/run_<N>/summary.yaml
-logs/run_<N>/<fold_id>/run.log
-logs/run_<N>/<fold_id>/metrics.csv
-logs/run_<N>/<fold_id>/confusion_matrices.yaml
-results/run_<N>/<fold_id>/best_lob_transformer.pth
+logs/<RUN_STEM>/summary_<fold_id>.yaml
+logs/<RUN_STEM>/<fold_id>/run.log
+logs/<RUN_STEM>/<fold_id>/metrics.csv
+logs/<RUN_STEM>/<fold_id>/confusion_matrices.yaml
+logs/<RUN_STEM>/<fold_id>/probabilities/
+results/<RUN_STEM>/<fold_id>/best_lob_transformer.pth
 ```
 
 ## Testing
@@ -214,9 +218,38 @@ Place the raw LOBSTER files under:
 $HOME/Dual-Attention-for-LOB-Price-Trend-Prediction/data/LOBSTER/
 ```
 
-Then edit `configs/pipeline_config.yaml` and `configs/folds.txt` as needed. The
-PBS array range in `preprocess_folds_array.pbs` must match the number of
-non-empty, non-comment lines in `configs/folds.txt`.
+Then edit `configs/pipeline_config.yaml` and `configs/folds.txt` as needed. If
+you use `preprocess_folds_array.pbs`, its `#PBS -J` array range must match the
+number of non-empty, non-comment lines in `configs/folds.txt`, or you must
+override it at submission time with `qsub -J ...`. The same rule applies to
+`run_training_folds_array.pbs` when training folds as an array job.
+
+`configs/folds.txt` is only the list of fold ids to run. Each non-empty,
+non-comment line contains one fold id, and every listed id must exist in the
+`folds:` section of the YAML config. The actual train/validation/test dates are
+defined in the YAML, not in `folds.txt`.
+
+Example:
+
+```text
+fold_001
+fold_002
+# fold_003 is skipped
+fold_004
+```
+
+For example:
+
+```bash
+N_FOLDS=$(awk 'NF && $1 !~ /^#/ { c++ } END { print c + 0 }' configs/folds.txt)
+qsub -J 1-$N_FOLDS preprocess_folds_array.pbs
+```
+
+If there is only one fold and your PBS rejects `1-1`, use:
+
+```bash
+qsub -J 1 preprocess_folds_array.pbs
+```
 
 ### 1. Generate GCV Cache Tasks
 
@@ -261,6 +294,13 @@ Once the GCV cache is complete, submit the fold preprocessing array:
 qsub preprocess_folds_array.pbs
 ```
 
+If the `#PBS -J` directive in the script does not match your fold count, submit
+with an explicit array range instead:
+
+```bash
+qsub -J 1-<N_FOLDS> preprocess_folds_array.pbs
+```
+
 `preprocess_folds_array.pbs` reads fold ids from `configs/folds.txt`, runs:
 
 ```bash
@@ -291,16 +331,52 @@ sequentially.
 
 After preprocessing has produced all configured fold sequence directories:
 
+To train folds independently as PBS array jobs, use `run_training_folds_array.pbs`.
+Each array task reads one fold id from `configs/folds.txt`. As with
+preprocessing, the array range must match the number of non-empty, non-comment
+lines in the folds file, or be overridden at submission time.
+
+```bash
+N_FOLDS=$(awk 'NF && $1 !~ /^#/ { c++ } END { print c + 0 }' configs/folds.txt)
+RUN_STEM=my_experiment_$(date +%Y%m%d_%H%M%S)
+qsub -J 1-$N_FOLDS \
+  -v TRAINING_RUN_STEM="$RUN_STEM" \
+  run_training_folds_array.pbs
+```
+
+For a non-default config or folds file, pass them explicitly:
+
+```bash
+qsub -J 1-<N_FOLDS> \
+  -v TRAINING_CONFIG=configs/my_config.yaml,FOLDS_FILE=configs/my_folds.txt,TRAINING_RUN_STEM="$RUN_STEM" \
+  run_training_folds_array.pbs
+```
+
+For a sequential training run that processes the fold ids one after another in a
+single PBS job, use:
+
 ```bash
 qsub run_training.pbs
 ```
 
-`run_training.pbs` trains over the configured folds and copies generated logs
-and model weights back into `$PROJECT_DIR/logs/` and `$PROJECT_DIR/results/`.
-It also saves the PBS stdout/stderr stream under:
+`run_training.pbs` trains over the selected folds sequentially and copies
+generated logs and model weights back into `$PROJECT_DIR/logs/` and
+`$PROJECT_DIR/results/`. It also saves the PBS stdout/stderr stream under:
 
 ```text
-logs/pbs/<PBS_JOBID>/run_logs.txt
+logs/<RUN_STEM>/pbs/run_logs.txt
+```
+
+and mirrors that stream under:
+
+```text
+$HOME/run_outputs/<RUN_STEM>/run_logs.txt
+```
+
+For `run_training_folds_array.pbs`, each fold task writes its live PBS stream to:
+
+```text
+logs/<RUN_STEM>/<fold_id>/run_logs.txt
 ```
 
 ## Status

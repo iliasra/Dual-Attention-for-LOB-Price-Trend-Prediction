@@ -24,8 +24,20 @@ DEFAULT_OUTPUT_PATH = REPO_ROOT / "data" / "gcv_cache" / "lambda_gcv_tasks.txt"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="List daily GCV cache tasks.")
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--folds-file", type=Path, default=None)
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args()
+
+
+def read_fold_ids(path: Path) -> set[str]:
+    """Read non-comment fold ids from a folds file."""
+    fold_ids: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fold_ids.add(line.split()[0])
+    return fold_ids
 
 
 def write_tasks(path: Path, lines: list[str]) -> None:
@@ -43,7 +55,20 @@ def main() -> None:
         print(0)
         return
 
-    train_dates = sorted({date for fold in config.folds for date in fold.train_dates})
+    selected_fold_ids = read_fold_ids(args.folds_file) if args.folds_file else None
+    selected_folds = [
+        fold
+        for fold in config.folds
+        if selected_fold_ids is None or fold.id in selected_fold_ids
+    ]
+    if selected_fold_ids is not None:
+        found_fold_ids = {fold.id for fold in selected_folds}
+        missing_fold_ids = sorted(selected_fold_ids - found_fold_ids)
+        if missing_fold_ids:
+            missing = ", ".join(missing_fold_ids)
+            raise ValueError(f"Fold id(s) from --folds-file not found in config: {missing}")
+
+    train_dates = sorted({date for fold in selected_folds for date in fold.train_dates})
 
     pipeline = LobProcessingPipeline(config)
     pairs = pipeline.discover_pairs()

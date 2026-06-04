@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: TLOB_feature_embed_32
+  name: experiment_name
 
 data:
   raw_data_dir: ../data/F1_2010
@@ -143,8 +143,8 @@ training:
   early_stopping_patience: 8
   early_stopping_warmup: 0
   early_stopping_min_delta: 0.0
-  monitor: val_loss
-  monitor_mode: min
+  monitor: val_macro_f1
+  monitor_mode: max
   persistent_workers: true
   optimizer: adam
   learning_rate: 1.0e-4

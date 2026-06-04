@@ -10,8 +10,15 @@ SCRIPT_START_EPOCH="$(date +%s)"
 
 PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
 WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
-FOLDS_FILE="$PROJECT_DIR/configs/folds.txt"
+TRAINING_CONFIG="${TRAINING_CONFIG:-configs/pipeline_config.yaml}"
+FOLDS_FILE="${FOLDS_FILE:-configs/folds.txt}"
+PROJECT_FOLDS_FILE="$PROJECT_DIR/$FOLDS_FILE"
+WORK_CONFIG_PATH="$WORK_DIR/$TRAINING_CONFIG"
 LAMBDA_CACHE_DIR="${LAMBDA_CACHE_DIR:-$PROJECT_DIR/data/gcv_cache}"
+
+if [[ "$LAMBDA_CACHE_DIR" != /* ]]; then
+  LAMBDA_CACHE_DIR="$PROJECT_DIR/$LAMBDA_CACHE_DIR"
+fi
 
 ARRAY_JOB_ID="${PBS_JOBID%%[*}"
 #PREPROCESS_RUN_ID="${PREPROCESS_RUN_ID:-preprocess_${ARRAY_JOB_ID}}"
@@ -45,12 +52,17 @@ finish() {
 
 trap finish EXIT
 
-if [ ! -f "$FOLDS_FILE" ]; then
-  echo "Fold list not found: $FOLDS_FILE" >&2
+if [ ! -f "$PROJECT_FOLDS_FILE" ]; then
+  echo "Fold list not found: $PROJECT_FOLDS_FILE" >&2
   exit 1
 fi
 
-FOLD_COUNT="$(awk 'NF && $1 !~ /^#/ { count++ } END { print count + 0 }' "$FOLDS_FILE")"
+if [ ! -f "$PROJECT_DIR/$TRAINING_CONFIG" ]; then
+  echo "Training config not found: $PROJECT_DIR/$TRAINING_CONFIG" >&2
+  exit 1
+fi
+
+FOLD_COUNT="$(awk 'NF && $1 !~ /^#/ { count++ } END { print count + 0 }' "$PROJECT_FOLDS_FILE")"
 FOLD_ID="$(
   awk -v fold_index="$PBS_ARRAY_INDEX" '
     NF && $1 !~ /^#/ {
@@ -60,11 +72,11 @@ FOLD_ID="$(
         exit
       }
     }
-  ' "$FOLDS_FILE"
+  ' "$PROJECT_FOLDS_FILE"
 )"
 
 if [ -z "$FOLD_ID" ]; then
-  echo "No fold id found for PBS_ARRAY_INDEX=$PBS_ARRAY_INDEX in $FOLDS_FILE ($FOLD_COUNT fold(s))." >&2
+  echo "No fold id found for PBS_ARRAY_INDEX=$PBS_ARRAY_INDEX in $PROJECT_FOLDS_FILE ($FOLD_COUNT fold(s))." >&2
   exit 1
 fi
 
@@ -73,6 +85,9 @@ echo "PBS_JOBID=$PBS_JOBID"
 echo "ARRAY_JOB_ID=$ARRAY_JOB_ID"
 echo "PBS_ARRAY_INDEX=$PBS_ARRAY_INDEX"
 echo "FOLDS_FILE=$FOLDS_FILE"
+echo "PROJECT_FOLDS_FILE=$PROJECT_FOLDS_FILE"
+echo "TRAINING_CONFIG=$TRAINING_CONFIG"
+echo "LAMBDA_CACHE_DIR=$LAMBDA_CACHE_DIR"
 echo "FOLD_COUNT=$FOLD_COUNT"
 echo "FOLD_ID=$FOLD_ID"
 echo "TMPDIR=$TMPDIR"
@@ -98,6 +113,7 @@ cd "$WORK_DIR"
 echo "===== RUNNING PREPROCESSING FOR $FOLD_ID ====="
 PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" \
 python scripts/process_data.py \
+  --config "$WORK_CONFIG_PATH" \
   --fold-id "$FOLD_ID" \
   --lambda-cache-dir "$LAMBDA_CACHE_DIR" \
   --require-lambda-cache

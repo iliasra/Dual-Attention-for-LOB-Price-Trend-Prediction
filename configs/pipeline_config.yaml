@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: top_5_micro_kin
+  name: experiment_name
 
 data:
   raw_data_dir: ../data/LOBSTER

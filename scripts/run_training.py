@@ -551,7 +551,6 @@ def fit_and_apply_directional_thresholds(
         "up_enabled": bool(selection.up_enabled),
         "score": float(selection.score),
         "rate_penalty": float(selection.rate_penalty),
-        "min_directional_precision": float(selection.min_directional_precision),
         "grid_min": float(threshold_config.min_threshold),
         "grid_max": float(threshold_config.max_threshold),
         "grid_step": float(threshold_config.step),
@@ -575,6 +574,8 @@ def fit_and_apply_directional_thresholds(
         "validation_threshold_metrics": validation_summary,
         "test_threshold_metrics": test_summary,
     }
+    if threshold_config.method != "top_x_quantile":
+        payload["min_directional_precision"] = float(selection.min_directional_precision)
     save_directional_threshold_artifact(payload, target_path)
     return payload, validation_metrics, test_metrics, validation_outputs_thresholded, test_outputs_thresholded
 
