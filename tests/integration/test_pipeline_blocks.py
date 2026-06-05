@@ -393,7 +393,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert volume_metadata["n_values"] > 0
 
 
-def test_processing_pipeline_uses_train_fitted_smoothing_threshold(artifact_dir: Path) -> None:
+def test_processing_pipeline_uses_split_fitted_mean_pct_smoothing_threshold(artifact_dir: Path) -> None:
     raw_dir = artifact_dir / "raw"
     write_lobster_day(raw_dir, "TEST", "2020-01-01", rows=18)
     write_lobster_day(raw_dir, "TEST", "2020-01-02", rows=18)
@@ -433,7 +433,7 @@ def test_processing_pipeline_uses_train_fitted_smoothing_threshold(artifact_dir:
     payload["preprocessing"]["kinematic_tokenization"]["method"] = "basis"
     payload["preprocessing"]["microprice"]["enabled"] = False
 
-    config_path = artifact_dir / "train_fitted_threshold_pipeline.yaml"
+    config_path = artifact_dir / "split_fitted_threshold_pipeline.yaml"
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     LobProcessingPipeline(ExperimentConfig.from_yaml(config_path)).run()
@@ -443,10 +443,14 @@ def test_processing_pipeline_uses_train_fitted_smoothing_threshold(artifact_dir:
 
     threshold = metadata["smoothing_threshold"]
     assert threshold["mode"] == "mean_pct"
-    assert threshold["fit_split"] == "train"
-    assert threshold["value"] > 0.0
-    assert threshold["n_values"] > 0
-    assert metadata["label_distribution"]["method"] == "smoothing_mean_pct_train_fitted"
+    assert threshold["fit_scope"] == "split"
+    assert set(threshold["splits"]) == {"train", "validation", "test"}
+    for split, split_threshold in threshold["splits"].items():
+        assert split_threshold["mode"] == "mean_pct"
+        assert split_threshold["fit_split"] == split
+        assert split_threshold["value"] > 0.0
+        assert split_threshold["n_values"] > 0
+    assert metadata["label_distribution"]["method"] == "smoothing_mean_pct_split_fitted"
     for split in ("train", "validation", "test"):
         assert metadata["label_distribution"][split]["total"] > 0
 

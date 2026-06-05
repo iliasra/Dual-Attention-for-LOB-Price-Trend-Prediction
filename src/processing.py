@@ -18,7 +18,9 @@ try:
         TargetLabelPipeline,
         calculate_adaptive_method_c_threshold_components,
         calculate_midprice,
+        fit_smoothing_threshold,
         fit_train_smoothing_threshold,
+        is_split_fitted_smoothing_threshold,
         is_train_fitted_smoothing_threshold,
     )
     from gcv_lambda_cache import (
@@ -52,7 +54,9 @@ except ImportError:  # pragma: no cover
         TargetLabelPipeline,
         calculate_adaptive_method_c_threshold_components,
         calculate_midprice,
+        fit_smoothing_threshold,
         fit_train_smoothing_threshold,
+        is_split_fitted_smoothing_threshold,
         is_train_fitted_smoothing_threshold,
     )
     from .gcv_lambda_cache import (
@@ -204,6 +208,7 @@ class LobProcessingPipeline:
         self.volume_static_exp_results: dict[str, float] = {}
         self.volume_bar_scaling_results: dict[str, dict[str, float | int]] = {}
         self.smoothing_threshold_result: dict[str, object] | None = None
+        self.smoothing_threshold_results: dict[str, dict[str, object]] = {}
 
     def _build_downstream_data_config(self):
         """Return the data config used after optional sample-clock conversion."""
@@ -530,10 +535,30 @@ class LobProcessingPipeline:
             and is_train_fitted_smoothing_threshold(label_config.smoothing.threshold)
         )
 
-    def _resolved_smoothing_threshold(self) -> float | None:
-        """Return the fitted smoothing threshold required for current fold labels."""
-        if not self.uses_train_fitted_smoothing_threshold():
+    def uses_split_fitted_smoothing_threshold(self) -> bool:
+        """Return whether smoothing labels need a scalar split-fitted threshold."""
+        label_config = self.config.preprocessing.labels
+        return (
+            label_config.strategy.lower() == "smoothing"
+            and is_split_fitted_smoothing_threshold(label_config.smoothing.threshold)
+        )
+
+    def uses_fitted_smoothing_threshold(self) -> bool:
+        """Return whether smoothing labels need any fitted scalar threshold."""
+        return self.uses_train_fitted_smoothing_threshold() or self.uses_split_fitted_smoothing_threshold()
+
+    def _resolved_smoothing_threshold(self, split: str) -> float | None:
+        """Return the fitted smoothing threshold required for current split labels."""
+        if not self.uses_fitted_smoothing_threshold():
             return None
+        if self.uses_split_fitted_smoothing_threshold():
+            result = self.smoothing_threshold_results.get(split)
+            if result is None:
+                raise ValueError(
+                    f"Smoothing threshold must be fitted on {split} before labeling that split."
+                )
+            return float(result["value"])
+
         if self.smoothing_threshold_result is None:
             raise ValueError(
                 "Smoothing threshold must be fitted on train before labeling validation/test. "
@@ -553,12 +578,50 @@ class LobProcessingPipeline:
             sampled_frames,
             self.config.preprocessing.labels.smoothing,
         )
+        self.smoothing_threshold_results["train"] = self.smoothing_threshold_result
         print(
             "Fitted smoothing label threshold on train: "
             f"mode={self.smoothing_threshold_result['mode']}, "
             f"value={float(self.smoothing_threshold_result['value']):.10g}, "
             f"n_values={int(self.smoothing_threshold_result['n_values'])}."
         )
+        return self.smoothing_threshold_result
+
+    def _fit_split_smoothing_threshold(
+        self,
+        split_days: list[ProcessedDay],
+        split: str,
+    ) -> dict[str, object] | None:
+        """Fit optional split-derived smoothing threshold from sampled frames."""
+        if not self.uses_split_fitted_smoothing_threshold():
+            return None
+        sampled_frames = [
+            self._require_frame(day, "joined", f"{split} smoothing threshold fitting")
+            for day in split_days
+        ]
+        result = fit_smoothing_threshold(
+            sampled_frames,
+            self.config.preprocessing.labels.smoothing,
+            fit_split=split,
+        )
+        self.smoothing_threshold_results[split] = result
+        print(
+            f"Fitted smoothing label threshold on {split}: "
+            f"mode={result['mode']}, "
+            f"value={float(result['value']):.10g}, "
+            f"n_values={int(result['n_values'])}."
+        )
+        return result
+
+    def _smoothing_threshold_metadata(self) -> dict[str, object] | None:
+        """Return fitted smoothing-threshold metadata for artifacts."""
+        if self.uses_split_fitted_smoothing_threshold():
+            return {
+                "enabled": True,
+                "mode": str(self.config.preprocessing.labels.smoothing.threshold).lower(),
+                "fit_scope": "split",
+                "splits": dict(self.smoothing_threshold_results),
+            }
         return self.smoothing_threshold_result
 
     def prepare_unlabeled_pair(self, pair: LobFilePair, split: str) -> ProcessedDay:
@@ -581,7 +644,7 @@ class LobProcessingPipeline:
         print(f"Starting label generation for {day.pair.label}.")
         labeled = self.labeler.transform(
             sampled,
-            smoothing_threshold_override=self._resolved_smoothing_threshold(),
+            smoothing_threshold_override=self._resolved_smoothing_threshold(day.split),
         )
         print(f"Starting message feature processing for {day.pair.label}.")
         day.labeled = labeled
@@ -615,10 +678,13 @@ class LobProcessingPipeline:
     def preprocess_splits(self, split_pairs: dict[str, list[LobFilePair]]) -> dict[str, list[ProcessedDay]]:
         """Legacy in-memory split preparation; run_fold now streams days."""
         processed = {name: [] for name in SPLIT_NAMES}
-        if self.uses_train_fitted_smoothing_threshold():
+        if self.uses_fitted_smoothing_threshold():
             for pair in split_pairs.get("train", []):
                 processed["train"].append(self.prepare_unlabeled_pair(pair, "train"))
-            self._fit_train_smoothing_threshold(processed["train"])
+            if self.uses_split_fitted_smoothing_threshold():
+                self._fit_split_smoothing_threshold(processed["train"], "train")
+            else:
+                self._fit_train_smoothing_threshold(processed["train"])
             for day in processed["train"]:
                 self._label_and_build_message_features(day)
             split_iterable = [split for split in SPLIT_NAMES if split != "train"]
@@ -628,8 +694,16 @@ class LobProcessingPipeline:
             if split not in split_iterable:
                 continue
             print(f"Starting preprocessing split '{split}' with {len(pairs)} day(s).")
-            for pair in pairs:
-                processed[split].append(self.prepare_pair(pair, split))
+            if self.uses_split_fitted_smoothing_threshold():
+                for pair in pairs:
+                    processed[split].append(self.prepare_unlabeled_pair(pair, split))
+                if processed[split]:
+                    self._fit_split_smoothing_threshold(processed[split], split)
+                for day in processed[split]:
+                    self._label_and_build_message_features(day)
+            else:
+                for pair in pairs:
+                    processed[split].append(self.prepare_pair(pair, split))
             print(f"Finished preprocessing split '{split}'.")
         return processed
 
@@ -869,6 +943,7 @@ class LobProcessingPipeline:
         self.config.preprocessing.volume_kinematic.fast.selected_smoothing_lambda = None
         self.fast_smoothing_lambda_results = {}
         self.smoothing_threshold_result = None
+        self.smoothing_threshold_results = {}
         self.volume_bar_scaling_results = {}
         self.volume_bar_processor = VolumeBarFeatureProcessor(
             message_config=self.config.preprocessing.message,
@@ -997,12 +1072,15 @@ class LobProcessingPipeline:
 
     def _tracks_label_distribution(self) -> bool:
         """Return whether preprocessing metadata should include label counts."""
-        return self.uses_adaptive_method_c_labels() or self.uses_train_fitted_smoothing_threshold()
+        return self.uses_adaptive_method_c_labels() or self.uses_fitted_smoothing_threshold()
 
     def _label_distribution_method(self) -> str:
         """Return the label-distribution method name for metadata."""
         if self.uses_adaptive_method_c_labels():
             return "smoothing_C_adaptive"
+        if self.uses_split_fitted_smoothing_threshold():
+            mode = str(self.config.preprocessing.labels.smoothing.threshold).lower()
+            return f"smoothing_{mode}_split_fitted"
         if self.uses_train_fitted_smoothing_threshold():
             mode = str(self.config.preprocessing.labels.smoothing.threshold).lower()
             return f"smoothing_{mode}_train_fitted"
@@ -1482,10 +1560,13 @@ class LobProcessingPipeline:
 
         train_days: list[ProcessedDay] = []
         train_pairs = split_pairs.get("train", [])
-        if self.uses_train_fitted_smoothing_threshold():
+        if self.uses_fitted_smoothing_threshold():
             for pair in train_pairs:
                 train_days.append(self.prepare_unlabeled_pair(pair, "train"))
-            self._fit_train_smoothing_threshold(train_days)
+            if self.uses_split_fitted_smoothing_threshold():
+                self._fit_split_smoothing_threshold(train_days, "train")
+            else:
+                self._fit_train_smoothing_threshold(train_days)
             for day in train_days:
                 self._label_and_build_message_features(day)
         else:
@@ -1522,25 +1603,41 @@ class LobProcessingPipeline:
             gc.collect()
 
         summary: dict[str, dict[str, tuple[int, int]]] = {split: {} for split in SPLIT_NAMES}
+
+        def process_streamed_day(day: ProcessedDay, split: str) -> None:
+            try:
+                sample_clock_counts[split][day.pair.output_stem] = self._sample_clock_counts_for_day(day)
+                if label_accumulator is not None:
+                    self._accumulate_label_distribution(label_accumulator, split, day)
+                summary[split][day.pair.output_stem] = self._build_and_save_one_day(
+                    day,
+                    split=split,
+                    normalizer=normalizer,
+                    ordered_feature_columns=ordered_feature_columns,
+                    processed_dir=fold_processed_dir,
+                    sequence_dir=fold_sequence_dir,
+                )
+            finally:
+                day.release_all_frames()
+                gc.collect()
+
         for split in SPLIT_NAMES:
-            print(f"Starting streaming preprocessing split '{split}' with {len(split_pairs.get(split, []))} day(s).")
-            for pair in split_pairs.get(split, []):
-                day = self.prepare_pair(pair, split)
-                try:
-                    sample_clock_counts[split][day.pair.output_stem] = self._sample_clock_counts_for_day(day)
-                    if label_accumulator is not None:
-                        self._accumulate_label_distribution(label_accumulator, split, day)
-                    summary[split][day.pair.output_stem] = self._build_and_save_one_day(
-                        day,
-                        split=split,
-                        normalizer=normalizer,
-                        ordered_feature_columns=ordered_feature_columns,
-                        processed_dir=fold_processed_dir,
-                        sequence_dir=fold_sequence_dir,
-                    )
-                finally:
-                    day.release_all_frames()
-                    gc.collect()
+            pairs = split_pairs.get(split, [])
+            print(f"Starting streaming preprocessing split '{split}' with {len(pairs)} day(s).")
+            if (
+                self.uses_split_fitted_smoothing_threshold()
+                and split not in self.smoothing_threshold_results
+                and pairs
+            ):
+                split_days = [self.prepare_unlabeled_pair(pair, split) for pair in pairs]
+                self._fit_split_smoothing_threshold(split_days, split)
+                for day in split_days:
+                    self._label_and_build_message_features(day)
+                    process_streamed_day(day, split)
+            else:
+                for pair in pairs:
+                    day = self.prepare_pair(pair, split)
+                    process_streamed_day(day, split)
             print(f"Finished streaming preprocessing split '{split}'.")
 
         label_distribution = self._finalize_label_distribution(label_accumulator, floor_comparison)
@@ -1554,7 +1651,7 @@ class LobProcessingPipeline:
             price_static_plgs=plgs_parameters,
             volume_static_exp=volume_static_exp,
             volume_bar_scaling=volume_bar_scaling,
-            smoothing_threshold=self.smoothing_threshold_result,
+            smoothing_threshold=self._smoothing_threshold_metadata(),
             sample_clock=self._sample_clock_metadata(),
             sample_clock_counts=sample_clock_counts,
             timing={

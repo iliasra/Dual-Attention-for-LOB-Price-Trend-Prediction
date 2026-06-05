@@ -15,6 +15,7 @@ from horizon import (
     calculate_adaptive_method_c_threshold_components,
     calculate_midprice,
     calculate_spread,
+    fit_smoothing_threshold,
     fit_train_smoothing_threshold,
 )
 
@@ -102,6 +103,23 @@ def test_fit_train_smoothing_threshold_mean_pct() -> None:
     assert result["mode"] == "mean_pct"
     assert result["value"] == pytest.approx(expected)
     assert result["fit_split"] == "train"
+
+
+def test_fit_smoothing_threshold_mean_pct_can_use_validation_split() -> None:
+    frame = pd.DataFrame(
+        {
+            "bid_price_1": [99.0, 198.0],
+            "ask_price_1": [101.0, 202.0],
+        }
+    )
+    config = make_smoothing_config(method="C", threshold="mean_pct").smoothing
+
+    result = fit_smoothing_threshold([frame], config, fit_split="validation")
+
+    expected = np.mean([2.0 / 100.0, 4.0 / 200.0])
+    assert result["mode"] == "mean_pct"
+    assert result["value"] == pytest.approx(expected)
+    assert result["fit_split"] == "validation"
 
 
 def test_fit_train_smoothing_threshold_mean_spread() -> None:

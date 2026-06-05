@@ -385,7 +385,9 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
-TRAIN_FITTED_SMOOTHING_THRESHOLDS = {"mean_spread", "mean_pct"}
+TRAIN_FITTED_SMOOTHING_THRESHOLDS = {"mean_spread"}
+SPLIT_FITTED_SMOOTHING_THRESHOLDS = {"mean_pct"}
+FITTED_SMOOTHING_THRESHOLDS = TRAIN_FITTED_SMOOTHING_THRESHOLDS | SPLIT_FITTED_SMOOTHING_THRESHOLDS
 
 
 def _optional_smoothing_threshold(value: Any) -> float | str | None:
@@ -396,12 +398,12 @@ def _optional_smoothing_threshold(value: Any) -> float | str | None:
         lowered = value.strip().lower()
         if lowered in {"", "none", "null"}:
             return None
-        if lowered in TRAIN_FITTED_SMOOTHING_THRESHOLDS:
+        if lowered in FITTED_SMOOTHING_THRESHOLDS:
             return lowered
         try:
             return float(value)
         except ValueError as exc:
-            allowed = sorted(TRAIN_FITTED_SMOOTHING_THRESHOLDS)
+            allowed = sorted(FITTED_SMOOTHING_THRESHOLDS)
             raise ValueError(
                 "preprocessing.labels.smoothing.threshold must be numeric, null, "
                 f"or one of {allowed}."
@@ -860,15 +862,15 @@ class SmoothingLabelConfig:
             raise ValueError("preprocessing.labels.smoothing method C requires k < h.")
         if isinstance(self.threshold, str):
             self.threshold = self.threshold.lower()
-            if self.threshold not in TRAIN_FITTED_SMOOTHING_THRESHOLDS:
-                allowed = sorted(TRAIN_FITTED_SMOOTHING_THRESHOLDS)
+            if self.threshold not in FITTED_SMOOTHING_THRESHOLDS:
+                allowed = sorted(FITTED_SMOOTHING_THRESHOLDS)
                 raise ValueError(
                     "preprocessing.labels.smoothing.threshold must be numeric, null, "
                     f"or one of {allowed}."
                 )
             if self.adaptive_threshold is not None and self.adaptive_threshold.enabled:
                 raise ValueError(
-                    "preprocessing.labels.smoothing.threshold train-fitted modes cannot be combined "
+                    "preprocessing.labels.smoothing.threshold fitted modes cannot be combined "
                     "with adaptive_threshold.enabled=true."
                 )
 

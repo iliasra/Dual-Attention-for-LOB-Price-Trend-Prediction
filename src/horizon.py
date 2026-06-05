@@ -12,7 +12,9 @@ except ImportError:  # pragma: no cover
     from .configuration import AdaptiveThresholdConfig, LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
 
 
-TRAIN_FITTED_SMOOTHING_THRESHOLDS = {"mean_spread", "mean_pct"}
+TRAIN_FITTED_SMOOTHING_THRESHOLDS = {"mean_spread"}
+SPLIT_FITTED_SMOOTHING_THRESHOLDS = {"mean_pct"}
+FITTED_SMOOTHING_THRESHOLDS = TRAIN_FITTED_SMOOTHING_THRESHOLDS | SPLIT_FITTED_SMOOTHING_THRESHOLDS
 
 
 def calculate_midprice(
@@ -185,6 +187,16 @@ def is_train_fitted_smoothing_threshold(value: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in TRAIN_FITTED_SMOOTHING_THRESHOLDS
 
 
+def is_split_fitted_smoothing_threshold(value: object) -> bool:
+    """Return whether a smoothing threshold must be fitted per split."""
+    return isinstance(value, str) and value.strip().lower() in SPLIT_FITTED_SMOOTHING_THRESHOLDS
+
+
+def is_fitted_smoothing_threshold(value: object) -> bool:
+    """Return whether a smoothing threshold needs a fitted override."""
+    return isinstance(value, str) and value.strip().lower() in FITTED_SMOOTHING_THRESHOLDS
+
+
 def _finite_spread_midprice_arrays(
     df: pd.DataFrame,
     *,
@@ -198,12 +210,14 @@ def _finite_spread_midprice_arrays(
     return spread[valid_mask], midprice[valid_mask]
 
 
-def fit_train_smoothing_threshold(
+def fit_smoothing_threshold(
     dataframes: list[pd.DataFrame],
     config: SmoothingLabelConfig,
+    *,
+    fit_split: str = "train",
 ) -> dict[str, object]:
-    """Fit a scalar smoothing threshold from train orderbook frames."""
-    if not is_train_fitted_smoothing_threshold(config.threshold):
+    """Fit a scalar smoothing threshold from split orderbook frames."""
+    if not is_fitted_smoothing_threshold(config.threshold):
         raise ValueError("Smoothing threshold fitting requires threshold='mean_spread' or 'mean_pct'.")
 
     mode = str(config.threshold).lower()
@@ -245,7 +259,7 @@ def fit_train_smoothing_threshold(
     return {
         "enabled": True,
         "mode": mode,
-        "fit_split": "train",
+        "fit_split": fit_split,
         "value": float(threshold),
         "formula": formula,
         "n_values": int(n_values),
@@ -255,6 +269,14 @@ def fit_train_smoothing_threshold(
         "mean_midprice": float(mean_midprice),
         "mean_pct": float(pct_sum / n_values),
     }
+
+
+def fit_train_smoothing_threshold(
+    dataframes: list[pd.DataFrame],
+    config: SmoothingLabelConfig,
+) -> dict[str, object]:
+    """Fit a scalar smoothing threshold from train orderbook frames."""
+    return fit_smoothing_threshold(dataframes, config, fit_split="train")
 
 
 @dataclass(slots=True)
@@ -371,10 +393,10 @@ class TargetLabelPipeline:
                 "Set a numeric threshold, use mean_spread/mean_pct through the preprocessing pipeline, "
                 "or enable adaptive_threshold."
             )
-        elif is_train_fitted_smoothing_threshold(threshold):
+        elif is_fitted_smoothing_threshold(threshold):
             raise ValueError(
-                "preprocessing.labels.smoothing.threshold is train-fitted; "
-                "fit it on train and pass smoothing_threshold_override before labeling."
+                "preprocessing.labels.smoothing.threshold is fitted; "
+                "fit it and pass smoothing_threshold_override before labeling."
             )
 
         valid_mask = pct_changes.notna() & np.isfinite(pct_changes)

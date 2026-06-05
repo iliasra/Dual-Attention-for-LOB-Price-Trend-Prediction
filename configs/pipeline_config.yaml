@@ -1,10 +1,10 @@
 seed: 42
 
 experiment:
-  name: experiment_name
+  name: INTC_TLOB_TOP_5
 
 data:
-  raw_data_dir: ../data/LOBSTER
+  raw_data_dir: ../data/LOBSTER_TLOB
   processed_data_dir: ../data/processed_dataframes
   sequence_data_dir: ../data/sequences
   logs_dir: ../logs
@@ -42,10 +42,10 @@ folds:
 #    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08"]
 #    validation_dates: ["2024-03-11", "2024-03-12"]
 #    test_dates: []
-  - id: fold_004
-    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11"]
-    validation_dates: ["2024-03-12", "2024-03-13"]
-    test_dates: ["2024-03-14", "2024-03-15"]
+  - id: fold_INTC_TLOB
+    train_dates: ["2015-01-02", "2015-01-05", "2015-01-06", "2015-01-07", "2015-01-08", "2015-01-09", "2015-01-12", "2015-01-13", "2015-01-14", "2015-01-15", "2015-01-16", "2015-01-20", "2015-01-21", "2015-01-22", "2015-01-23", "2015-01-26", "2015-01-27"]
+    validation_dates: ["2015-01-28"]
+    test_dates: ["2015-01-29", "2015-01-30"]
 
 preprocessing:
   snapshot_window: 100
@@ -54,13 +54,13 @@ preprocessing:
     strategy: smoothing # allowed: smoothing, triple_barrier
     smoothing:
       method: C # allowed: A, B, C
-      threshold: null # numeric/null, or train-fitted mean_spread/mean_pct; ignored if adaptive_threshold.enabled = true
-      k: 10
+      threshold: mean_pct # numeric/null, train-fitted mean_spread, or split-fitted mean_pct; ignored if adaptive_threshold.enabled = true
+      k: 9 # 9 to have a window of length 10 to replicate TLOB experiment
       h: 100
       bid_column: bid_price_1
       ask_column: ask_price_1
       adaptive_threshold:
-        enabled: true
+        enabled: false
         exit_spread_window: 100
         volatility_window: 256
         round_trip_fees_bps: 1.5 # estimated for INTC in 03/24
@@ -99,8 +99,8 @@ preprocessing:
     n_df_candidates: 25 # shared number of effective-df candidates explored by train GCV
     orderbook_top_k_levels: 5 # null = all levels; filters price/volume kinematic streams only
   sample_clock:
-    mode: event # allowed: event, volume; event preserves one row per LOBSTER message
-    volume_step_shares: null # required positive value when mode=volume
+    mode: volume # allowed: event, volume; event preserves one row per LOBSTER message
+    volume_step_shares: 500 # required positive value when mode=volume
     volume_source: traded # allowed: traded, message_size
     trade_type_values: [4, 5] # LOBSTER visible/hidden executions for traded-shares volume clock
   microprice:
