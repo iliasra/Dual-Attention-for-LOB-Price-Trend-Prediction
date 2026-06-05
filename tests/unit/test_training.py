@@ -479,6 +479,39 @@ def test_lob_trainer_evaluate_collects_moe_expert_usage() -> None:
     assert usage["by_true_class"]["2"]["selected_counts"] == [1, 1, 2]
 
 
+def test_lob_trainer_evaluate_without_moe_routing_has_no_expert_usage() -> None:
+    class DenseOnlyModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = nn.Parameter(torch.zeros(()))
+            self.moe_routing = None
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            del x, t
+            return torch.tensor([[4.0, 0.0, 0.0]], device=self.dummy.device)
+
+    config = load_config().training
+    config.device = "cpu"
+    config.class_weights = None
+    trainer = LobTrainer(config)
+    data_loader = [
+        (
+            torch.zeros((1, 2, 1)),
+            torch.zeros((1, 2)),
+            torch.tensor([0]),
+        )
+    ]
+
+    result = trainer.evaluate(
+        DenseOnlyModel(),
+        data_loader,
+        description="No MoE expert usage test",
+        track_expert_usage=True,
+    )
+
+    assert result.expert_usage is None
+
+
 def test_lob_trainer_evaluate_can_collect_probability_outputs() -> None:
     class SimpleModel(nn.Module):
         def __init__(self) -> None:

@@ -277,7 +277,7 @@ class RawFeatureDualAttentionBlock(nn.Module):
         self.norm1 = nn.LayerNorm(config.d_model)
         self.temporal_attention = ContinuousTimeAttention(config)  #same nb of heads for spatial/timewise
         self.norm2 = nn.LayerNorm(config.d_model)
-        self.use_moe_tail = config.num_layers == 1
+        self.use_moe_tail = config.use_moe and config.num_layers == 1
         self.moe = MoE(config) if self.use_moe_tail else None
         self.dense_fnn = None if self.use_moe_tail else DenseFNN(config)
 
@@ -360,7 +360,7 @@ class DualAttentionEncoder(nn.Module):
             layers.append(
                 LatentDualAttentionBlock(
                     config,
-                    use_moe_tail=layer_index == config.num_layers - 1,
+                    use_moe_tail=config.use_moe and layer_index == config.num_layers - 1,
                 )
             )
         self.layers = nn.ModuleList(layers)
@@ -370,8 +370,6 @@ class DualAttentionEncoder(nn.Module):
             if isinstance(final_layer, (RawFeatureDualAttentionBlock, LatentDualAttentionBlock))
             else None
         )
-        if self.moe is None:
-            raise RuntimeError("DualAttentionEncoder final layer must expose a MoE tail.")
 
     def forward(self, x: torch.Tensor, continuous_times: torch.Tensor) -> torch.Tensor:
         if continuous_times.ndim != 2:
@@ -417,8 +415,12 @@ class LobTrendTransformer(nn.Module):
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         encoded = self.encoder(x, t)
-        self.moe_load_balancing_loss = self.encoder.moe.load_balancing_loss  # load-balancing for MoE training
-        self.moe_routing = self.encoder.moe.last_routing
+        if self.encoder.moe is None:
+            self.moe_load_balancing_loss = None
+            self.moe_routing = None
+        else:
+            self.moe_load_balancing_loss = self.encoder.moe.load_balancing_loss  # load-balancing for MoE training
+            self.moe_routing = self.encoder.moe.last_routing
         return self.classifier(encoded)
 
 

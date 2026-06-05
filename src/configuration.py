@@ -145,6 +145,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "feature_sigma": None,
         "num_layers": None,
         "latent_spatial_embed_dim": None,
+        "use_moe": None,
         "num_heads": None,
         "max_dt_quantile": None,
         "max_dt": None,
@@ -216,6 +217,7 @@ OPTIONAL_CONFIG_KEYS = {
     "model.max_dt",
     "model.num_layers",
     "model.latent_spatial_embed_dim",
+    "model.use_moe",
     "training.monitor_params",
     "preprocessing.save_processed_dataframes",
     "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
@@ -431,6 +433,23 @@ def _required_int(value: Any, dotted_path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"Invalid experiment config; {dotted_path} must be an integer.")
     return int(value)
+
+
+def _optional_bool(value: Any, dotted_path: str, *, default: bool) -> bool:
+    """Convert an optional config value to bool with a default."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"", "none", "null"}:
+            return default
+        if lowered in {"true", "yes", "1"}:
+            return True
+        if lowered in {"false", "no", "0"}:
+            return False
+    raise ValueError(f"Invalid experiment config; {dotted_path} must be a boolean.")
 
 
 def _is_valid_training_device(value: Any) -> bool:
@@ -1250,6 +1269,7 @@ class ModelConfig:
     classifier_dropout: float
     num_layers: int = 1
     latent_spatial_embed_dim: int | None = None
+    use_moe: bool = True
     max_dt_quantile: float = 95.0
     max_dt: float | None = None
 
@@ -1301,6 +1321,7 @@ class ModelConfig:
                 payload.get("latent_spatial_embed_dim"),
                 "model.latent_spatial_embed_dim",
             ),
+            use_moe=_optional_bool(payload.get("use_moe"), "model.use_moe", default=True),
             max_dt_quantile=float(_require_explicit_value(payload["max_dt_quantile"], "model.max_dt_quantile")),
             max_dt=_optional_float(payload.get("max_dt")),
         )

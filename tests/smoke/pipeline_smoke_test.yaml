@@ -115,6 +115,7 @@ model:
   num_heads: 4
   # Quantile (0-100) of train sequence time spans used as temporal attention max_dt per fold.
   max_dt_quantile: 95.0
+  use_moe: true
   num_experts: 2
   top_k: 1
   num_classes: 3
