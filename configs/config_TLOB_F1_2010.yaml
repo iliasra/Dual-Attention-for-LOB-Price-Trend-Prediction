@@ -115,10 +115,12 @@ preprocessing:
 
 model:
   d_input: 144
-  d_model: 128
+  d_model: 256
   feature_embed_dim: 32
   feature_num_frequencies: 8
   feature_sigma: 1.0
+  num_layers: 3
+  latent_spatial_embed_dim: 16
   num_heads: 4
   max_dt_quantile: 95.0
   max_dt:

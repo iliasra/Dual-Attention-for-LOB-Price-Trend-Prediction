@@ -143,6 +143,8 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "feature_embed_dim": None,
         "feature_num_frequencies": None,
         "feature_sigma": None,
+        "num_layers": None,
+        "latent_spatial_embed_dim": None,
         "num_heads": None,
         "max_dt_quantile": None,
         "max_dt": None,
@@ -212,6 +214,8 @@ OPTIONAL_CONFIG_KEYS = {
     "preprocessing.price_static.tau_clip",
     "preprocessing.price_static.tau_max",
     "model.max_dt",
+    "model.num_layers",
+    "model.latent_spatial_embed_dim",
     "training.monitor_params",
     "preprocessing.save_processed_dataframes",
     "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
@@ -1244,6 +1248,8 @@ class ModelConfig:
     moe_router_noise: float
     moe_load_balancing_weight: float
     classifier_dropout: float
+    num_layers: int = 1
+    latent_spatial_embed_dim: int | None = None
     max_dt_quantile: float = 95.0
     max_dt: float | None = None
 
@@ -1253,6 +1259,17 @@ class ModelConfig:
         Raises:
             ValueError: If "max_dt_quantile" or resolved "max_dt" is out of range.
         """
+        if self.num_layers < 1:
+            raise ValueError("model.num_layers must be >= 1.")
+        if self.latent_spatial_embed_dim is not None and self.latent_spatial_embed_dim < 0:
+            raise ValueError("model.latent_spatial_embed_dim must be >= 0 or null.")
+        if self.num_layers > 1:
+            if self.latent_spatial_embed_dim is None or self.latent_spatial_embed_dim <= 0:
+                raise ValueError("model.latent_spatial_embed_dim must be > 0 when model.num_layers > 1.")
+            if self.d_model % self.latent_spatial_embed_dim != 0:
+                raise ValueError("model.d_model must be divisible by model.latent_spatial_embed_dim.")
+            if self.latent_spatial_embed_dim % self.num_heads != 0:
+                raise ValueError("model.latent_spatial_embed_dim must be divisible by model.num_heads.")
         if not 0.0 <= self.max_dt_quantile <= 100.0:
             raise ValueError("model.max_dt_quantile must be in [0, 100].")
         if self.max_dt is not None and self.max_dt < 0.0:
@@ -1279,9 +1296,20 @@ class ModelConfig:
             moe_router_noise=float(payload["moe_router_noise"]),
             moe_load_balancing_weight=float(payload["moe_load_balancing_weight"]),
             classifier_dropout=float(payload["classifier_dropout"]),
+            num_layers=_required_int(payload.get("num_layers", 1), "model.num_layers"),
+            latent_spatial_embed_dim=_optional_int(
+                payload.get("latent_spatial_embed_dim"),
+                "model.latent_spatial_embed_dim",
+            ),
             max_dt_quantile=float(_require_explicit_value(payload["max_dt_quantile"], "model.max_dt_quantile")),
             max_dt=_optional_float(payload.get("max_dt")),
         )
+
+    def resolved_latent_spatial_embed_dim(self) -> int:
+        """Return the latent chunk size used by post-stem spatial attention."""
+        if self.latent_spatial_embed_dim is None or self.latent_spatial_embed_dim <= 0:
+            raise ValueError("model.latent_spatial_embed_dim must be > 0 when latent layers are enabled.")
+        return self.latent_spatial_embed_dim
 
     def resolved_d_input(self, inferred_feature_count: int | None = None) -> int:
         """Return the configured or inferred model input width.

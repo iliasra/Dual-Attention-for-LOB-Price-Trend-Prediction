@@ -243,8 +243,72 @@ def test_volume_static_exp_scaling_train_fitted_config_values_are_loaded() -> No
 def test_model_max_dt_quantile_is_loaded_and_max_dt_is_resolved_later() -> None:
     config = load_config()
 
+    assert config.model.num_layers == 1
+    assert config.model.latent_spatial_embed_dim is None
     assert config.model.max_dt_quantile == 95.0
     assert config.model.max_dt is None
+
+
+def test_model_layer_config_defaults_for_old_snapshots(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    del payload["model"]["num_layers"]
+    del payload["model"]["latent_spatial_embed_dim"]
+
+    config_path = artifact_dir / "old_model_layer_snapshot.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.model.num_layers == 1
+    assert loaded.model.latent_spatial_embed_dim is None
+
+
+def test_single_layer_model_accepts_zero_latent_spatial_dim(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["model"]["num_layers"] = 1
+    payload["model"]["latent_spatial_embed_dim"] = 0
+
+    config_path = artifact_dir / "single_layer_zero_latent_dim.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.model.num_layers == 1
+    assert loaded.model.latent_spatial_embed_dim == 0
+
+
+def test_model_layer_config_is_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+
+    payload["model"]["num_layers"] = 2
+    payload["model"]["latent_spatial_embed_dim"] = 32
+    config_path = artifact_dir / "valid_multi_layer_model.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+    assert loaded.model.num_layers == 2
+    assert loaded.model.latent_spatial_embed_dim == 32
+
+    payload["model"]["num_layers"] = 0
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="model\\.num_layers"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["model"]["num_layers"] = 2
+    payload["model"]["latent_spatial_embed_dim"] = None
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="latent_spatial_embed_dim"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["model"]["latent_spatial_embed_dim"] = 3
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="d_model"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["model"]["latent_spatial_embed_dim"] = 2
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="num_heads"):
+        ExperimentConfig.from_yaml(config_path)
 
 
 def test_model_max_dt_can_be_loaded_when_present(artifact_dir: Path) -> None:

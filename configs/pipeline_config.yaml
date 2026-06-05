@@ -152,6 +152,8 @@ model:
   feature_embed_dim: 32
   feature_num_frequencies: 8
   feature_sigma: 1.0
+  num_layers: 1
+  latent_spatial_embed_dim: null
   num_heads: 4
   # Quantile (0-100) of train sequence time spans used as temporal attention max_dt per fold.
   max_dt_quantile: 95.0

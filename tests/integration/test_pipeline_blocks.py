@@ -296,6 +296,49 @@ def test_sequence_dataset_and_model_forward_use_matching_tensor_shapes(artifact_
 
     assert logits.shape == (x_batch.shape[0], model_config.num_classes)
     assert torch.isfinite(logits).all()
+    assert model.encoder.layers[0].moe is not None
+    assert model.moe_routing is not None
+
+
+def test_multi_layer_model_uses_dense_intermediate_blocks_and_final_moe() -> None:
+    torch.manual_seed(0)
+    model_config = ModelConfig(
+        d_input=6,
+        d_model=16,
+        feature_embed_dim=4,
+        feature_num_frequencies=3,
+        feature_sigma=1.0,
+        num_heads=2,
+        max_dt=3.0,
+        num_experts=2,
+        top_k=1,
+        num_classes=3,
+        rope_type="hybrid_crope",
+        rope_base=10000,
+        attention_dropout=0.0,
+        moe_dropout=0.0,
+        moe_expansion_factor=2,
+        moe_router_noise=0.0,
+        moe_load_balancing_weight=0.0,
+        classifier_dropout=0.0,
+        num_layers=3,
+        latent_spatial_embed_dim=4,
+    )
+    model = build_model(model_config)
+    x = torch.randn(2, 5, model_config.d_input)
+    t = torch.arange(5, dtype=torch.float32).repeat(2, 1)
+
+    logits = model(x, t)
+
+    assert logits.shape == (2, model_config.num_classes)
+    assert model.encoder.layers[0].moe is None
+    assert model.encoder.layers[0].dense_fnn is not None
+    assert model.encoder.layers[1].moe is None
+    assert model.encoder.layers[1].dense_fnn is not None
+    assert model.encoder.layers[2].moe is not None
+    assert model.encoder.layers[2].dense_fnn is None
+    assert model.moe_load_balancing_loss is not None
+    assert model.moe_routing is not None
 
 
 def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:

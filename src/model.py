@@ -239,7 +239,21 @@ class MoE(nn.Module):
         return out_flat.reshape(batch_size, sequence_length, hidden_size)  # reshape avoids contiguous-memory assumptions
 
 
-class DualAttentionEncoder(nn.Module):
+class DenseFNN(nn.Module):
+    def __init__(self, config: ModelConfig) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(config.d_model, config.d_model * config.moe_expansion_factor),
+            nn.GELU(),
+            nn.Dropout(config.moe_dropout),
+            nn.Linear(config.d_model * config.moe_expansion_factor, config.d_model),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class RawFeatureDualAttentionBlock(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         if config.feature_embed_dim % config.num_heads != 0:
@@ -263,21 +277,22 @@ class DualAttentionEncoder(nn.Module):
         self.norm1 = nn.LayerNorm(config.d_model)
         self.temporal_attention = ContinuousTimeAttention(config)  #same nb of heads for spatial/timewise
         self.norm2 = nn.LayerNorm(config.d_model)
-        self.moe = MoE(config)
+        self.use_moe_tail = config.num_layers == 1
+        self.moe = MoE(config) if self.use_moe_tail else None
+        self.dense_fnn = None if self.use_moe_tail else DenseFNN(config)
 
-    def forward(self, x: torch.Tensor, continuous_times: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, relative_time: torch.Tensor) -> torch.Tensor:
         if x.ndim != 3:  # validate x has shape [batch, sequence, features]
             raise ValueError(f"x must have shape [batch, sequence, features], got {tuple(x.shape)}.")
-        if continuous_times.ndim != 2:  # validate t has shape [batch, sequence]
-            raise ValueError(f"t must have shape [batch, sequence], got {tuple(continuous_times.shape)}.")
-        if x.shape[:2] != continuous_times.shape:  # validate x and t share batch and sequence dimensions
+        if relative_time.ndim != 2:  # validate t has shape [batch, sequence]
+            raise ValueError(f"t must have shape [batch, sequence], got {tuple(relative_time.shape)}.")
+        if x.shape[:2] != relative_time.shape:  # validate x and t share batch and sequence dimensions
             raise ValueError(
-                f"x and t must share [batch, sequence], got {tuple(x.shape[:2])} and {tuple(continuous_times.shape)}."
+                f"x and t must share [batch, sequence], got {tuple(x.shape[:2])} and {tuple(relative_time.shape)}."
             )
         if x.shape[-1] != self.d_input:  # validate input feature dimension before embedding
             raise ValueError(f"x last dimension must be d_input={self.d_input}, got {x.shape[-1]}.")
         batch_size, sequence_length, _ = x.shape
-        relative_time = continuous_times - continuous_times[:, :1]
 
         embedded = self.feature_embedding(x)
         embedded = embedded.reshape(batch_size * sequence_length, self.d_input, self.config.feature_embed_dim)  # reshape avoids contiguous-memory assumptions
@@ -286,8 +301,92 @@ class DualAttentionEncoder(nn.Module):
 
         projected = self.projection(embedded)
         projected = projected + self.temporal_attention(self.norm1(projected), relative_time)
-        projected = projected + self.moe(self.norm2(projected))
+        tail = self.moe if self.moe is not None else self.dense_fnn
+        if tail is None:
+            raise RuntimeError("RawFeatureDualAttentionBlock has no tail module.")
+        projected = projected + tail(self.norm2(projected))
         return projected
+
+
+class LatentDualAttentionBlock(nn.Module):
+    def __init__(self, config: ModelConfig, *, use_moe_tail: bool) -> None:
+        super().__init__()
+        self.d_model = config.d_model
+        self.latent_spatial_embed_dim = config.resolved_latent_spatial_embed_dim()
+        self.num_latent_features = config.d_model // self.latent_spatial_embed_dim
+        self.spatial_attention = nn.MultiheadAttention(
+            embed_dim=self.latent_spatial_embed_dim,
+            num_heads=config.num_heads,
+            batch_first=True,
+        )
+        self.norm1 = nn.LayerNorm(config.d_model)
+        self.temporal_attention = ContinuousTimeAttention(config)
+        self.norm2 = nn.LayerNorm(config.d_model)
+        self.moe = MoE(config) if use_moe_tail else None
+        self.dense_fnn = None if use_moe_tail else DenseFNN(config)
+
+    def forward(self, h: torch.Tensor, relative_time: torch.Tensor) -> torch.Tensor:
+        if h.ndim != 3:
+            raise ValueError(f"h must have shape [batch, sequence, d_model], got {tuple(h.shape)}.")
+        if h.shape[-1] != self.d_model:
+            raise ValueError(f"h last dimension must be d_model={self.d_model}, got {h.shape[-1]}.")
+        if relative_time.ndim != 2:
+            raise ValueError(f"t must have shape [batch, sequence], got {tuple(relative_time.shape)}.")
+        if h.shape[:2] != relative_time.shape:
+            raise ValueError(
+                f"h and t must share [batch, sequence], got {tuple(h.shape[:2])} and {tuple(relative_time.shape)}."
+            )
+        batch_size, sequence_length, _ = h.shape
+        chunks = h.reshape(
+            batch_size * sequence_length,
+            self.num_latent_features,
+            self.latent_spatial_embed_dim,
+        )
+        spatial_attended, _ = self.spatial_attention(chunks, chunks, chunks)
+        h = (chunks + spatial_attended).reshape(batch_size, sequence_length, self.d_model)
+        h = h + self.temporal_attention(self.norm1(h), relative_time)
+        tail = self.moe if self.moe is not None else self.dense_fnn
+        if tail is None:
+            raise RuntimeError("LatentDualAttentionBlock has no tail module.")
+        return h + tail(self.norm2(h))
+
+
+class DualAttentionEncoder(nn.Module):
+    def __init__(self, config: ModelConfig) -> None:
+        super().__init__()
+        self.config = config
+        layers: list[nn.Module] = [RawFeatureDualAttentionBlock(config)]
+        for layer_index in range(1, config.num_layers):
+            layers.append(
+                LatentDualAttentionBlock(
+                    config,
+                    use_moe_tail=layer_index == config.num_layers - 1,
+                )
+            )
+        self.layers = nn.ModuleList(layers)
+        final_layer = self.layers[-1]
+        self.moe = (
+            final_layer.moe
+            if isinstance(final_layer, (RawFeatureDualAttentionBlock, LatentDualAttentionBlock))
+            else None
+        )
+        if self.moe is None:
+            raise RuntimeError("DualAttentionEncoder final layer must expose a MoE tail.")
+
+    def forward(self, x: torch.Tensor, continuous_times: torch.Tensor) -> torch.Tensor:
+        if continuous_times.ndim != 2:
+            raise ValueError(f"t must have shape [batch, sequence], got {tuple(continuous_times.shape)}.")
+        if x.ndim != 3:
+            raise ValueError(f"x must have shape [batch, sequence, features], got {tuple(x.shape)}.")
+        if x.shape[:2] != continuous_times.shape:
+            raise ValueError(
+                f"x and t must share [batch, sequence], got {tuple(x.shape[:2])} and {tuple(continuous_times.shape)}."
+            )
+        relative_time = continuous_times - continuous_times[:, :1]
+        h = x
+        for layer in self.layers:
+            h = layer(h, relative_time)
+        return h
 
 
 class TrendClassifier(nn.Module):
