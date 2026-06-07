@@ -91,34 +91,37 @@ def test_calculate_midprice_and_spread() -> None:
 def test_fit_train_smoothing_threshold_mean_pct() -> None:
     frame = pd.DataFrame(
         {
-            "bid_price_1": [99.0, 198.0],
-            "ask_price_1": [101.0, 202.0],
+            "bid_price_1": [99.0, 101.0, 103.0, 105.0, 107.0],
+            "ask_price_1": [101.0, 103.0, 105.0, 107.0, 109.0],
         }
     )
-    config = make_smoothing_config(method="C", threshold="mean_pct").smoothing
+    config = make_smoothing_config(method="C", threshold="mean_pct", k=1, h=2).smoothing
 
     result = fit_train_smoothing_threshold([frame], config)
 
-    expected = np.mean([2.0 / 100.0, 4.0 / 200.0])
+    expected = 0.5 * np.mean([4.0 / 101.0, 4.0 / 103.0])
     assert result["mode"] == "mean_pct"
     assert result["value"] == pytest.approx(expected)
+    assert result["mean_pct"] == pytest.approx(2.0 * expected)
+    assert result["formula"] == "0.5 * mean(abs(l_t)), where l_t is the configured smoothing percentage change"
     assert result["fit_split"] == "train"
 
 
 def test_fit_smoothing_threshold_mean_pct_can_use_validation_split() -> None:
     frame = pd.DataFrame(
         {
-            "bid_price_1": [99.0, 198.0],
-            "ask_price_1": [101.0, 202.0],
+            "bid_price_1": [99.0, 101.0, 103.0, 105.0, 107.0],
+            "ask_price_1": [101.0, 103.0, 105.0, 107.0, 109.0],
         }
     )
-    config = make_smoothing_config(method="C", threshold="mean_pct").smoothing
+    config = make_smoothing_config(method="C", threshold="mean_pct", k=1, h=2).smoothing
 
     result = fit_smoothing_threshold([frame], config, fit_split="validation")
 
-    expected = np.mean([2.0 / 100.0, 4.0 / 200.0])
+    expected = 0.5 * np.mean([4.0 / 101.0, 4.0 / 103.0])
     assert result["mode"] == "mean_pct"
     assert result["value"] == pytest.approx(expected)
+    assert result["mean_pct"] == pytest.approx(2.0 * expected)
     assert result["fit_split"] == "validation"
 
 

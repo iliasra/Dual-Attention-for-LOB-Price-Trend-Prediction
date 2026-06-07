@@ -54,7 +54,7 @@ preprocessing:
     strategy: smoothing # allowed: smoothing, triple_barrier
     smoothing:
       method: C # allowed: A, B, C
-      threshold: mean_pct # numeric/null, train-fitted mean_spread, or split-fitted mean_pct; ignored if adaptive_threshold.enabled = true
+      threshold: mean_pct # numeric/null, train-fitted mean_spread, or split-fitted mean_pct=0.5*mean(abs(l_t)); ignored if adaptive_threshold.enabled = true
       k: 9 # 9 to have a window of length 10 to replicate TLOB experiment
       h: 100
       bid_column: bid_price_1

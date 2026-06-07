@@ -100,6 +100,18 @@ def smoothing_method_C(midprices: pd.Series, k: int = 5, h: int = 10) -> pd.Seri
     return SmoothingMethodC(k=k, h=h)(midprices)
 
 
+def smoothing_pct_changes(midprices: pd.Series, config: SmoothingLabelConfig) -> pd.Series:
+    """Return the smoothing percentage changes configured for labeling."""
+    method_name = config.method.upper()
+    if method_name == "A":
+        return SmoothingMethodA(k=config.k)(midprices)
+    if method_name == "B":
+        return SmoothingMethodB(k=config.k)(midprices)
+    if method_name == "C":
+        return SmoothingMethodC(k=config.k, h=config.h)(midprices)
+    raise ValueError(f"Unknown smoothing method: {config.method}")
+
+
 def calculate_adaptive_method_c_threshold(
     df: pd.DataFrame,
     midprices: pd.Series,
@@ -221,35 +233,46 @@ def fit_smoothing_threshold(
         raise ValueError("Smoothing threshold fitting requires threshold='mean_spread' or 'mean_pct'.")
 
     mode = str(config.threshold).lower()
-    n_values = 0
-    spread_sum = 0.0
-    midprice_sum = 0.0
-    pct_sum = 0.0
-
-    for df in dataframes:
-        spread, midprice = _finite_spread_midprice_arrays(
-            df,
-            bid_col=config.bid_column,
-            ask_col=config.ask_column,
-        )
-        if spread.size == 0:
-            continue
-        n_values += int(spread.size)
-        spread_sum += float(spread.sum())
-        midprice_sum += float(midprice.sum())
-        pct_sum += float((spread / midprice).sum())
-
-    if n_values == 0:
-        raise ValueError("Cannot fit smoothing threshold: no finite train spread/midprice values found.")
-    if midprice_sum == 0.0:
-        raise ValueError("Cannot fit smoothing threshold: train midprice sum is zero.")
-
-    mean_spread = spread_sum / n_values
-    mean_midprice = midprice_sum / n_values
     if mode == "mean_pct":
-        threshold = pct_sum / n_values
-        formula = "mean((ask_price - bid_price) / midprice)"
+        n_values = 0
+        abs_change_sum = 0.0
+        for df in dataframes:
+            midprices = calculate_midprice(df, bid_col=config.bid_column, ask_col=config.ask_column)
+            pct_changes = smoothing_pct_changes(midprices, config).to_numpy(dtype=float)
+            finite = pct_changes[np.isfinite(pct_changes)]
+            if finite.size == 0:
+                continue
+            n_values += int(finite.size)
+            abs_change_sum += float(np.abs(finite).sum())
+        if n_values == 0:
+            raise ValueError("Cannot fit smoothing threshold: no finite smoothing percentage changes found.")
+        mean_pct = abs_change_sum / n_values
+        threshold = 0.5 * mean_pct
+        formula = "0.5 * mean(abs(l_t)), where l_t is the configured smoothing percentage change"
+        mean_spread = None
+        mean_midprice = None
     else:
+        n_values = 0
+        spread_sum = 0.0
+        midprice_sum = 0.0
+        for df in dataframes:
+            spread, midprice = _finite_spread_midprice_arrays(
+                df,
+                bid_col=config.bid_column,
+                ask_col=config.ask_column,
+            )
+            if spread.size == 0:
+                continue
+            n_values += int(spread.size)
+            spread_sum += float(spread.sum())
+            midprice_sum += float(midprice.sum())
+        if n_values == 0:
+            raise ValueError("Cannot fit smoothing threshold: no finite train spread/midprice values found.")
+        if midprice_sum == 0.0:
+            raise ValueError("Cannot fit smoothing threshold: train midprice sum is zero.")
+        mean_spread = spread_sum / n_values
+        mean_midprice = midprice_sum / n_values
+        mean_pct = mean_spread / mean_midprice
         threshold = mean_spread / mean_midprice
         formula = "mean(ask_price - bid_price) / mean(midprice)"
 
@@ -265,9 +288,9 @@ def fit_smoothing_threshold(
         "n_values": int(n_values),
         "bid_column": config.bid_column,
         "ask_column": config.ask_column,
-        "mean_spread": float(mean_spread),
-        "mean_midprice": float(mean_midprice),
-        "mean_pct": float(pct_sum / n_values),
+        "mean_spread": None if mean_spread is None else float(mean_spread),
+        "mean_midprice": None if mean_midprice is None else float(mean_midprice),
+        "mean_pct": float(mean_pct),
     }
 
 
@@ -359,14 +382,7 @@ class TargetLabelPipeline:
         midprices = calculate_midprice(result, bid_col=config.bid_column, ask_col=config.ask_column)
 
         method_name = config.method.upper()
-        if method_name == "A":
-            pct_changes = SmoothingMethodA(k=config.k)(midprices)
-        elif method_name == "B":
-            pct_changes = SmoothingMethodB(k=config.k)(midprices)
-        elif method_name == "C":
-            pct_changes = SmoothingMethodC(k=config.k, h=config.h)(midprices)
-        else:
-            raise ValueError(f"Unknown smoothing method: {config.method}")
+        pct_changes = smoothing_pct_changes(midprices, config)
 
         threshold = config.threshold if threshold_override is None else float(threshold_override)
         if threshold_override is not None and (
