@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: INTC_TLOB_TOP_5
+  name: INTC_TLOB_meanpct_fixed
 
 data:
   raw_data_dir: ../data/INTC_TLOB/LOBSTER_TLOB
@@ -181,16 +181,16 @@ training:
   early_stopping_patience: 5
   early_stopping_warmup: 3
   early_stopping_min_delta: 0.0
-  monitor: val_directional_macro_f1 # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
+  monitor: val_macro_f1 # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
   monitor_mode: max # allowed: min, max; tailored_score requires max
   monitor_params:
     lambda_ece: null
     lambda_rate: null
   persistent_workers: true
   optimizer: adamw # allowed: adam, adamw
-  learning_rate: 1.0e-4
+  learning_rate: 3.0e-5
   weight_decay: 1.0e-4
-  focal_gamma: 0.5
+  focal_gamma: 0.25
   class_weight_beta: 0.1
   class_weight_min: 0.5
   class_weight_max: 3.0
@@ -201,7 +201,7 @@ training:
   temperature_scaling:
     enabled: true
   directional_thresholds:
-    enabled: true
+    enabled: false
     method: joint_up_down # allowed: joint_up_down, precision_floor, top_x_quantile
     min: 0.1 # lower bound for candidate probability thresholds
     max: 0.95 # upper bound for candidate probability thresholds
