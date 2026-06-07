@@ -4,7 +4,7 @@ experiment:
   name: INTC_TLOB_TOP_5
 
 data:
-  raw_data_dir: ../data/LOBSTER_TLOB
+  raw_data_dir: ../data/INTC_TLOB/LOBSTER_TLOB
   processed_data_dir: ../data/processed_dataframes
   sequence_data_dir: ../data/sequences
   logs_dir: ../logs

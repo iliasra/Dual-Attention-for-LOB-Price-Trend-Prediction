@@ -887,6 +887,7 @@ class LobTrainer:
                 data_loader=val_loader,
                 criterion=criterion,
                 description=f"Epoch {epoch_number}/{self.config.epochs} [Val]",
+                track_pr_metrics=True,
             )
             scheduler.step()
             history.append(

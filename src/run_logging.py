@@ -360,6 +360,30 @@ def _tailored_metric_values(metrics: Any, config: ExperimentConfig, prefix: str)
     }
 
 
+def _directional_prediction_rate_values(
+    metrics: Any,
+    config: ExperimentConfig,
+    prefix: str,
+) -> dict[str, str]:
+    """Return prediction-rate audit fields from a confusion matrix."""
+    empty = {f"{prefix}_pred_directional_rate": ""}
+    if metrics is None:
+        return empty
+    confusion = getattr(metrics, "confusion_matrix", None)
+    if not isinstance(confusion, list):
+        return empty
+    matrix = np.asarray(confusion, dtype=np.float64)
+    total = float(matrix.sum())
+    down_class_id = _mapped_class_id(config, -1)
+    up_class_id = _mapped_class_id(config, 1)
+    if matrix.ndim != 2 or total <= 0.0 or down_class_id is None or up_class_id is None:
+        return empty
+    if not (0 <= int(down_class_id) < matrix.shape[1] and 0 <= int(up_class_id) < matrix.shape[1]):
+        return empty
+    pred_directional = float((matrix[:, int(down_class_id)].sum() + matrix[:, int(up_class_id)].sum()) / total)
+    return {f"{prefix}_pred_directional_rate": f"{pred_directional:.10g}"}
+
+
 THRESHOLD_METRIC_KEYS = (
     "directional_macro_f1",
     "macro_f1",
@@ -508,6 +532,7 @@ def _epoch_row(
         row[f"{split}_roc_auc_up"] = _class_metric_value(metrics, "per_class_roc_auc", up_class_id)
         if split == "val":
             row.update(_tailored_metric_values(metrics, config, "val"))
+            row.update(_directional_prediction_rate_values(metrics, config, "val"))
             row.update(_threshold_metric_values(getattr(result, "val_threshold_metrics", None), "val"))
             row.update(
                 _argmax_ablation_metric_values(
@@ -567,6 +592,7 @@ def _epoch_fieldnames(config: ExperimentConfig) -> list[str]:
                     "val_true_rate_down",
                     "val_pred_rate_up",
                     "val_true_rate_up",
+                    "val_pred_directional_rate",
                 ]
             )
         if split in {"val", "test"}:

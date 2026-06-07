@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: experiment_name
+  name: increased_depth
 
 data:
   raw_data_dir: ../data/F1_2010
@@ -141,7 +141,7 @@ model:
 training:
   device: cuda
   epochs: 50
-  batch_size: 128
+  batch_size: 64
   eval_batch_size: 256
   num_workers: 8
   early_stopping_patience: 8

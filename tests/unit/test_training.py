@@ -131,7 +131,7 @@ def test_lob_trainer_fit_uses_only_train_and_validation_loaders(
 
 
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
-def test_lob_trainer_fit_uses_lightweight_validation_evaluation(
+def test_lob_trainer_fit_tracks_validation_ranking_metrics_without_outputs(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -163,7 +163,7 @@ def test_lob_trainer_fit_uses_lightweight_validation_evaluation(
 
     trainer.fit(nn.Linear(1, 3), train_loader=[], val_loader=[])
 
-    assert evaluate_flags == [(False, False, False), (False, False, False)]
+    assert evaluate_flags == [(False, True, False), (False, True, False)]
 
 
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
