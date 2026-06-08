@@ -99,11 +99,11 @@ def test_fit_train_smoothing_threshold_mean_pct() -> None:
 
     result = fit_train_smoothing_threshold([frame], config)
 
-    expected = 0.5 * np.mean([4.0 / 101.0, 4.0 / 103.0])
+    expected = np.mean([4.0 / 101.0, 4.0 / 103.0])
     assert result["mode"] == "mean_pct"
     assert result["value"] == pytest.approx(expected)
-    assert result["mean_pct"] == pytest.approx(2.0 * expected)
-    assert result["formula"] == "0.5 * mean(abs(l_t)), where l_t is the configured smoothing percentage change"
+    assert result["mean_pct"] == pytest.approx(expected)
+    assert result["formula"] == "mean(abs(l_t)), where l_t is the configured smoothing percentage change"
     assert result["fit_split"] == "train"
 
 
@@ -118,10 +118,10 @@ def test_fit_smoothing_threshold_mean_pct_can_use_validation_split() -> None:
 
     result = fit_smoothing_threshold([frame], config, fit_split="validation")
 
-    expected = 0.5 * np.mean([4.0 / 101.0, 4.0 / 103.0])
+    expected = np.mean([4.0 / 101.0, 4.0 / 103.0])
     assert result["mode"] == "mean_pct"
     assert result["value"] == pytest.approx(expected)
-    assert result["mean_pct"] == pytest.approx(2.0 * expected)
+    assert result["mean_pct"] == pytest.approx(expected)
     assert result["fit_split"] == "validation"
 
 

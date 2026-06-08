@@ -247,8 +247,8 @@ def fit_smoothing_threshold(
         if n_values == 0:
             raise ValueError("Cannot fit smoothing threshold: no finite smoothing percentage changes found.")
         mean_pct = abs_change_sum / n_values
-        threshold = 0.5 * mean_pct
-        formula = "0.5 * mean(abs(l_t)), where l_t is the configured smoothing percentage change"
+        threshold = mean_pct
+        formula = "mean(abs(l_t)), where l_t is the configured smoothing percentage change"
         mean_spread = None
         mean_midprice = None
     else:
