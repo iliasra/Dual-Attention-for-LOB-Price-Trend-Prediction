@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: INTC_TLOB_meanpct_fixed
+  name: INTC_TLOB_meanpct_2
 
 data:
   raw_data_dir: ../data/INTC_TLOB/LOBSTER_TLOB
@@ -54,7 +54,8 @@ preprocessing:
     strategy: smoothing # allowed: smoothing, triple_barrier
     smoothing:
       method: C # allowed: A, B, C
-      threshold: mean_pct # numeric/null, train-fitted mean_spread, or split-fitted mean_pct=mean(abs(l_t)); ignored if adaptive_threshold.enabled = true
+      threshold: mean_pct_2 # allowed: numeric/null, mean_spread, mean_pct (=mean(abs(l_t))), mean_pct_2 (=mean(abs(l_t))/2); ignored if adaptive_threshold.enabled = true
+      fit_scope: per_split # allowed: per_split, train; used only for fitted thresholds mean_spread/mean_pct/mean_pct_2
       k: 9 # 9 to have a window of length 10 to replicate TLOB experiment
       h: 100
       bid_column: bid_price_1
@@ -190,10 +191,10 @@ training:
   optimizer: adamw # allowed: adam, adamw
   learning_rate: 3.0e-5
   weight_decay: 1.0e-4
-  focal_gamma: 0.25
-  class_weight_beta: 0.1
-  class_weight_min: 0.5
-  class_weight_max: 3.0
+  focal_gamma: 0.0
+  class_weight_beta: 0.0
+  class_weight_min: 1.0
+  class_weight_max: 1.0
   grad_clip_norm: 1.0
   model_dir: ../results
   use_amp: true
@@ -202,14 +203,14 @@ training:
     enabled: true
   directional_thresholds:
     enabled: false
-    method: joint_up_down # allowed: joint_up_down, precision_floor, top_x_quantile
+    method: top_x_quantile # allowed: joint_up_down, precision_floor, top_x_quantile
     min: 0.1 # lower bound for candidate probability thresholds
     max: 0.95 # upper bound for candidate probability thresholds
     step: 0.05 # coarse grid step; joint_up_down also refines around the best region
     delta: 0.0 # logit-margin gap required to break up/down ties; otherwise neutral
     up_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
     down_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
-    up_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
-    down_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
+    up_quantile: 0.0005 # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
+    down_quantile: 0.0005 # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
   sampling:
     neutral_to_directional_ratio: 8.0 # downsampling of neutral class

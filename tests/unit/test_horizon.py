@@ -125,6 +125,25 @@ def test_fit_smoothing_threshold_mean_pct_can_use_validation_split() -> None:
     assert result["fit_split"] == "validation"
 
 
+def test_fit_smoothing_threshold_mean_pct_2_halves_mean_abs_change() -> None:
+    frame = pd.DataFrame(
+        {
+            "bid_price_1": [99.0, 101.0, 103.0, 105.0, 107.0],
+            "ask_price_1": [101.0, 103.0, 105.0, 107.0, 109.0],
+        }
+    )
+    config = make_smoothing_config(method="C", threshold="mean_pct_2", k=1, h=2).smoothing
+
+    result = fit_smoothing_threshold([frame], config, fit_split="validation")
+
+    mean_abs_change = np.mean([4.0 / 101.0, 4.0 / 103.0])
+    assert result["mode"] == "mean_pct_2"
+    assert result["value"] == pytest.approx(0.5 * mean_abs_change)
+    assert result["mean_pct"] == pytest.approx(mean_abs_change)
+    assert result["multiplier"] == pytest.approx(0.5)
+    assert result["formula"] == "0.5 * mean(abs(l_t)), where l_t is the configured smoothing percentage change"
+
+
 def test_fit_train_smoothing_threshold_mean_spread() -> None:
     frame = pd.DataFrame(
         {

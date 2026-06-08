@@ -39,6 +39,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "smoothing": {
                 "method": None,
                 "threshold": None,
+                "fit_scope": None,
                 "k": None,
                 "h": None,
                 "bid_column": None,
@@ -212,6 +213,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
 OPTIONAL_TOP_LEVEL_KEYS = {"experiment", "folds", "run_metadata"}
 OPTIONAL_CONFIG_KEYS = {
     "preprocessing.labels.smoothing.adaptive_threshold",
+    "preprocessing.labels.smoothing.fit_scope",
     "preprocessing.price_static.tau_clip",
     "preprocessing.price_static.tau_max",
     "model.max_dt",
@@ -392,8 +394,9 @@ def _optional_float(value: Any) -> float | None:
 
 
 TRAIN_FITTED_SMOOTHING_THRESHOLDS = {"mean_spread"}
-SPLIT_FITTED_SMOOTHING_THRESHOLDS = {"mean_pct"}
+SPLIT_FITTED_SMOOTHING_THRESHOLDS = {"mean_pct", "mean_pct_2"}
 FITTED_SMOOTHING_THRESHOLDS = TRAIN_FITTED_SMOOTHING_THRESHOLDS | SPLIT_FITTED_SMOOTHING_THRESHOLDS
+SMOOTHING_THRESHOLD_FIT_SCOPES = {"per_split", "train"}
 
 
 def _optional_smoothing_threshold(value: Any) -> float | str | None:
@@ -873,6 +876,7 @@ class SmoothingLabelConfig:
     h: int
     bid_column: str
     ask_column: str
+    fit_scope: str | None = None
     adaptive_threshold: AdaptiveThresholdConfig | None = None
 
     def __post_init__(self) -> None:
@@ -883,6 +887,11 @@ class SmoothingLabelConfig:
             raise ValueError("preprocessing.labels.smoothing.h must be > 0.")
         if self.method.upper() == "C" and self.k >= self.h:
             raise ValueError("preprocessing.labels.smoothing method C requires k < h.")
+        if self.fit_scope is not None:
+            self.fit_scope = self.fit_scope.lower()
+            if self.fit_scope not in SMOOTHING_THRESHOLD_FIT_SCOPES:
+                allowed = sorted(SMOOTHING_THRESHOLD_FIT_SCOPES)
+                raise ValueError(f"preprocessing.labels.smoothing.fit_scope must be one of {allowed}.")
         if isinstance(self.threshold, str):
             self.threshold = self.threshold.lower()
             if self.threshold not in FITTED_SMOOTHING_THRESHOLDS:
@@ -897,6 +906,16 @@ class SmoothingLabelConfig:
                     "with adaptive_threshold.enabled=true."
                 )
 
+    def resolved_fit_scope(self) -> str | None:
+        """Return where a fitted threshold should be estimated."""
+        if not isinstance(self.threshold, str) or self.threshold not in FITTED_SMOOTHING_THRESHOLDS:
+            return None
+        if self.fit_scope is not None:
+            return self.fit_scope
+        if self.threshold in TRAIN_FITTED_SMOOTHING_THRESHOLDS:
+            return "train"
+        return "per_split"
+
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SmoothingLabelConfig":
         """Build smoothing-label settings from a YAML subsection."""
@@ -904,6 +923,7 @@ class SmoothingLabelConfig:
         return cls(
             method=str(payload["method"]),
             threshold=_optional_smoothing_threshold(payload["threshold"]),
+            fit_scope=None if payload.get("fit_scope") is None else str(payload["fit_scope"]),
             k=int(payload["k"]),
             h=int(payload["h"]),
             bid_column=str(payload["bid_column"]),

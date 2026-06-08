@@ -541,6 +541,7 @@ def test_processing_pipeline_uses_split_fitted_mean_pct_smoothing_threshold(arti
     ]
     payload["preprocessing"]["snapshot_window"] = 4
     payload["preprocessing"]["labels"]["smoothing"]["threshold"] = "mean_pct"
+    payload["preprocessing"]["labels"]["smoothing"]["fit_scope"] = "per_split"
     payload["preprocessing"]["labels"]["smoothing"]["k"] = 1
     payload["preprocessing"]["labels"]["smoothing"]["h"] = 2
     payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = False
@@ -562,14 +563,14 @@ def test_processing_pipeline_uses_split_fitted_mean_pct_smoothing_threshold(arti
 
     threshold = metadata["smoothing_threshold"]
     assert threshold["mode"] == "mean_pct"
-    assert threshold["fit_scope"] == "split"
+    assert threshold["fit_scope"] == "per_split"
     assert set(threshold["splits"]) == {"train", "validation", "test"}
     for split, split_threshold in threshold["splits"].items():
         assert split_threshold["mode"] == "mean_pct"
         assert split_threshold["fit_split"] == split
         assert split_threshold["value"] > 0.0
         assert split_threshold["n_values"] > 0
-    assert metadata["label_distribution"]["method"] == "smoothing_mean_pct_split_fitted"
+    assert metadata["label_distribution"]["method"] == "smoothing_mean_pct_per_split_fitted"
     for split in ("train", "validation", "test"):
         assert metadata["label_distribution"][split]["total"] > 0
 

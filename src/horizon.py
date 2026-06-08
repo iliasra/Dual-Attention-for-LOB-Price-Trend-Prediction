@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover
 
 
 TRAIN_FITTED_SMOOTHING_THRESHOLDS = {"mean_spread"}
-SPLIT_FITTED_SMOOTHING_THRESHOLDS = {"mean_pct"}
+SPLIT_FITTED_SMOOTHING_THRESHOLDS = {"mean_pct", "mean_pct_2"}
 FITTED_SMOOTHING_THRESHOLDS = TRAIN_FITTED_SMOOTHING_THRESHOLDS | SPLIT_FITTED_SMOOTHING_THRESHOLDS
 
 
@@ -230,10 +230,10 @@ def fit_smoothing_threshold(
 ) -> dict[str, object]:
     """Fit a scalar smoothing threshold from split orderbook frames."""
     if not is_fitted_smoothing_threshold(config.threshold):
-        raise ValueError("Smoothing threshold fitting requires threshold='mean_spread' or 'mean_pct'.")
+        raise ValueError("Smoothing threshold fitting requires threshold='mean_spread', 'mean_pct', or 'mean_pct_2'.")
 
     mode = str(config.threshold).lower()
-    if mode == "mean_pct":
+    if mode in {"mean_pct", "mean_pct_2"}:
         n_values = 0
         abs_change_sum = 0.0
         for df in dataframes:
@@ -247,8 +247,13 @@ def fit_smoothing_threshold(
         if n_values == 0:
             raise ValueError("Cannot fit smoothing threshold: no finite smoothing percentage changes found.")
         mean_pct = abs_change_sum / n_values
-        threshold = mean_pct
-        formula = "mean(abs(l_t)), where l_t is the configured smoothing percentage change"
+        multiplier = 0.5 if mode == "mean_pct_2" else 1.0
+        threshold = multiplier * mean_pct
+        formula = (
+            "mean(abs(l_t)), where l_t is the configured smoothing percentage change"
+            if mode == "mean_pct"
+            else "0.5 * mean(abs(l_t)), where l_t is the configured smoothing percentage change"
+        )
         mean_spread = None
         mean_midprice = None
     else:
@@ -291,6 +296,7 @@ def fit_smoothing_threshold(
         "mean_spread": None if mean_spread is None else float(mean_spread),
         "mean_midprice": None if mean_midprice is None else float(mean_midprice),
         "mean_pct": float(mean_pct),
+        "multiplier": float(threshold / mean_pct) if mean_pct > 0.0 else 0.0,
     }
 
 
@@ -406,7 +412,7 @@ class TargetLabelPipeline:
         elif threshold is None:
             raise ValueError(
                 "Smoothing label threshold cannot be null unless adaptive method-C thresholding is enabled. "
-                "Set a numeric threshold, use mean_spread/mean_pct through the preprocessing pipeline, "
+                "Set a numeric threshold, use mean_spread/mean_pct/mean_pct_2 through the preprocessing pipeline, "
                 "or enable adaptive_threshold."
             )
         elif is_fitted_smoothing_threshold(threshold):

@@ -20,8 +20,7 @@ try:
         calculate_midprice,
         fit_smoothing_threshold,
         fit_train_smoothing_threshold,
-        is_split_fitted_smoothing_threshold,
-        is_train_fitted_smoothing_threshold,
+        is_fitted_smoothing_threshold,
     )
     from gcv_lambda_cache import (
         aggregate_daily_gcv_caches,
@@ -56,8 +55,7 @@ except ImportError:  # pragma: no cover
         calculate_midprice,
         fit_smoothing_threshold,
         fit_train_smoothing_threshold,
-        is_split_fitted_smoothing_threshold,
-        is_train_fitted_smoothing_threshold,
+        is_fitted_smoothing_threshold,
     )
     from .gcv_lambda_cache import (
         aggregate_daily_gcv_caches,
@@ -530,17 +528,21 @@ class LobProcessingPipeline:
     def uses_train_fitted_smoothing_threshold(self) -> bool:
         """Return whether smoothing labels need a scalar train-fitted threshold."""
         label_config = self.config.preprocessing.labels
+        smoothing_config = label_config.smoothing
         return (
             label_config.strategy.lower() == "smoothing"
-            and is_train_fitted_smoothing_threshold(label_config.smoothing.threshold)
+            and is_fitted_smoothing_threshold(smoothing_config.threshold)
+            and smoothing_config.resolved_fit_scope() == "train"
         )
 
     def uses_split_fitted_smoothing_threshold(self) -> bool:
         """Return whether smoothing labels need a scalar split-fitted threshold."""
         label_config = self.config.preprocessing.labels
+        smoothing_config = label_config.smoothing
         return (
             label_config.strategy.lower() == "smoothing"
-            and is_split_fitted_smoothing_threshold(label_config.smoothing.threshold)
+            and is_fitted_smoothing_threshold(smoothing_config.threshold)
+            and smoothing_config.resolved_fit_scope() == "per_split"
         )
 
     def uses_fitted_smoothing_threshold(self) -> bool:
@@ -578,6 +580,7 @@ class LobProcessingPipeline:
             sampled_frames,
             self.config.preprocessing.labels.smoothing,
         )
+        self.smoothing_threshold_result["fit_scope"] = "train"
         self.smoothing_threshold_results["train"] = self.smoothing_threshold_result
         print(
             "Fitted smoothing label threshold on train: "
@@ -604,6 +607,7 @@ class LobProcessingPipeline:
             self.config.preprocessing.labels.smoothing,
             fit_split=split,
         )
+        result["fit_scope"] = "per_split"
         self.smoothing_threshold_results[split] = result
         print(
             f"Fitted smoothing label threshold on {split}: "
@@ -619,7 +623,7 @@ class LobProcessingPipeline:
             return {
                 "enabled": True,
                 "mode": str(self.config.preprocessing.labels.smoothing.threshold).lower(),
-                "fit_scope": "split",
+                "fit_scope": "per_split",
                 "splits": dict(self.smoothing_threshold_results),
             }
         return self.smoothing_threshold_result
@@ -1080,7 +1084,7 @@ class LobProcessingPipeline:
             return "smoothing_C_adaptive"
         if self.uses_split_fitted_smoothing_threshold():
             mode = str(self.config.preprocessing.labels.smoothing.threshold).lower()
-            return f"smoothing_{mode}_split_fitted"
+            return f"smoothing_{mode}_per_split_fitted"
         if self.uses_train_fitted_smoothing_threshold():
             mode = str(self.config.preprocessing.labels.smoothing.threshold).lower()
             return f"smoothing_{mode}_train_fitted"

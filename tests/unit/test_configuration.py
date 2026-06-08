@@ -426,13 +426,35 @@ def test_train_fitted_smoothing_threshold_modes_are_loaded(artifact_dir: Path) -
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
     payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = False
 
-    for mode in ("mean_spread", "mean_pct"):
+    for mode in ("mean_spread", "mean_pct", "mean_pct_2"):
         payload["preprocessing"]["labels"]["smoothing"]["threshold"] = mode
         config_path = artifact_dir / f"{mode}.yaml"
         config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
         loaded = ExperimentConfig.from_yaml(config_path)
 
         assert loaded.preprocessing.labels.smoothing.threshold == mode
+
+
+def test_smoothing_threshold_fit_scope_is_loaded_and_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = False
+    payload["preprocessing"]["labels"]["smoothing"]["threshold"] = "mean_pct_2"
+    payload["preprocessing"]["labels"]["smoothing"]["fit_scope"] = "train"
+
+    config_path = artifact_dir / "smoothing_fit_scope_train.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    smoothing = loaded.preprocessing.labels.smoothing
+    assert smoothing.threshold == "mean_pct_2"
+    assert smoothing.fit_scope == "train"
+    assert smoothing.resolved_fit_scope() == "train"
+
+    payload["preprocessing"]["labels"]["smoothing"]["fit_scope"] = "magic"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="fit_scope"):
+        ExperimentConfig.from_yaml(config_path)
 
 
 def test_train_fitted_smoothing_threshold_rejects_bad_modes(artifact_dir: Path) -> None:
