@@ -413,17 +413,42 @@ class DualAttentionEncoder(nn.Module):
 class TrendClassifier(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
+        self.pooling_methods = tuple(config.classifier_pooling.methods)
+        self.last_k = int(config.classifier_pooling.last_k)
+        input_dim = len(self.pooling_methods) * config.d_model
         self.head = nn.Sequential(
-            nn.LayerNorm(config.d_model),
+            nn.LayerNorm(input_dim),
             nn.Dropout(config.classifier_dropout),
-            nn.Linear(config.d_model, config.d_model // 2),
+            nn.Linear(input_dim, config.d_model // 2),
             nn.GELU(),
             nn.Dropout(config.classifier_dropout),
             nn.Linear(config.d_model // 2, config.num_classes),
         )
 
     def forward(self, transformer_output: torch.Tensor) -> torch.Tensor:
-        return self.head(transformer_output[:, -1, :])
+        if transformer_output.ndim != 3:
+            raise ValueError(
+                "transformer_output must have shape [batch, sequence, d_model], "
+                f"got {tuple(transformer_output.shape)}."
+            )
+        sequence_length = transformer_output.shape[1]
+        if sequence_length < 1:
+            raise ValueError("transformer_output sequence length must be >= 1.")
+        effective_k = min(self.last_k, sequence_length)
+        tail = transformer_output[:, -effective_k:, :]
+
+        pooled_outputs: list[torch.Tensor] = []
+        for method in self.pooling_methods:
+            if method == "last":
+                pooled_outputs.append(transformer_output[:, -1, :])
+            elif method == "mean":
+                pooled_outputs.append(tail.mean(dim=1))
+            elif method == "max":
+                pooled_outputs.append(tail.max(dim=1).values)
+            else:
+                raise RuntimeError(f"Unsupported classifier pooling method: {method}")
+        pooled = pooled_outputs[0] if len(pooled_outputs) == 1 else torch.cat(pooled_outputs, dim=-1)
+        return self.head(pooled)
 
 
 class LobTrendTransformer(nn.Module):

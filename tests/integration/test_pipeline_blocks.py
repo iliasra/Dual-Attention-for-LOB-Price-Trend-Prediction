@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 
 from configuration import (
     BasisKinematicConfig,
+    ClassifierPoolingConfig,
     DataConfig,
     FastKinematicConfig,
     KinematicTokenizationConfig,
@@ -296,6 +297,7 @@ def test_sequence_dataset_and_model_forward_use_matching_tensor_shapes(artifact_
 
     assert logits.shape == (x_batch.shape[0], model_config.num_classes)
     assert torch.isfinite(logits).all()
+    assert model.classifier.head[2].in_features == model_config.d_model
     assert model.encoder.layers[0].moe is not None
     assert model.moe_routing is not None
 
@@ -409,6 +411,77 @@ def test_model_accepts_discrete_rope_type() -> None:
 
     assert logits.shape == (2, model_config.num_classes)
     assert torch.isfinite(logits).all()
+
+
+def test_classifier_pooling_can_concatenate_last_mean_max() -> None:
+    torch.manual_seed(0)
+    model_config = ModelConfig(
+        d_input=6,
+        d_model=16,
+        feature_embed_dim=4,
+        feature_num_frequencies=3,
+        feature_sigma=1.0,
+        num_heads=2,
+        max_dt=3.0,
+        num_experts=2,
+        top_k=1,
+        num_classes=3,
+        rope_type="hybrid_crope",
+        rope_base=10000,
+        attention_dropout=0.0,
+        moe_dropout=0.0,
+        moe_expansion_factor=2,
+        moe_router_noise=0.0,
+        moe_load_balancing_weight=0.0,
+        classifier_dropout=0.0,
+        use_moe=False,
+        classifier_pooling=ClassifierPoolingConfig(methods=("last", "mean", "max"), last_k=3),
+    )
+    model = build_model(model_config)
+    x = torch.randn(2, 5, model_config.d_input)
+    t = torch.arange(5, dtype=torch.float32).repeat(2, 1)
+
+    logits = model(x, t)
+
+    assert logits.shape == (2, model_config.num_classes)
+    assert torch.isfinite(logits).all()
+    assert model.classifier.head[0].normalized_shape == (3 * model_config.d_model,)
+    assert model.classifier.head[2].in_features == 3 * model_config.d_model
+
+
+def test_classifier_pooling_last_k_can_exceed_sequence_length() -> None:
+    torch.manual_seed(0)
+    model_config = ModelConfig(
+        d_input=6,
+        d_model=16,
+        feature_embed_dim=4,
+        feature_num_frequencies=3,
+        feature_sigma=1.0,
+        num_heads=2,
+        max_dt=3.0,
+        num_experts=2,
+        top_k=1,
+        num_classes=3,
+        rope_type="hybrid_crope",
+        rope_base=10000,
+        attention_dropout=0.0,
+        moe_dropout=0.0,
+        moe_expansion_factor=2,
+        moe_router_noise=0.0,
+        moe_load_balancing_weight=0.0,
+        classifier_dropout=0.0,
+        use_moe=False,
+        classifier_pooling=ClassifierPoolingConfig(methods=("mean", "max"), last_k=16),
+    )
+    model = build_model(model_config)
+    x = torch.randn(2, 5, model_config.d_input)
+    t = torch.arange(5, dtype=torch.float32).repeat(2, 1)
+
+    logits = model(x, t)
+
+    assert logits.shape == (2, model_config.num_classes)
+    assert torch.isfinite(logits).all()
+    assert model.classifier.head[0].normalized_shape == (2 * model_config.d_model,)
 
 
 def test_multi_layer_model_can_disable_moe_for_all_blocks() -> None:

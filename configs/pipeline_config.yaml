@@ -172,6 +172,9 @@ model:
   moe_router_noise: 0.01
   moe_load_balancing_weight: 0.01
   classifier_dropout: 0.1
+  classifier_pooling:
+    methods: [last] # allowed elements: last, mean, max; multiple values are concatenated
+    last_k: 16 # number of final tokens used by mean/max pooling
 
 training:
   device: cuda # allowed: cpu, cuda

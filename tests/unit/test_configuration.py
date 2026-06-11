@@ -256,6 +256,7 @@ def test_model_layer_config_defaults_for_old_snapshots(artifact_dir: Path) -> No
     del payload["model"]["num_layers"]
     del payload["model"]["latent_spatial_embed_dim"]
     payload["model"].pop("use_moe", None)
+    payload["model"].pop("classifier_pooling", None)
 
     config_path = artifact_dir / "old_model_layer_snapshot.yaml"
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
@@ -264,6 +265,37 @@ def test_model_layer_config_defaults_for_old_snapshots(artifact_dir: Path) -> No
     assert loaded.model.num_layers == 1
     assert loaded.model.latent_spatial_embed_dim is None
     assert loaded.model.use_moe is True
+    assert loaded.model.classifier_pooling.methods == ("last",)
+    assert loaded.model.classifier_pooling.last_k == 1
+
+
+def test_classifier_pooling_config_is_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    base_payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    config_path = artifact_dir / "classifier_pooling.yaml"
+
+    for methods in (["last"], ["mean"], ["max"], ["last", "mean", "max"]):
+        payload = yaml.safe_load(yaml.safe_dump(base_payload))
+        payload["model"]["classifier_pooling"] = {"methods": methods, "last_k": 16}
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        loaded = ExperimentConfig.from_yaml(config_path)
+
+        assert loaded.model.classifier_pooling.methods == tuple(methods)
+        assert loaded.model.classifier_pooling.last_k == 16
+
+    invalid_cases = (
+        {"methods": [], "last_k": 16},
+        {"methods": ["last", "last"], "last_k": 16},
+        {"methods": ["median"], "last_k": 16},
+        {"methods": ["last"], "last_k": 0},
+        {"methods": "last", "last_k": 16},
+    )
+    for classifier_pooling in invalid_cases:
+        payload = yaml.safe_load(yaml.safe_dump(base_payload))
+        payload["model"]["classifier_pooling"] = classifier_pooling
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="classifier_pooling"):
+            ExperimentConfig.from_yaml(config_path)
 
 
 def test_model_use_moe_can_disable_moe_tail(artifact_dir: Path) -> None:

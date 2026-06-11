@@ -161,6 +161,10 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "moe_router_noise": None,
         "moe_load_balancing_weight": None,
         "classifier_dropout": None,
+        "classifier_pooling": {
+            "methods": None,
+            "last_k": None,
+        },
     },
     "training": {
         "device": None,
@@ -221,6 +225,7 @@ OPTIONAL_CONFIG_KEYS = {
     "model.num_layers",
     "model.latent_spatial_embed_dim",
     "model.use_moe",
+    "model.classifier_pooling",
     "training.monitor_params",
     "preprocessing.save_processed_dataframes",
     "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
@@ -1270,6 +1275,51 @@ class PreprocessingConfig:
         )
 
 
+CLASSIFIER_POOLING_METHODS = {"last", "mean", "max"}
+
+
+@dataclass(slots=True)
+class ClassifierPoolingConfig:
+    methods: tuple[str, ...] = ("last",)
+    last_k: int = 1
+
+    def __post_init__(self) -> None:
+        """Validate the classifier token pooling strategy."""
+        normalized = tuple(str(method).strip().lower() for method in self.methods)
+        if not normalized:
+            raise ValueError("model.classifier_pooling.methods must be a non-empty list.")
+        invalid = sorted(set(normalized) - CLASSIFIER_POOLING_METHODS)
+        if invalid:
+            raise ValueError(
+                "model.classifier_pooling.methods must contain only last, mean, max; "
+                f"got {invalid}."
+            )
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("model.classifier_pooling.methods must not contain duplicates.")
+        if self.last_k < 1:
+            raise ValueError("model.classifier_pooling.last_k must be >= 1.")
+        self.methods = normalized
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "ClassifierPoolingConfig":
+        """Build classifier pooling settings from YAML."""
+        if payload is None:
+            return cls()
+        unexpected = sorted(set(payload) - {"methods", "last_k"})
+        if unexpected:
+            raise ValueError(
+                "Invalid experiment config; unexpected key(s) in model.classifier_pooling: "
+                f"{unexpected}"
+            )
+        methods = payload.get("methods", ["last"])
+        if isinstance(methods, str) or not isinstance(methods, (list, tuple)):
+            raise ValueError("model.classifier_pooling.methods must be a list.")
+        return cls(
+            methods=tuple(methods),
+            last_k=_required_int(payload.get("last_k", 1), "model.classifier_pooling.last_k"),
+        )
+
+
 @dataclass(slots=True)
 class ModelConfig:
     d_input: int | None
@@ -1289,6 +1339,7 @@ class ModelConfig:
     moe_router_noise: float
     moe_load_balancing_weight: float
     classifier_dropout: float
+    classifier_pooling: ClassifierPoolingConfig = field(default_factory=ClassifierPoolingConfig)
     num_layers: int = 1
     latent_spatial_embed_dim: int | None = None
     use_moe: bool = True
@@ -1338,6 +1389,7 @@ class ModelConfig:
             moe_router_noise=float(payload["moe_router_noise"]),
             moe_load_balancing_weight=float(payload["moe_load_balancing_weight"]),
             classifier_dropout=float(payload["classifier_dropout"]),
+            classifier_pooling=ClassifierPoolingConfig.from_dict(payload.get("classifier_pooling")),
             num_layers=_required_int(payload.get("num_layers", 1), "model.num_layers"),
             latent_spatial_embed_dim=_optional_int(
                 payload.get("latent_spatial_embed_dim"),

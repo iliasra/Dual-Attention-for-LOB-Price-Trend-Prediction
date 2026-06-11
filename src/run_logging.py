@@ -275,6 +275,10 @@ def save_run_config_snapshot(
                 "num_layers": config.model.num_layers,
                 "latent_spatial_embed_dim": config.model.latent_spatial_embed_dim,
                 "use_moe": config.model.use_moe,
+                "classifier_pooling": {
+                    "methods": list(config.model.classifier_pooling.methods),
+                    "last_k": config.model.classifier_pooling.last_k,
+                },
             },
             "class_weights": config.training.class_weights,
             "monitor": {
@@ -1048,6 +1052,8 @@ def save_run_log(
         handle.write(f"use_moe: {config.model.use_moe}\n")
         handle.write(f"num_layers: {config.model.num_layers}\n")
         handle.write(f"latent_spatial_embed_dim: {config.model.latent_spatial_embed_dim}\n")
+        handle.write(f"classifier_pooling_methods: {list(config.model.classifier_pooling.methods)}\n")
+        handle.write(f"classifier_pooling_last_k: {config.model.classifier_pooling.last_k}\n")
         handle.write("\nModel temporal window\n")
         handle.write(f"max_dt_quantile: {config.model.max_dt_quantile}\n")
         handle.write(f"resolved_max_dt: {config.model.max_dt}\n")
