@@ -163,6 +163,7 @@ training:
   deterministic_torch: false
   temperature_scaling:
     enabled: false
+    class_bias_calibration: false # learn per-class additive logits bias on validation
   directional_thresholds:
     enabled: false
     method: joint_up_down # allowed: joint_up_down, precision_floor, top_x_quantile

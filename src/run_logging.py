@@ -290,6 +290,7 @@ def save_run_config_snapshot(
             "training_sampling": sampling_summary or {"enabled": False},
             "temperature_scaling": {
                 "enabled": config.training.temperature_scaling.enabled,
+                "class_bias_calibration": config.training.temperature_scaling.class_bias_calibration,
             },
             "directional_thresholds": {
                 "enabled": config.training.directional_thresholds.enabled,
@@ -1063,12 +1064,27 @@ def save_run_log(
         handle.write("\nTemperature scaling\n")
         calibration_summary = temperature_scaling_summary or {"enabled": False}
         handle.write(f"enabled: {calibration_summary.get('enabled', False)}\n")
+        handle.write(
+            f"class_bias_calibration: {calibration_summary.get('class_bias_calibration', False)}\n"
+        )
         if calibration_summary.get("enabled"):
-            handle.write("probability_source: temperature_scaled_logits\n")
-            handle.write("calibration_loss: unweighted_cross_entropy\n")
+            handle.write(
+                f"method: {calibration_summary.get('method', 'temperature_scaling')}\n"
+            )
+            handle.write(
+                f"probability_source: "
+                f"{calibration_summary.get('probability_source', 'temperature_scaled_logits')}\n"
+            )
+            handle.write(
+                f"calibration_loss: {calibration_summary.get('loss', 'unweighted_cross_entropy')}\n"
+            )
             handle.write("selection_split: validation\n")
             for key in (
                 "temperature",
+                "class_biases",
+                "class_bias_sum",
+                "nll_before",
+                "nll_after",
                 "validation_nll_before",
                 "validation_nll_after",
                 "n_samples",

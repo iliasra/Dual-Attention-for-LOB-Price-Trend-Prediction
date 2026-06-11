@@ -1015,12 +1015,21 @@ def test_temperature_scaling_config_is_optional(artifact_dir: Path) -> None:
     loaded = ExperimentConfig.from_yaml(config_path)
 
     assert loaded.training.temperature_scaling.enabled is False
+    assert loaded.training.temperature_scaling.class_bias_calibration is False
+
+    payload["training"]["temperature_scaling"] = {"enabled": True, "class_bias_calibration": True}
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.temperature_scaling.enabled is True
+    assert loaded.training.temperature_scaling.class_bias_calibration is True
 
     payload["training"]["temperature_scaling"] = {"enabled": True}
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     loaded = ExperimentConfig.from_yaml(config_path)
 
     assert loaded.training.temperature_scaling.enabled is True
+    assert loaded.training.temperature_scaling.class_bias_calibration is False
 
 
 def test_directional_threshold_config_uses_grid_defaults(artifact_dir: Path) -> None:

@@ -191,6 +191,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "deterministic_torch": None,
         "temperature_scaling": {
             "enabled": None,
+            "class_bias_calibration": None,
         },
         "directional_thresholds": {
             "enabled": None,
@@ -236,6 +237,7 @@ OPTIONAL_CONFIG_KEYS = {
     "training.optimizer",
     "training.temperature_scaling",
     "training.temperature_scaling.enabled",
+    "training.temperature_scaling.class_bias_calibration",
     "training.directional_thresholds",
     "training.directional_thresholds.enabled",
     "training.directional_thresholds.method",
@@ -1509,19 +1511,23 @@ class TrainingDirectionalThresholdConfig:
 @dataclass(slots=True)
 class TrainingTemperatureScalingConfig:
     enabled: bool = False
+    class_bias_calibration: bool = False
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingTemperatureScalingConfig":
         """Build optional temperature scaling settings from YAML."""
         if payload is None:
             return cls()
-        unexpected = sorted(set(payload) - {"enabled"})
+        unexpected = sorted(set(payload) - {"enabled", "class_bias_calibration"})
         if unexpected:
             raise ValueError(
                 "Invalid experiment config; unexpected key(s) in training.temperature_scaling: "
                 f"{unexpected}"
             )
-        return cls(enabled=bool(payload.get("enabled", False)))
+        return cls(
+            enabled=bool(payload.get("enabled", False)),
+            class_bias_calibration=bool(payload.get("class_bias_calibration", False)),
+        )
 
 
 @dataclass(slots=True)

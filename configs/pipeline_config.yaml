@@ -181,7 +181,7 @@ training:
   num_workers: 8
   early_stopping_patience: 5
   early_stopping_warmup: 3
-  early_stopping_min_delta: 0.0
+  early_stopping_min_delta: 0.002
   monitor: val_macro_f1 # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
   monitor_mode: max # allowed: min, max; tailored_score requires max
   monitor_params:
@@ -201,16 +201,17 @@ training:
   deterministic_torch: false
   temperature_scaling:
     enabled: true
+    class_bias_calibration: true # learn per-class additive logits bias on validation
   directional_thresholds:
-    enabled: false
-    method: top_x_quantile # allowed: joint_up_down, precision_floor, top_x_quantile
+    enabled: true
+    method: joint_up_down # allowed: joint_up_down, precision_floor, top_x_quantile
     min: 0.1 # lower bound for candidate probability thresholds
     max: 0.95 # upper bound for candidate probability thresholds
     step: 0.05 # coarse grid step; joint_up_down also refines around the best region
-    delta: 0.0 # logit-margin gap required to break up/down ties; otherwise neutral
+    delta: 0.25 # logit-margin gap required to break up/down ties; otherwise neutral
     up_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
     down_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
-    up_quantile: 0.0005 # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
-    down_quantile: 0.0005 # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
+    up_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
+    down_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
   sampling:
     neutral_to_directional_ratio: 8.0 # downsampling of neutral class

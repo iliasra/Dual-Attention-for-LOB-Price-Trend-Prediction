@@ -18,8 +18,8 @@ if str(SRC_DIR) not in sys.path:
 
 from configuration import ExperimentConfig, load_config
 from calibration import (
-    apply_temperature_to_outputs,
-    fit_temperature_scaling,
+    apply_logit_calibration_to_outputs,
+    fit_logit_calibration,
     save_temperature_scaling_artifact,
 )
 from datasets import EpochNeutralDownsamplingSampler, LOBDataset, sequence_window_labels
@@ -338,18 +338,21 @@ def fit_and_apply_temperature_scaling(
     dict[str, Any],
     dict[str, Any] | None,
 ]:
-    """Fit validation temperature scaling and return calibrated artifacts."""
+    """Fit validation logit calibration and return calibrated artifacts."""
     calibration_start = perf_counter()
-    result = fit_temperature_scaling(
+    class_bias_calibration = bool(config.training.temperature_scaling.class_bias_calibration)
+    result = fit_logit_calibration(
         np.asarray(validation_outputs["logits"], dtype=np.float32),
         np.asarray(validation_outputs["targets"], dtype=np.int64),
         device=config.training.device,
+        class_bias_calibration=class_bias_calibration,
     )
     fit_seconds = perf_counter() - calibration_start
 
-    validation_outputs_calibrated = apply_temperature_to_outputs(
+    validation_outputs_calibrated = apply_logit_calibration_to_outputs(
         validation_outputs,
         result.temperature,
+        class_biases=result.class_biases if class_bias_calibration else None,
     )
     validation_metrics = metrics_from_prediction_outputs(
         config,
@@ -359,7 +362,11 @@ def fit_and_apply_temperature_scaling(
     test_outputs_calibrated = None
     test_metrics = None
     if test_outputs is not None:
-        test_outputs_calibrated = apply_temperature_to_outputs(test_outputs, result.temperature)
+        test_outputs_calibrated = apply_logit_calibration_to_outputs(
+            test_outputs,
+            result.temperature,
+            class_biases=result.class_biases if class_bias_calibration else None,
+        )
         test_metrics = metrics_from_prediction_outputs(
             config,
             test_outputs_calibrated,
@@ -371,8 +378,10 @@ def fit_and_apply_temperature_scaling(
         "fold": fold,
         "best_epoch": int(best_epoch),
         "selection_split": "validation",
-        "probability_source": "temperature_scaled_logits",
-        "note": "Temperature is fitted with unweighted cross-entropy on the natural validation distribution.",
+        "note": (
+            "Temperature and optional class biases are fitted with unweighted cross-entropy "
+            "on the natural validation distribution."
+        ),
         **result.to_dict(),
         "fit_seconds": round(fit_seconds, 6),
         "fit_duration": format_duration(fit_seconds),
@@ -909,6 +918,7 @@ def train_fold(
     test_outputs_for_artifacts = best_evaluation["test_outputs"]
     temperature_scaling_summary: dict[str, Any] = {
         "enabled": bool(config.training.temperature_scaling.enabled),
+        "class_bias_calibration": bool(config.training.temperature_scaling.class_bias_calibration),
     }
     if config.training.temperature_scaling.enabled:
         best_history = history[best_epoch - 1]
@@ -931,6 +941,7 @@ def train_fold(
         print(
             f"Fold {fold_id} temperature scaling fitted on validation: "
             f"T={temperature_scaling_summary['temperature']:.6g}, "
+            f"class_bias_calibration={temperature_scaling_summary.get('class_bias_calibration', False)}, "
             f"val_unweighted_ce_before={temperature_scaling_summary['validation_nll_before']:.6f}, "
             f"val_unweighted_ce_after={temperature_scaling_summary['validation_nll_after']:.6f}."
         )
