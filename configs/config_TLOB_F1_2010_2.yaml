@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: FI2010macroF1
+  name: increased_depth
 
 data:
   raw_data_dir: ../data/F1_2010
@@ -129,7 +129,7 @@ model:
   num_experts: 4
   top_k: 2
   num_classes: 3
-  rope_type: rope # allowed: rope, crope, hybrid_crope, hybrid-crope, hybrid
+  rope_type: crope # allowed: rope, crope, hybrid_crope, hybrid-crope, hybrid
   rope_base: 10000
   attention_dropout: 0.1
   moe_dropout: 0.1 # shared by dense FNN tails and MoE expert networks
@@ -138,47 +138,43 @@ model:
   moe_load_balancing_weight: 0.01
   classifier_dropout: 0.1
   classifier_pooling:
-    methods: [last, mean, max] # allowed elements: last, mean, max; multiple values are concatenated
+    methods: [last] # allowed elements: last, mean, max; multiple values are concatenated
     last_k: 16 # number of final tokens used by mean/max pooling
 
 training:
   device: cuda
-  epochs: 100
+  epochs: 50
   batch_size: 64
   eval_batch_size: 256
   num_workers: 8
-  early_stopping_patience: 12
+  early_stopping_patience: 8
   early_stopping_warmup: 0
-  early_stopping_min_delta: 0.0002
-  monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
-  monitor_mode: max # allowed: min, max; tailored_score requires max
-  monitor_params:
-    base_metric: val_macro_f1 # used only with tailored_score; allowed: val_macro_f1, val_directional_macro_f1
-    lambda_ece: null
-    lambda_rate: 0.1
+  early_stopping_min_delta: 0.0
+  monitor: val_macro_f1
+  monitor_mode: max
   persistent_workers: true
-  optimizer: adamw
-  learning_rate: 2.0e-4
-  weight_decay: 1.0e-4
+  optimizer: adam
+  learning_rate: 1.0e-4
+  weight_decay: 0.0
   focal_gamma: 0.0
-  class_weight_beta: 0.25
-  class_weight_min: 0.75
-  class_weight_max: 1.75
+  class_weight_beta: 0.0
+  class_weight_min: 1.0
+  class_weight_max: 1.0
   grad_clip_norm: 1.0
   model_dir: ../results
   use_amp: true
   deterministic_torch: false
   temperature_scaling:
-    enabled: true
-    class_bias_calibration: true # learn per-class additive logits bias on validation
+    enabled: false
+    class_bias_calibration: false # learn per-class additive logits bias on validation
   directional_thresholds:
-    enabled: true
+    enabled: false
     method: joint_up_down # allowed: joint_up_down, precision_floor, top_x_quantile
-    score: macro_f1 # allowed: directional_macro_f1, macro_f1; optimization score for joint_up_down
+    score: directional_macro_f1 # allowed: directional_macro_f1, macro_f1; optimization score for joint_up_down
     min: 0.05 # lower bound for candidate probability thresholds
     max: 0.95 # upper bound for candidate probability thresholds
     step: 0.05 # coarse grid step; joint_up_down also refines around the best region
-    delta: 0.002 # logit-margin gap required to break up/down ties; otherwise neutral
+    delta: 0.0 # logit-margin gap required to break up/down ties; otherwise neutral
     up_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
     down_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
     up_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
