@@ -261,7 +261,7 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.kinematic_tokenization.method": {"basis", "fast"},
     "preprocessing.price_kinematic.reference": {"tick", "time"},
     "preprocessing.volume_kinematic.reference": {"tick", "time"},
-    "model.rope_type": {"crope", "hybrid_crope", "hybrid-crope", "hybrid"},
+    "model.rope_type": {"rope", "crope", "hybrid_crope", "hybrid-crope", "hybrid"},
     "training.monitor": {"val_loss", "val_macro_f1", "val_directional_macro_f1", "tailored_score"},
     "training.monitor_mode": {"min", "max"},
 }

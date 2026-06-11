@@ -1032,6 +1032,18 @@ def test_temperature_scaling_config_is_optional(artifact_dir: Path) -> None:
     assert loaded.training.temperature_scaling.class_bias_calibration is False
 
 
+def test_discrete_rope_type_is_valid_config(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["model"]["rope_type"] = "rope"
+
+    config_path = artifact_dir / "discrete_rope.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.model.rope_type == "rope"
+
+
 def test_directional_threshold_config_uses_grid_defaults(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))

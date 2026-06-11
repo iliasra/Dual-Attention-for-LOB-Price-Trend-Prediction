@@ -163,7 +163,7 @@ model:
   num_experts: 4
   top_k: 2
   num_classes: 3
-  # allowed: crope, hybrid_crope, hybrid-crope, hybrid
+  # allowed: rope, crope, hybrid_crope, hybrid-crope, hybrid
   rope_type: crope
   rope_base: 10000
   attention_dropout: 0.1

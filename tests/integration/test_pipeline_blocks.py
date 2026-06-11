@@ -378,6 +378,39 @@ def test_single_layer_model_can_replace_moe_with_dense_fnn() -> None:
     assert model.moe_routing is None
 
 
+def test_model_accepts_discrete_rope_type() -> None:
+    torch.manual_seed(0)
+    model_config = ModelConfig(
+        d_input=6,
+        d_model=16,
+        feature_embed_dim=4,
+        feature_num_frequencies=3,
+        feature_sigma=1.0,
+        num_heads=2,
+        max_dt=3.0,
+        num_experts=2,
+        top_k=1,
+        num_classes=3,
+        rope_type="rope",
+        rope_base=10000,
+        attention_dropout=0.0,
+        moe_dropout=0.0,
+        moe_expansion_factor=2,
+        moe_router_noise=0.0,
+        moe_load_balancing_weight=0.0,
+        classifier_dropout=0.0,
+        use_moe=False,
+    )
+    model = build_model(model_config)
+    x = torch.randn(2, 5, model_config.d_input)
+    t = torch.tensor([[0.0, 0.1, 0.4, 1.2, 3.0], [0.0, 0.0, 0.2, 0.2, 2.0]])
+
+    logits = model(x, t)
+
+    assert logits.shape == (2, model_config.num_classes)
+    assert torch.isfinite(logits).all()
+
+
 def test_multi_layer_model_can_disable_moe_for_all_blocks() -> None:
     torch.manual_seed(0)
     model_config = ModelConfig(

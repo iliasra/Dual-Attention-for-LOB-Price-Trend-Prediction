@@ -129,7 +129,7 @@ model:
   num_experts: 4
   top_k: 2
   num_classes: 3
-  rope_type: crope
+  rope_type: crope # allowed: rope, crope, hybrid_crope, hybrid-crope, hybrid
   rope_base: 10000
   attention_dropout: 0.1
   moe_dropout: 0.1 # shared by dense FNN tails and MoE expert networks

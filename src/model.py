@@ -53,6 +53,27 @@ class RotaryEmbeddingBase(nn.Module):
         return x * cos + x_rot * sin
 
 
+class DiscreteRotaryEmbedding(RotaryEmbeddingBase):
+    def __init__(self, head_dim: int, num_heads: int, base: int) -> None:
+        super().__init__(head_dim=head_dim, num_heads=num_heads, base=base)
+        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        t: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        _, sequence_length, _, _ = q.shape
+        positions = torch.arange(sequence_length, device=q.device, dtype=q.dtype).reshape(1, sequence_length, 1, 1)
+        angles = positions * self.inv_freq.reshape(1, 1, 1, -1).to(dtype=q.dtype)
+        embedding = angles.repeat_interleave(2, dim=-1)
+        cos = embedding.cos()
+        sin = embedding.sin()
+        return self.apply_rope(q, cos, sin), self.apply_rope(k, cos, sin)
+
+
 class ContinuousRotaryEmbedding(RotaryEmbeddingBase):
     def __init__(self, head_dim: int, num_heads: int, base: int) -> None:
         super().__init__(head_dim=head_dim, num_heads=num_heads, base=base)
@@ -109,6 +130,8 @@ class RotaryEmbeddingFactory:
     @staticmethod
     def create(config: ModelConfig, head_dim: int) -> RotaryEmbeddingBase:
         rope_type = config.rope_type.lower()
+        if rope_type == "rope":
+            return DiscreteRotaryEmbedding(head_dim=head_dim, num_heads=config.num_heads, base=config.rope_base)
         if rope_type == "crope":
             return ContinuousRotaryEmbedding(head_dim=head_dim, num_heads=config.num_heads, base=config.rope_base)
         if rope_type in {"hybrid_crope", "hybrid-crope", "hybrid"}:
@@ -434,6 +457,7 @@ def build_model(config: ModelConfig | None = None, d_input: int | None = None) -
 
 
 FeaturePE = FeaturePositionalEmbedding
+RoPE = DiscreteRotaryEmbedding
 cRoPE = ContinuousRotaryEmbedding
 Hybrid_cRoPE = HybridContinuousRotaryEmbedding
 MultiheadAttention_cRoPE = ContinuousTimeAttention
