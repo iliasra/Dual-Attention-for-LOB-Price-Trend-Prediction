@@ -898,6 +898,7 @@ def test_training_data_loader_settings_are_loaded() -> None:
     assert isinstance(config.training.temperature_scaling.enabled, bool)
     assert config.training.directional_thresholds.enabled is True
     assert config.training.directional_thresholds.method == "joint_up_down"
+    assert config.training.directional_thresholds.score in {"macro_f1", "directional_macro_f1"}
     assert config.training.directional_thresholds.min_threshold == 0.05
     assert config.training.directional_thresholds.max_threshold == 0.95
     assert config.training.directional_thresholds.step == 0.05
@@ -1002,6 +1003,26 @@ def test_training_tailored_monitor_requires_params_and_max_mode(artifact_dir: Pa
     with pytest.raises(ValueError, match="lambda_ece"):
         ExperimentConfig.from_yaml(config_path)
 
+    payload["training"]["monitor_params"] = {
+        "base_metric": "not_a_metric",
+        "lambda_ece": 0.1,
+        "lambda_rate": 0.5,
+    }
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="base_metric"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["monitor_params"] = {
+        "base_metric": "val_macro_f1",
+        "lambda_ece": 0.1,
+        "lambda_rate": 0.5,
+    }
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.monitor_params.base_metric == "val_macro_f1"
+
 
 def test_legacy_monitors_do_not_require_monitor_params(artifact_dir: Path) -> None:
     config = load_config()
@@ -1029,6 +1050,7 @@ def test_directional_threshold_config_is_optional(artifact_dir: Path) -> None:
 
     assert loaded.training.directional_thresholds.enabled is False
     assert loaded.training.directional_thresholds.method == "joint_up_down"
+    assert loaded.training.directional_thresholds.score == "directional_macro_f1"
     assert loaded.training.directional_thresholds.min_threshold == 0.05
     assert loaded.training.directional_thresholds.max_threshold == 0.95
     assert loaded.training.directional_thresholds.step == 0.05
@@ -1087,6 +1109,7 @@ def test_directional_threshold_config_uses_grid_defaults(artifact_dir: Path) -> 
 
     assert loaded.training.directional_thresholds.enabled is False
     assert loaded.training.directional_thresholds.method == "joint_up_down"
+    assert loaded.training.directional_thresholds.score == "directional_macro_f1"
     assert loaded.training.directional_thresholds.min_threshold == 0.05
     assert loaded.training.directional_thresholds.max_threshold == 0.95
     assert loaded.training.directional_thresholds.step == 0.05
@@ -1117,6 +1140,24 @@ def test_directional_threshold_config_validates_grid(artifact_dir: Path) -> None
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="directional_thresholds\\.step"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_directional_threshold_config_validates_score(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["directional_thresholds"] = {"enabled": False, "score": "macro_f1"}
+
+    config_path = artifact_dir / "directional_threshold_score.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.directional_thresholds.score == "macro_f1"
+
+    payload["training"]["directional_thresholds"]["score"] = "not_a_score"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="directional_thresholds\\.score"):
         ExperimentConfig.from_yaml(config_path)
 
 

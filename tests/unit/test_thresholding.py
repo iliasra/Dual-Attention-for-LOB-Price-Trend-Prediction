@@ -119,6 +119,47 @@ def test_optimize_directional_thresholds_finds_best_pair() -> None:
     assert selection.n_candidates == 4
 
 
+def test_optimize_directional_thresholds_can_use_macro_f1_score() -> None:
+    probabilities = np.asarray(
+        [
+            [0.184, 0.288, 0.528],
+            [0.501, 0.192, 0.307],
+            [0.257, 0.474, 0.269],
+            [0.260, 0.590, 0.151],
+            [0.405, 0.055, 0.541],
+        ],
+        dtype=np.float32,
+    )
+    targets = np.asarray([1, 2, 0, 0, 2])
+    candidates = np.asarray([0.2, 0.4, 0.6, 0.8])
+
+    directional_selection = optimize_directional_thresholds(
+        probabilities,
+        targets,
+        down_candidates=candidates,
+        up_candidates=candidates,
+        down_id=0,
+        neutral_id=1,
+        up_id=2,
+        score="directional_macro_f1",
+    )
+    macro_selection = optimize_directional_thresholds(
+        probabilities,
+        targets,
+        down_candidates=candidates,
+        up_candidates=candidates,
+        down_id=0,
+        neutral_id=1,
+        up_id=2,
+        score="macro_f1",
+    )
+
+    assert (directional_selection.threshold_down, directional_selection.threshold_up) == pytest.approx((0.2, 0.2))
+    assert (macro_selection.threshold_down, macro_selection.threshold_up) == pytest.approx((0.2, 0.8))
+    assert directional_selection.score == pytest.approx(0.45)
+    assert macro_selection.score == pytest.approx(5 / 9)
+
+
 def test_optimize_directional_thresholds_refines_around_best_region() -> None:
     probabilities = np.asarray(
         [

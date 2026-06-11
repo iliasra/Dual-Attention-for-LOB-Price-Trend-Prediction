@@ -7,6 +7,7 @@ import numpy as np
 
 
 TAILORED_SCORE = "tailored_score"
+TAILORED_BASE_METRICS = {"val_macro_f1", "val_directional_macro_f1"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +15,8 @@ class TailoredScoreComponents:
     """Store the scalar pieces used by the tailored validation monitor."""
 
     score: float
+    base_metric: str
+    base_value: float
     ece_dir: float
     rate_penalty: float
     pred_rate_down: float
@@ -21,10 +24,12 @@ class TailoredScoreComponents:
     pred_rate_up: float
     true_rate_up: float
 
-    def prefixed(self, prefix: str) -> dict[str, float]:
+    def prefixed(self, prefix: str) -> dict[str, float | str]:
         """Return fields named for CSV/logging output."""
         return {
             f"{prefix}_tailored_score": self.score,
+            f"{prefix}_tailored_base_metric": self.base_metric,
+            f"{prefix}_tailored_base_value": self.base_value,
             f"{prefix}_tailored_ece_dir": self.ece_dir,
             f"{prefix}_tailored_rate_penalty": self.rate_penalty,
             f"{prefix}_pred_rate_down": self.pred_rate_down,
@@ -43,6 +48,29 @@ def _param_value(params: Any, name: str) -> float:
     if value is None:
         raise ValueError(f"tailored_score requires training.monitor_params.{name}.")
     return float(value)
+
+
+def _param_string(params: Any, name: str, default: str) -> str:
+    """Read one string monitor parameter from a config object or mapping."""
+    if isinstance(params, Mapping):
+        value = params.get(name, default)
+    else:
+        value = getattr(params, name, default)
+    if value is None:
+        value = default
+    return str(value).strip().lower()
+
+
+def tailored_base_value(metrics: Any, base_metric: str) -> float:
+    """Return the F1 quantity used as the tailored score base."""
+    metric_name = str(base_metric).strip().lower()
+    if metric_name == "val_macro_f1":
+        return float(metrics.macro_f1)
+    if metric_name == "val_directional_macro_f1":
+        return float(metrics.directional_macro_f1)
+    raise ValueError(
+        "tailored_score base_metric must be 'val_macro_f1' or 'val_directional_macro_f1'."
+    )
 
 
 def directional_class_ids(
@@ -69,6 +97,7 @@ def tailored_score_components(
     *,
     lambda_ece: float,
     lambda_rate: float,
+    base_metric: str = "val_directional_macro_f1",
     label_mapping: Mapping[int, int] | None = None,
 ) -> TailoredScoreComponents:
     """Compute the custom validation monitor from classification metrics."""
@@ -92,9 +121,13 @@ def tailored_score_components(
         pred_rate_down = float(confusion[:, down_id].sum() / total)
         pred_rate_up = float(confusion[:, up_id].sum() / total)
     rate_penalty = abs(pred_rate_down - true_rate_down) + abs(pred_rate_up - true_rate_up)
-    score = float(metrics.directional_macro_f1) - float(lambda_ece) * ece_dir - float(lambda_rate) * rate_penalty
+    base_name = str(base_metric).strip().lower()
+    base_value = tailored_base_value(metrics, base_name)
+    score = base_value - float(lambda_ece) * ece_dir - float(lambda_rate) * rate_penalty
     return TailoredScoreComponents(
         score=score,
+        base_metric=base_name,
+        base_value=base_value,
         ece_dir=ece_dir,
         rate_penalty=float(rate_penalty),
         pred_rate_down=pred_rate_down,
@@ -115,6 +148,7 @@ def tailored_score_from_params(
         metrics,
         lambda_ece=_param_value(monitor_params, "lambda_ece"),
         lambda_rate=_param_value(monitor_params, "lambda_rate"),
+        base_metric=_param_string(monitor_params, "base_metric", "val_directional_macro_f1"),
         label_mapping=label_mapping,
     )
 

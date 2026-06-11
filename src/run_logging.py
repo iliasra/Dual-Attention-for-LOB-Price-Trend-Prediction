@@ -287,6 +287,7 @@ def save_run_config_snapshot(
                 "early_stopping_patience": config.training.early_stopping_patience,
                 "early_stopping_warmup": config.training.early_stopping_warmup,
                 "params": {
+                    "base_metric": config.training.monitor_params.base_metric,
                     "lambda_ece": config.training.monitor_params.lambda_ece,
                     "lambda_rate": config.training.monitor_params.lambda_rate,
                 },
@@ -299,6 +300,7 @@ def save_run_config_snapshot(
             "directional_thresholds": {
                 "enabled": config.training.directional_thresholds.enabled,
                 "method": config.training.directional_thresholds.method,
+                "score": config.training.directional_thresholds.score,
                 "min": config.training.directional_thresholds.min_threshold,
                 "max": config.training.directional_thresholds.max_threshold,
                 "step": config.training.directional_thresholds.step,
@@ -341,6 +343,8 @@ def _tailored_metric_values(metrics: Any, config: ExperimentConfig, prefix: str)
     """Return tailored monitor audit fields for one split."""
     keys = (
         "tailored_score",
+        "tailored_base_metric",
+        "tailored_base_value",
         "tailored_ece_dir",
         "tailored_rate_penalty",
         "pred_rate_down",
@@ -359,10 +363,10 @@ def _tailored_metric_values(metrics: Any, config: ExperimentConfig, prefix: str)
         )
     except ValueError:
         return empty
-    return {
-        key: f"{float(value):.10g}"
-        for key, value in components.prefixed(prefix).items()
-    }
+    result: dict[str, str] = {}
+    for key, value in components.prefixed(prefix).items():
+        result[key] = value if isinstance(value, str) else f"{float(value):.10g}"
+    return result
 
 
 def _directional_prediction_rate_values(
@@ -591,6 +595,8 @@ def _epoch_fieldnames(config: ExperimentConfig) -> list[str]:
             fieldnames.extend(
                 [
                     "val_tailored_score",
+                    "val_tailored_base_metric",
+                    "val_tailored_base_value",
                     "val_tailored_ece_dir",
                     "val_tailored_rate_penalty",
                     "val_pred_rate_down",
@@ -927,6 +933,7 @@ def _write_best_epoch_summary(
     handle.write(f"monitor: {config.training.monitor}\n")
     handle.write(f"monitor_mode: {config.training.monitor_mode}\n")
     if config.training.monitor_params.complete:
+        handle.write(f"monitor_base_metric: {config.training.monitor_params.base_metric}\n")
         handle.write(f"monitor_lambda_ece: {config.training.monitor_params.lambda_ece:.10g}\n")
         handle.write(f"monitor_lambda_rate: {config.training.monitor_params.lambda_rate:.10g}\n")
     handle.write(f"monitor_value: {best_monitor_value:.10g}\n")
@@ -940,7 +947,10 @@ def _write_best_epoch_summary(
             label_mapping=config.data.label_mapping,
         )
         for key, value in components.prefixed("val").items():
-            handle.write(f"{key}: {value:.10g}\n")
+            if isinstance(value, str):
+                handle.write(f"{key}: {value}\n")
+            else:
+                handle.write(f"{key}: {value:.10g}\n")
     handle.write(f"epoch: {best_index}\n")
     handle.write(f"train_loss: {best_result.train_loss:.10g}\n")
     handle.write(f"val_loss: {best_result.val_loss:.10g}\n")
@@ -1065,6 +1075,7 @@ def save_run_log(
         handle.write(f"early_stopping_patience: {config.training.early_stopping_patience}\n")
         handle.write(f"early_stopping_warmup: {config.training.early_stopping_warmup}\n")
         if config.training.monitor_params.complete:
+            handle.write(f"monitor_base_metric: {config.training.monitor_params.base_metric}\n")
             handle.write(f"monitor_lambda_ece: {config.training.monitor_params.lambda_ece:.10g}\n")
             handle.write(f"monitor_lambda_rate: {config.training.monitor_params.lambda_rate:.10g}\n")
         handle.write("\nTemperature scaling\n")
@@ -1119,6 +1130,7 @@ def save_run_log(
                 "down_enabled",
                 "up_enabled",
                 "method",
+                "configured_score",
                 "score",
                 "rate_penalty",
                 "min_directional_precision",

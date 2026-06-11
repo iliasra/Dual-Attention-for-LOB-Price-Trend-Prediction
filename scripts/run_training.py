@@ -438,10 +438,11 @@ def fit_and_apply_directional_thresholds(
             up_id=up_id,
             refinement_steps=applied_refinement_steps,
             delta=threshold_config.delta,
+            score=threshold_config.score,
         )
-        selection_metric = "directional_macro_f1"
+        selection_metric = threshold_config.score
         tie_break_order = [
-            "maximize_directional_macro_f1",
+            f"maximize_{threshold_config.score}",
             "minimize_directional_rate_penalty",
             "maximize_min_down_up_precision",
             "maximize_thresholds",
@@ -459,6 +460,7 @@ def fit_and_apply_directional_thresholds(
             neutral_id=neutral_id,
             up_id=up_id,
             delta=threshold_config.delta,
+            score=threshold_config.score,
         )
         selection_metric = "per_class_precision_floor_then_recall"
         tie_break_order = [
@@ -478,6 +480,7 @@ def fit_and_apply_directional_thresholds(
             neutral_id=neutral_id,
             up_id=up_id,
             delta=threshold_config.delta,
+            score=threshold_config.score,
         )
         selection_metric = "top_probability_quantile"
         tie_break_order = [
@@ -545,6 +548,7 @@ def fit_and_apply_directional_thresholds(
         "enabled": True,
         "classification_mode": "directional_thresholds",
         "method": threshold_config.method,
+        "configured_score": threshold_config.score,
         "decision_scope": (
             "Validation/test decision metrics, saved pred_label values, and confusion matrices use thresholded "
             "decisions. PR/ROC/AP remain probability-ranking metrics computed from softmax scores."
@@ -975,7 +979,8 @@ def train_fold(
             f"method={directional_threshold_summary['method']}, "
             f"down={format_optional_threshold(directional_threshold_summary['threshold_down'])}, "
             f"up={format_optional_threshold(directional_threshold_summary['threshold_up'])}, "
-            f"val_threshold_directional_macro_f1={directional_threshold_summary['score']:.4f}."
+            f"val_threshold_{directional_threshold_summary['configured_score']}="
+            f"{directional_threshold_summary['score']:.4f}."
         )
     save_probability_outputs(validation_outputs_for_artifacts, validation_probabilities_path, config)
     if test_outputs_for_artifacts is not None and test_probabilities_path is not None:

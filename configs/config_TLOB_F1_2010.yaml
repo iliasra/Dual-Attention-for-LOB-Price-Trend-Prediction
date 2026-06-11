@@ -170,6 +170,7 @@ training:
   directional_thresholds:
     enabled: false
     method: joint_up_down # allowed: joint_up_down, precision_floor, top_x_quantile
+    score: directional_macro_f1 # allowed: directional_macro_f1, macro_f1; optimization score for joint_up_down
     min: 0.05 # lower bound for candidate probability thresholds
     max: 0.95 # upper bound for candidate probability thresholds
     step: 0.05 # coarse grid step; joint_up_down also refines around the best region

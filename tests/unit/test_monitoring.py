@@ -47,6 +47,25 @@ def test_tailored_score_uses_directional_ece_and_class_rates() -> None:
     assert components.score == pytest.approx(expected_score)
 
 
+def test_tailored_score_can_use_macro_f1_as_base_metric() -> None:
+    components = tailored_score_components(
+        _metrics(),
+        lambda_ece=0.5,
+        lambda_rate=0.25,
+        base_metric="val_macro_f1",
+        label_mapping={-1: 0, 0: 1, 1: 2},
+    )
+
+    total = 40
+    expected_ece_dir = (0.2 + 0.4) / 2.0
+    expected_rate_penalty = abs((6 + 1 + 3) / total - 10 / total) + abs((2 + 4 + 5) / total - 10 / total)
+    expected_score = 0.4 - 0.5 * expected_ece_dir - 0.25 * expected_rate_penalty
+
+    assert components.base_metric == "val_macro_f1"
+    assert components.base_value == pytest.approx(0.4)
+    assert components.score == pytest.approx(expected_score)
+
+
 def test_tailored_score_requires_down_and_up_classes() -> None:
     with pytest.raises(ValueError, match="raw labels -1 and 1"):
         directional_class_ids({-1: 0, 0: 1}, num_classes=3)

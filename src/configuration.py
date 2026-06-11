@@ -178,6 +178,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "monitor": None,
         "monitor_mode": None,
         "monitor_params": {
+            "base_metric": None,
             "lambda_ece": None,
             "lambda_rate": None,
         },
@@ -200,6 +201,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "directional_thresholds": {
             "enabled": None,
             "method": None,
+            "score": None,
             "min": None,
             "max": None,
             "step": None,
@@ -227,6 +229,7 @@ OPTIONAL_CONFIG_KEYS = {
     "model.use_moe",
     "model.classifier_pooling",
     "training.monitor_params",
+    "training.monitor_params.base_metric",
     "preprocessing.save_processed_dataframes",
     "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
     "preprocessing.sample_clock",
@@ -246,6 +249,7 @@ OPTIONAL_CONFIG_KEYS = {
     "training.directional_thresholds",
     "training.directional_thresholds.enabled",
     "training.directional_thresholds.method",
+    "training.directional_thresholds.score",
     "training.directional_thresholds.min",
     "training.directional_thresholds.max",
     "training.directional_thresholds.step",
@@ -1452,11 +1456,20 @@ class TrainingSamplingConfig:
 
 @dataclass(slots=True)
 class TrainingMonitorParamsConfig:
+    base_metric: str = "val_directional_macro_f1"
     lambda_ece: float | None = None
     lambda_rate: float | None = None
 
     def __post_init__(self) -> None:
         """Check optional custom monitor parameters."""
+        if self.base_metric is None:
+            self.base_metric = "val_directional_macro_f1"
+        self.base_metric = str(self.base_metric).strip().lower()
+        if self.base_metric not in {"val_macro_f1", "val_directional_macro_f1"}:
+            raise ValueError(
+                "training.monitor_params.base_metric must be 'val_macro_f1' "
+                "or 'val_directional_macro_f1'."
+            )
         if self.lambda_ece is not None and self.lambda_ece < 0.0:
             raise ValueError("training.monitor_params.lambda_ece must be >= 0.")
         if self.lambda_rate is not None and self.lambda_rate < 0.0:
@@ -1473,6 +1486,7 @@ class TrainingMonitorParamsConfig:
         if payload is None:
             return cls()
         return cls(
+            base_metric=payload.get("base_metric", "val_directional_macro_f1"),
             lambda_ece=_optional_float(payload.get("lambda_ece")),
             lambda_rate=_optional_float(payload.get("lambda_rate")),
         )
@@ -1482,6 +1496,7 @@ class TrainingMonitorParamsConfig:
 class TrainingDirectionalThresholdConfig:
     enabled: bool = False
     method: str = "joint_up_down"
+    score: str = "directional_macro_f1"
     min_threshold: float = 0.05
     max_threshold: float = 0.95
     step: float = 0.05
@@ -1498,6 +1513,12 @@ class TrainingDirectionalThresholdConfig:
             raise ValueError(
                 "training.directional_thresholds.method must be 'joint_up_down', "
                 "'precision_floor', or 'top_x_quantile'."
+            )
+        self.score = self.score.lower()
+        if self.score not in {"macro_f1", "directional_macro_f1"}:
+            raise ValueError(
+                "training.directional_thresholds.score must be 'macro_f1' "
+                "or 'directional_macro_f1'."
             )
         if not 0.0 <= self.min_threshold <= 1.0:
             raise ValueError("training.directional_thresholds.min must be in [0, 1].")
@@ -1549,6 +1570,7 @@ class TrainingDirectionalThresholdConfig:
         return cls(
             enabled=bool(payload.get("enabled", False)),
             method=str(payload.get("method", defaults.method)),
+            score=str(payload.get("score", defaults.score)),
             min_threshold=float(payload.get("min", defaults.min_threshold)),
             max_threshold=float(payload.get("max", defaults.max_threshold)),
             step=float(payload.get("step", defaults.step)),

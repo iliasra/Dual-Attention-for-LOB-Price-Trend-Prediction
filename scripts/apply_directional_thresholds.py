@@ -187,6 +187,7 @@ def fit_thresholds(
                 up_id=up_id,
                 refinement_steps=refinements,
                 delta=threshold_config.delta,
+                score=threshold_config.score,
             ),
             refinements,
         )
@@ -203,6 +204,7 @@ def fit_thresholds(
                 neutral_id=neutral_id,
                 up_id=up_id,
                 delta=threshold_config.delta,
+                score=threshold_config.score,
             ),
             (),
         )
@@ -217,6 +219,7 @@ def fit_thresholds(
                 neutral_id=neutral_id,
                 up_id=up_id,
                 delta=threshold_config.delta,
+                score=threshold_config.score,
             ),
             (),
         )
@@ -307,7 +310,7 @@ def threshold_artifact(
         "selection_split": "validation",
         "selection_file": str(validation_file),
         "selection_metric": (
-            "directional_macro_f1"
+            threshold_config.score
             if threshold_config.method == "joint_up_down"
             else (
                 "per_class_precision_floor_then_recall"
@@ -316,6 +319,7 @@ def threshold_artifact(
             )
         ),
         "method": threshold_config.method,
+        "configured_score": threshold_config.score,
         "threshold_down": selection.threshold_down,
         "threshold_up": selection.threshold_up,
         "down_enabled": selection.down_enabled,

@@ -146,12 +146,14 @@ def directional_macro_f1_from_predictions(
     return float((down_f1 + up_f1) / 2.0)
 
 
-def _directional_selection_metrics(
+def _selection_metrics(
     targets: np.ndarray,
     predictions: np.ndarray,
     *,
     down_id: int,
+    neutral_id: int,
     up_id: int,
+    score: str = "directional_macro_f1",
 ) -> tuple[float, float, float]:
     """Return threshold selection score and tie-breaker metrics."""
     target_array = np.asarray(targets, dtype=np.int64).reshape(-1)
@@ -159,7 +161,15 @@ def _directional_selection_metrics(
     if target_array.shape[0] != prediction_array.shape[0]:
         raise ValueError("targets and predictions must have the same length.")
 
+    score_name = str(score).strip().lower()
+    if score_name not in {"macro_f1", "directional_macro_f1"}:
+        raise ValueError("threshold score must be 'macro_f1' or 'directional_macro_f1'.")
     down_precision, _down_recall, down_f1 = _precision_recall_f1(target_array, prediction_array, int(down_id))
+    _neutral_precision, _neutral_recall, neutral_f1 = _precision_recall_f1(
+        target_array,
+        prediction_array,
+        int(neutral_id),
+    )
     up_precision, _up_recall, up_f1 = _precision_recall_f1(target_array, prediction_array, int(up_id))
     denominator = max(int(target_array.shape[0]), 1)
     pred_rate_down = float(np.sum(prediction_array == down_id) / denominator)
@@ -167,7 +177,11 @@ def _directional_selection_metrics(
     true_rate_down = float(np.sum(target_array == down_id) / denominator)
     true_rate_up = float(np.sum(target_array == up_id) / denominator)
     rate_penalty = abs(pred_rate_down - true_rate_down) + abs(pred_rate_up - true_rate_up)
-    return float((down_f1 + up_f1) / 2.0), float(rate_penalty), float(min(down_precision, up_precision))
+    if score_name == "macro_f1":
+        selection_score = float((down_f1 + neutral_f1 + up_f1) / 3.0)
+    else:
+        selection_score = float((down_f1 + up_f1) / 2.0)
+    return selection_score, float(rate_penalty), float(min(down_precision, up_precision))
 
 
 def _threshold_key(selection: DirectionalThresholdSelection) -> tuple[float, float, float]:
@@ -213,6 +227,7 @@ def _select_best_on_grid(
     neutral_id: int,
     up_id: int,
     delta: float = 0.0,
+    score: str = "directional_macro_f1",
 ) -> DirectionalThresholdSelection:
     """Search one down/up grid and return its best threshold pair."""
     best: DirectionalThresholdSelection | None = None
@@ -228,16 +243,18 @@ def _select_best_on_grid(
                 up_id=up_id,
                 delta=delta,
             )
-            score, rate_penalty, min_directional_precision = _directional_selection_metrics(
+            selection_score, rate_penalty, min_directional_precision = _selection_metrics(
                 targets,
                 predictions,
                 down_id=down_id,
+                neutral_id=neutral_id,
                 up_id=up_id,
+                score=score,
             )
             candidate = DirectionalThresholdSelection(
                 threshold_down=float(threshold_down),
                 threshold_up=float(threshold_up),
-                score=float(score),
+                score=float(selection_score),
                 rate_penalty=float(rate_penalty),
                 min_directional_precision=float(min_directional_precision),
                 n_candidates=n_candidates,
@@ -289,6 +306,7 @@ def optimize_directional_thresholds(
     up_id: int,
     refinement_steps: tuple[float, ...] = (),
     delta: float = 0.0,
+    score: str = "directional_macro_f1",
 ) -> DirectionalThresholdSelection:
     """Select thresholds using F1, rate, precision, then high-threshold tie-breaks."""
     if delta < 0.0:
@@ -315,6 +333,7 @@ def optimize_directional_thresholds(
         neutral_id=neutral_id,
         up_id=up_id,
         delta=delta,
+        score=score,
     )
     stage_summaries = [
         _stage_summary(
@@ -355,6 +374,7 @@ def optimize_directional_thresholds(
             neutral_id=neutral_id,
             up_id=up_id,
             delta=delta,
+            score=score,
         )
         total_candidates += int(stage_best.n_candidates)
         if _is_better_selection(stage_best, best):
@@ -480,6 +500,7 @@ def optimize_precision_floor_thresholds(
     neutral_id: int,
     up_id: int,
     delta: float = 0.0,
+    score: str = "directional_macro_f1",
 ) -> DirectionalThresholdSelection:
     """Select independent down/up thresholds under precision floors."""
     probs = np.asarray(probabilities, dtype=np.float32)
@@ -517,16 +538,18 @@ def optimize_precision_floor_thresholds(
         down_enabled=bool(down_selection["enabled"]),
         up_enabled=bool(up_selection["enabled"]),
     )
-    score, rate_penalty, min_directional_precision = _directional_selection_metrics(
+    selection_score, rate_penalty, min_directional_precision = _selection_metrics(
         target_array,
         predictions,
         down_id=down_id,
+        neutral_id=neutral_id,
         up_id=up_id,
+        score=score,
     )
     return DirectionalThresholdSelection(
         threshold_down=down_selection["threshold"],
         threshold_up=up_selection["threshold"],
-        score=score,
+        score=selection_score,
         rate_penalty=rate_penalty,
         min_directional_precision=min_directional_precision,
         n_candidates=int(len(down_candidates) + len(up_candidates)),
@@ -575,6 +598,7 @@ def optimize_top_quantile_thresholds(
     neutral_id: int,
     up_id: int,
     delta: float = 0.0,
+    score: str = "directional_macro_f1",
 ) -> DirectionalThresholdSelection:
     """Select down/up thresholds from top probability quantiles."""
     probs = np.asarray(probabilities, dtype=np.float32)
@@ -600,16 +624,18 @@ def optimize_top_quantile_thresholds(
         up_id=up_id,
         delta=delta,
     )
-    score, rate_penalty, min_directional_precision = _directional_selection_metrics(
+    selection_score, rate_penalty, min_directional_precision = _selection_metrics(
         target_array,
         predictions,
         down_id=down_id,
+        neutral_id=neutral_id,
         up_id=up_id,
+        score=score,
     )
     return DirectionalThresholdSelection(
         threshold_down=down_selection["threshold"],
         threshold_up=up_selection["threshold"],
-        score=score,
+        score=selection_score,
         rate_penalty=rate_penalty,
         min_directional_precision=min_directional_precision,
         n_candidates=2,
