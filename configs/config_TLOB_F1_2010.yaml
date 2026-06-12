@@ -154,7 +154,7 @@ training:
   monitor_mode: max # allowed: min, max; tailored_score requires max
   monitor_params:
     base_metric: val_macro_f1 # used only with tailored_score; allowed: val_macro_f1, val_directional_macro_f1
-    lambda_ece: null
+    lambda_ece: 0.0
     lambda_rate: 0.1
   persistent_workers: true
   optimizer: adamw

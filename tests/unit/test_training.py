@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 import shutil
 
@@ -91,6 +92,63 @@ def test_lob_trainer_does_not_check_early_stopping_during_warmup(
     assert len(history) == 4
     assert [result.val_loss for result in history] == [1.0, 1.1, 1.2, 1.3]
     assert config.best_model_path.exists()
+
+
+def test_run_epoch_raises_on_non_finite_logits(artifact_dir: Path) -> None:
+    config = load_config().training
+    config.device = "cpu"
+    config.use_amp = False
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+
+    class NonFiniteLogitModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(()))
+
+        def forward(self, x_batch: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
+            logits = torch.zeros((x_batch.shape[0], 3), dtype=x_batch.dtype, device=x_batch.device)
+            logits[0, 0] = float("nan")
+            return logits + self.weight * 0.0
+
+    model = NonFiniteLogitModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    loader = [
+        (
+            torch.zeros((2, 3, 2), dtype=torch.float32),
+            torch.zeros((2, 3), dtype=torch.float32),
+            torch.tensor([0, 1], dtype=torch.long),
+        )
+    ]
+
+    with pytest.raises(FloatingPointError, match="Non-finite logits"):
+        trainer._run_epoch(
+            model,
+            loader,
+            nn.CrossEntropyLoss(),
+            optimizer,
+            description="BadTrain",
+        )
+
+
+def test_lob_trainer_uses_bf16_amp_when_cuda_supports_it(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config().training
+    config.device = "cuda"
+    config.use_amp = True
+    config.model_dir = str(artifact_dir)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device", lambda _index: contextlib.nullcontext())
+
+    trainer = LobTrainer(config)
+
+    assert trainer.amp_enabled is True
+    assert trainer.amp_dtype is torch.bfloat16
+    assert trainer.scaler.is_enabled() is False
 
 
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
@@ -366,6 +424,29 @@ def test_directional_macro_f1_averages_down_and_up_only() -> None:
     up_f1 = metrics.per_class_f1[2]
     assert metrics.directional_macro_f1 == pytest.approx((down_f1 + up_f1) / 2.0)
     assert metrics.directional_macro_f1 != pytest.approx(metrics.macro_f1)
+
+
+def test_metric_accumulator_skips_non_finite_logits_and_invalid_targets() -> None:
+    accumulator = ClassificationMetricAccumulator(device=torch.device("cpu"))
+    logits = torch.tensor(
+        [
+            [4.0, 0.0, 0.0],
+            [float("nan"), 0.0, 0.0],
+            [0.0, float("inf"), 0.0],
+            [0.0, 0.0, 4.0],
+            [0.0, 4.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    targets = torch.tensor([0, 1, 1, 2, 3])
+
+    accumulator.update(logits, targets)
+    metrics = accumulator.compute()
+
+    confusion = np.asarray(metrics.confusion_matrix)
+    assert confusion.sum() == 2
+    assert confusion[0, 0] == 1
+    assert confusion[2, 2] == 1
 
 
 def test_per_class_ece_uses_one_vs_rest_probabilities() -> None:

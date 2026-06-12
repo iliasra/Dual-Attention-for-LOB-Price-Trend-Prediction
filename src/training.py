@@ -552,26 +552,39 @@ class ClassificationMetricAccumulator:
         ):
             raise RuntimeError("Calibration metric accumulator was not initialized.")
 
-        probabilities = torch.softmax(logits.detach().float(), dim=-1)
-        confidences, predictions = torch.max(probabilities, dim=-1)
-        targets = targets.detach()
-        valid_mask = (
-            (targets >= 0)
-            & (targets < self.num_classes)
-            & (predictions >= 0)
-            & (predictions < self.num_classes)
-        )
-        if not bool(valid_mask.any()):
+        logits = logits.detach().float()
+        targets = targets.detach().reshape(-1)
+        if logits.ndim != 2:
+            logits = logits.reshape(-1, logits.shape[-1])
+        if logits.shape[0] != targets.shape[0]:
+            raise ValueError("logits and targets have inconsistent row counts.")
+
+        finite_logits_mask = torch.isfinite(logits).all(dim=-1)
+        valid_target_mask = (targets >= 0) & (targets < self.num_classes)
+        valid_sample_mask = finite_logits_mask & valid_target_mask
+        if not bool(valid_sample_mask.any()):
             return
 
-        flat_indices = targets[valid_mask] * self.num_classes + predictions[valid_mask]
-        counts = torch.bincount(flat_indices, minlength=self.num_classes * self.num_classes)
+        logits = logits[valid_sample_mask]
+        targets = targets[valid_sample_mask].long()
+        probabilities = torch.softmax(logits, dim=-1)
+        finite_prob_mask = torch.isfinite(probabilities).all(dim=-1)
+        if not bool(finite_prob_mask.any()):
+            return
+
+        probabilities = probabilities[finite_prob_mask]
+        targets = targets[finite_prob_mask]
+        confidences, predictions = torch.max(probabilities, dim=-1)
+
+        flat_indices = targets * self.num_classes + predictions
+        counts = torch.bincount(flat_indices.long(), minlength=self.num_classes * self.num_classes)
         self.confusion_matrix += counts.reshape(self.num_classes, self.num_classes)
 
-        valid_confidences = confidences[valid_mask].to(torch.float64)
-        correctness = (predictions[valid_mask] == targets[valid_mask]).to(torch.float64)
+        valid_confidences = confidences.to(torch.float64)
+        correctness = (predictions == targets).to(torch.float64)
         bin_indices = torch.clamp(
             (valid_confidences * self.num_calibration_bins).long(),
+            min=0,
             max=self.num_calibration_bins - 1,
         )
         self.calibration_bin_counts += torch.bincount(
@@ -589,14 +602,15 @@ class ClassificationMetricAccumulator:
             minlength=self.num_calibration_bins,
         )
 
-        valid_probabilities = probabilities[valid_mask]
-        valid_targets = targets[valid_mask].long()
+        valid_probabilities = probabilities
+        valid_targets = targets
         if self.track_pr_metrics:
             self.pr_probability_chunks.append(valid_probabilities.detach().cpu().numpy().astype(np.float32, copy=False))
             self.pr_target_chunks.append(valid_targets.detach().cpu().numpy())
         valid_probabilities = valid_probabilities.to(torch.float64)
         class_bin_indices = torch.clamp(
             (valid_probabilities * self.num_calibration_bins).long(),
+            min=0,
             max=self.num_calibration_bins - 1,
         )
         for class_id in range(self.num_classes):
@@ -799,7 +813,32 @@ class LobTrainer:
         self.config = config or load_config().training
         self.device = torch.device(self.config.device)
         self.amp_enabled = self.config.use_amp and self.device.type == "cuda"
-        self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=self.amp_enabled)
+        self.amp_dtype = torch.bfloat16 if self.amp_enabled and self._cuda_supports_bf16(self.device) else None
+        self.scaler = torch.amp.GradScaler(
+            device=self.device.type,
+            enabled=self.amp_enabled and self.amp_dtype is None,
+        )
+        if self.amp_enabled:
+            amp_dtype_name = "bfloat16" if self.amp_dtype is torch.bfloat16 else "default"
+            print(
+                "AMP enabled: "
+                f"autocast_dtype={amp_dtype_name}, "
+                f"grad_scaler_enabled={self.scaler.is_enabled()}."
+            )
+
+    @staticmethod
+    def _cuda_supports_bf16(device: torch.device) -> bool:
+        """Return whether the selected CUDA device supports bf16 autocast."""
+        if device.type != "cuda" or not torch.cuda.is_available():
+            return False
+        if hasattr(torch.cuda, "is_bf16_supported"):
+            try:
+                device_index = torch.cuda.current_device() if device.index is None else int(device.index)
+                with torch.cuda.device(device_index):
+                    return bool(torch.cuda.is_bf16_supported())
+            except (AssertionError, RuntimeError):
+                return False
+        return False
 
     def _criterion(self) -> FocalLoss:
         alpha = None
@@ -808,7 +847,9 @@ class LobTrainer:
         return FocalLoss(alpha=alpha, gamma=self.config.focal_gamma).to(self.device)
 
     def _amp_context(self):
-        return torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled)
+        if self.amp_dtype is None:
+            return torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled)
+        return torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled, dtype=self.amp_dtype)
 
     @staticmethod
     def _set_epoch(data_loader: Iterable, epoch: int) -> None:
@@ -975,6 +1016,17 @@ class LobTrainer:
                 moe_loss = getattr(model, "moe_load_balancing_loss", None)  # load-balancing for MoE training
                 if moe_loss is not None:  # add MoE auxiliary loss only when the model exposes it
                     loss = loss + moe_loss
+
+            current_batch = batch_count + 1
+            if not bool(torch.isfinite(logits).all()):
+                finite_summary = logits.detach().float().nan_to_num()
+                raise FloatingPointError(
+                    f"Non-finite logits at batch {current_batch}: "
+                    f"logits min={finite_summary.min().item()}, "
+                    f"max={finite_summary.max().item()}"
+                )
+            if not bool(torch.isfinite(loss)):
+                raise FloatingPointError(f"Non-finite loss at batch {current_batch}: {loss.item()}")
 
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(optimizer)
