@@ -425,6 +425,7 @@ def fit_and_apply_directional_thresholds(
     )
     probabilities_validation = np.asarray(validation_outputs["probabilities"], dtype=np.float32)
     targets_validation = np.asarray(validation_outputs["targets"], dtype=np.int64)
+    monitor_params = config.training.monitor_params
     applied_refinement_steps: tuple[float, ...] = ()
     if threshold_config.method == "joint_up_down":
         applied_refinement_steps = refinement_steps
@@ -439,6 +440,7 @@ def fit_and_apply_directional_thresholds(
             refinement_steps=applied_refinement_steps,
             delta=threshold_config.delta,
             score=threshold_config.score,
+            monitor_params=monitor_params,
         )
         selection_metric = threshold_config.score
         tie_break_order = [
@@ -461,6 +463,7 @@ def fit_and_apply_directional_thresholds(
             up_id=up_id,
             delta=threshold_config.delta,
             score=threshold_config.score,
+            monitor_params=monitor_params,
         )
         selection_metric = "per_class_precision_floor_then_recall"
         tie_break_order = [
@@ -481,6 +484,7 @@ def fit_and_apply_directional_thresholds(
             up_id=up_id,
             delta=threshold_config.delta,
             score=threshold_config.score,
+            monitor_params=monitor_params,
         )
         selection_metric = "top_probability_quantile"
         tie_break_order = [
@@ -589,6 +593,8 @@ def fit_and_apply_directional_thresholds(
     }
     if threshold_config.method != "top_x_quantile":
         payload["min_directional_precision"] = float(selection.min_directional_precision)
+    if selection.score_details:
+        payload.update(selection.score_details)
     save_directional_threshold_artifact(payload, target_path)
     return payload, validation_metrics, test_metrics, validation_outputs_thresholded, test_outputs_thresholded
 

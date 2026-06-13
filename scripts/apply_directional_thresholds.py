@@ -174,6 +174,7 @@ def fit_thresholds(
         threshold_config.max_threshold,
         threshold_config.step,
     )
+    monitor_params = config.training.monitor_params
     if threshold_config.method == "joint_up_down":
         refinements = refinement_steps_from_config(threshold_config.step)
         return (
@@ -188,6 +189,7 @@ def fit_thresholds(
                 refinement_steps=refinements,
                 delta=threshold_config.delta,
                 score=threshold_config.score,
+                monitor_params=monitor_params,
             ),
             refinements,
         )
@@ -205,6 +207,7 @@ def fit_thresholds(
                 up_id=up_id,
                 delta=threshold_config.delta,
                 score=threshold_config.score,
+                monitor_params=monitor_params,
             ),
             (),
         )
@@ -220,6 +223,7 @@ def fit_thresholds(
                 up_id=up_id,
                 delta=threshold_config.delta,
                 score=threshold_config.score,
+                monitor_params=monitor_params,
             ),
             (),
         )
@@ -344,6 +348,8 @@ def threshold_artifact(
     }
     if threshold_config.method != "top_x_quantile":
         payload["min_directional_precision"] = selection.min_directional_precision
+    if selection.score_details:
+        payload.update(selection.score_details)
     return to_builtin(payload)
 
 

@@ -1,10 +1,10 @@
 seed: 42
 
 experiment:
-  name: INTC_TLOB_meanpct_2
+  name: TLOBSampling
 
 data:
-  raw_data_dir: ../data/INTC_TLOB/LOBSTER_TLOB
+  raw_data_dir: ../data/INTC_TLOB_2
   processed_data_dir: ../data/processed_dataframes
   sequence_data_dir: ../data/sequences
   logs_dir: ../logs
@@ -19,7 +19,7 @@ data:
   # NB: time/label col are automatically excluded as they are used
   # to generate specific .npy files for the model to use. 
   feature_exclude_columns: []
-  sequence_window: 64
+  sequence_window: 128
 
 # fallback only used when folds is empty
 dataset_splits:
@@ -42,7 +42,7 @@ folds:
 #    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08"]
 #    validation_dates: ["2024-03-11", "2024-03-12"]
 #    test_dates: []
-  - id: fold_INTC_TLOB
+  - id: fold_INTC_TLOB_2
     train_dates: ["2015-01-02", "2015-01-05", "2015-01-06", "2015-01-07", "2015-01-08", "2015-01-09", "2015-01-12", "2015-01-13", "2015-01-14", "2015-01-15", "2015-01-16", "2015-01-20", "2015-01-21", "2015-01-22", "2015-01-23", "2015-01-26", "2015-01-27"]
     validation_dates: ["2015-01-28"]
     test_dates: ["2015-01-29", "2015-01-30"]
@@ -88,8 +88,8 @@ preprocessing:
     keep_timestamp: true
     market_open_seconds: 34200 # 34200 = 9.30 am for NYSE opening
     market_close_seconds: 57600 # 57600 = 4 pm for NYSE closing
-    start_offset_minutes: 15
-    end_offset_minutes: 15
+    start_offset_minutes: 0
+    end_offset_minutes: 0
   normalization:
     derivatives_stats_dir: ../data/derivatives_z_scores
     scope: train_only # allowed: train_only (used for readiness only)
@@ -100,7 +100,7 @@ preprocessing:
     n_df_candidates: 25 # shared number of effective-df candidates explored by train GCV
     orderbook_top_k_levels: 5 # null = all levels; filters price/volume kinematic streams only
   sample_clock:
-    mode: volume # allowed: event, volume; event preserves one row per LOBSTER message
+    mode: event # allowed: event, volume; event preserves one row per LOBSTER message
     volume_step_shares: 500 # required positive value when mode=volume
     volume_source: traded # allowed: traded, message_size
     trade_type_values: [4, 5] # LOBSTER visible/hidden executions for traded-shares volume clock
@@ -153,18 +153,18 @@ model:
   feature_embed_dim: 32
   feature_num_frequencies: 8
   feature_sigma: 1.0
-  num_layers: 1
-  latent_spatial_embed_dim: null
+  num_layers: 3
+  latent_spatial_embed_dim: 16
   num_heads: 4
   # Quantile (0-100) of train sequence time spans used as temporal attention max_dt per fold.
   max_dt_quantile: 95.0
-  use_moe: false # false = replace the final MoE tail with a dense FNN
+  use_moe: true # false = replace the final MoE tail with a dense FNN
   # MoE-only router/expert selection parameters; ignored when use_moe=false.
   num_experts: 4
   top_k: 2
   num_classes: 3
   # allowed: rope, crope, hybrid_crope, hybrid-crope, hybrid
-  rope_type: crope
+  rope_type: hybrid_crope
   rope_base: 10000
   attention_dropout: 0.1
   moe_dropout: 0.1 # shared by dense FNN tails and MoE expert networks
@@ -185,12 +185,12 @@ training:
   early_stopping_patience: 5
   early_stopping_warmup: 3
   early_stopping_min_delta: 0.002
-  monitor: val_macro_f1 # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
+  monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
   monitor_mode: max # allowed: min, max; tailored_score requires max
   monitor_params:
-    base_metric: val_directional_macro_f1 # used only with tailored_score; allowed: val_macro_f1, val_directional_macro_f1
-    lambda_ece: null
-    lambda_rate: null
+    base_metric: val_macro_f1 # used by tailored_score monitor/thresholds; allowed: val_macro_f1, val_directional_macro_f1
+    lambda_ece: 0.0
+    lambda_rate: 0.1
   persistent_workers: true
   optimizer: adamw # allowed: adam, adamw
   learning_rate: 3.0e-5
@@ -209,11 +209,11 @@ training:
   directional_thresholds:
     enabled: true
     method: joint_up_down # allowed: joint_up_down, precision_floor, top_x_quantile
-    score: directional_macro_f1 # allowed: directional_macro_f1, macro_f1; optimization score for joint_up_down
+    score: tailored_score # allowed: directional_macro_f1, macro_f1, tailored_score; tailored_score uses training.monitor_params
     min: 0.1 # lower bound for candidate probability thresholds
     max: 0.95 # upper bound for candidate probability thresholds
     step: 0.05 # coarse grid step; joint_up_down also refines around the best region
-    delta: 0.25 # logit-margin gap required to break up/down ties; otherwise neutral
+    delta: 0.0 # logit-margin gap required to break up/down ties; otherwise neutral
     up_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
     down_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
     up_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores

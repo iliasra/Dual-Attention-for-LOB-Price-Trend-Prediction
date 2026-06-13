@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -20,10 +20,14 @@ class DirectionalThresholdSelection:
     up_enabled: bool = True
     stage_summaries: tuple[dict[str, Any], ...] = ()
     selection_details: dict[str, Any] = field(default_factory=dict)
+    score_details: dict[str, Any] = field(default_factory=dict)
 
 
 _TIE_TOLERANCE = 1e-12
 _PROBABILITY_EPS = 1e-7
+_SUPPORTED_SELECTION_SCORES = {"macro_f1", "directional_macro_f1", "tailored_score"}
+_TAILORED_BASE_METRICS = {"val_macro_f1", "val_directional_macro_f1"}
+_CALIBRATION_BINS = 15
 
 
 def threshold_candidates(min_threshold: float, max_threshold: float, step: float) -> np.ndarray:
@@ -146,6 +150,66 @@ def directional_macro_f1_from_predictions(
     return float((down_f1 + up_f1) / 2.0)
 
 
+def _monitor_param_value(params: Any, name: str) -> float:
+    if isinstance(params, Mapping):
+        value = params.get(name)
+    else:
+        value = getattr(params, name, None)
+    if value is None:
+        raise ValueError(f"tailored_score threshold score requires training.monitor_params.{name}.")
+    return float(value)
+
+
+def _monitor_param_string(params: Any, name: str, default: str) -> str:
+    if isinstance(params, Mapping):
+        value = params.get(name, default)
+    else:
+        value = getattr(params, name, default)
+    if value is None:
+        value = default
+    return str(value).strip().lower()
+
+
+def _per_class_expected_calibration_error(
+    probabilities: np.ndarray,
+    targets: np.ndarray,
+    *,
+    class_id: int,
+    num_bins: int = _CALIBRATION_BINS,
+) -> float:
+    scores = np.asarray(probabilities, dtype=np.float32)[:, int(class_id)]
+    positives = (np.asarray(targets, dtype=np.int64).reshape(-1) == int(class_id)).astype(np.float64)
+    if scores.shape[0] != positives.shape[0]:
+        raise ValueError("probabilities and targets must have the same number of rows.")
+    if scores.shape[0] == 0:
+        return 0.0
+    bin_indices = np.minimum((scores * int(num_bins)).astype(np.int64), int(num_bins) - 1)
+    counts = np.bincount(bin_indices, minlength=int(num_bins)).astype(np.float64)
+    confidence_sums = np.bincount(bin_indices, weights=scores.astype(np.float64), minlength=int(num_bins))
+    positive_sums = np.bincount(bin_indices, weights=positives, minlength=int(num_bins))
+    non_empty = counts > 0.0
+    bin_confidence = np.zeros(int(num_bins), dtype=np.float64)
+    bin_positive_rate = np.zeros(int(num_bins), dtype=np.float64)
+    bin_confidence[non_empty] = confidence_sums[non_empty] / counts[non_empty]
+    bin_positive_rate[non_empty] = positive_sums[non_empty] / counts[non_empty]
+    weights = counts / max(float(counts.sum()), 1.0)
+    return float(np.sum(weights * np.abs(bin_positive_rate - bin_confidence)))
+
+
+def _score_base_value(
+    *,
+    base_metric: str,
+    down_f1: float,
+    neutral_f1: float,
+    up_f1: float,
+) -> float:
+    if base_metric == "val_macro_f1":
+        return float((down_f1 + neutral_f1 + up_f1) / 3.0)
+    if base_metric == "val_directional_macro_f1":
+        return float((down_f1 + up_f1) / 2.0)
+    raise ValueError("tailored_score base_metric must be 'val_macro_f1' or 'val_directional_macro_f1'.")
+
+
 def _selection_metrics(
     targets: np.ndarray,
     predictions: np.ndarray,
@@ -154,7 +218,9 @@ def _selection_metrics(
     neutral_id: int,
     up_id: int,
     score: str = "directional_macro_f1",
-) -> tuple[float, float, float]:
+    probabilities: np.ndarray | None = None,
+    monitor_params: Any = None,
+) -> tuple[float, float, float, dict[str, Any]]:
     """Return threshold selection score and tie-breaker metrics."""
     target_array = np.asarray(targets, dtype=np.int64).reshape(-1)
     prediction_array = np.asarray(predictions, dtype=np.int64).reshape(-1)
@@ -162,8 +228,8 @@ def _selection_metrics(
         raise ValueError("targets and predictions must have the same length.")
 
     score_name = str(score).strip().lower()
-    if score_name not in {"macro_f1", "directional_macro_f1"}:
-        raise ValueError("threshold score must be 'macro_f1' or 'directional_macro_f1'.")
+    if score_name not in _SUPPORTED_SELECTION_SCORES:
+        raise ValueError("threshold score must be 'macro_f1', 'directional_macro_f1', or 'tailored_score'.")
     down_precision, _down_recall, down_f1 = _precision_recall_f1(target_array, prediction_array, int(down_id))
     _neutral_precision, _neutral_recall, neutral_f1 = _precision_recall_f1(
         target_array,
@@ -179,9 +245,55 @@ def _selection_metrics(
     rate_penalty = abs(pred_rate_down - true_rate_down) + abs(pred_rate_up - true_rate_up)
     if score_name == "macro_f1":
         selection_score = float((down_f1 + neutral_f1 + up_f1) / 3.0)
-    else:
+        score_details: dict[str, Any] = {}
+    elif score_name == "directional_macro_f1":
         selection_score = float((down_f1 + up_f1) / 2.0)
-    return selection_score, float(rate_penalty), float(min(down_precision, up_precision))
+        score_details = {}
+    else:
+        if probabilities is None:
+            raise ValueError("tailored_score threshold score requires probability scores.")
+        probability_array = np.asarray(probabilities, dtype=np.float32)
+        if probability_array.ndim != 2:
+            raise ValueError("probabilities must be a 2D array.")
+        if probability_array.shape[0] != target_array.shape[0]:
+            raise ValueError("probabilities and targets must have the same number of rows.")
+        max_id = max(int(down_id), int(neutral_id), int(up_id))
+        if probability_array.shape[1] <= max_id:
+            raise ValueError("probabilities has fewer columns than the requested class ids.")
+        base_metric = _monitor_param_string(monitor_params, "base_metric", "val_directional_macro_f1")
+        if base_metric not in _TAILORED_BASE_METRICS:
+            raise ValueError("training.monitor_params.base_metric must be 'val_macro_f1' or 'val_directional_macro_f1'.")
+        lambda_ece = _monitor_param_value(monitor_params, "lambda_ece")
+        lambda_rate = _monitor_param_value(monitor_params, "lambda_rate")
+        base_value = _score_base_value(
+            base_metric=base_metric,
+            down_f1=down_f1,
+            neutral_f1=neutral_f1,
+            up_f1=up_f1,
+        )
+        ece_down = _per_class_expected_calibration_error(
+            probability_array,
+            target_array,
+            class_id=int(down_id),
+        )
+        ece_up = _per_class_expected_calibration_error(
+            probability_array,
+            target_array,
+            class_id=int(up_id),
+        )
+        ece_dir = float((ece_down + ece_up) / 2.0)
+        selection_score = float(base_value - lambda_ece * ece_dir - lambda_rate * rate_penalty)
+        score_details = {
+            "tailored_base_metric": base_metric,
+            "tailored_base_value": float(base_value),
+            "tailored_ece_dir": float(ece_dir),
+            "tailored_ece_down": float(ece_down),
+            "tailored_ece_up": float(ece_up),
+            "tailored_rate_penalty": float(rate_penalty),
+            "tailored_lambda_ece": float(lambda_ece),
+            "tailored_lambda_rate": float(lambda_rate),
+        }
+    return selection_score, float(rate_penalty), float(min(down_precision, up_precision)), score_details
 
 
 def _threshold_key(selection: DirectionalThresholdSelection) -> tuple[float, float, float]:
@@ -228,6 +340,7 @@ def _select_best_on_grid(
     up_id: int,
     delta: float = 0.0,
     score: str = "directional_macro_f1",
+    monitor_params: Any = None,
 ) -> DirectionalThresholdSelection:
     """Search one down/up grid and return its best threshold pair."""
     best: DirectionalThresholdSelection | None = None
@@ -243,13 +356,15 @@ def _select_best_on_grid(
                 up_id=up_id,
                 delta=delta,
             )
-            selection_score, rate_penalty, min_directional_precision = _selection_metrics(
+            selection_score, rate_penalty, min_directional_precision, score_details = _selection_metrics(
                 targets,
                 predictions,
                 down_id=down_id,
                 neutral_id=neutral_id,
                 up_id=up_id,
                 score=score,
+                probabilities=probabilities,
+                monitor_params=monitor_params,
             )
             candidate = DirectionalThresholdSelection(
                 threshold_down=float(threshold_down),
@@ -258,6 +373,7 @@ def _select_best_on_grid(
                 rate_penalty=float(rate_penalty),
                 min_directional_precision=float(min_directional_precision),
                 n_candidates=n_candidates,
+                score_details=score_details,
             )
             if _is_better_selection(candidate, best):
                 best = candidate
@@ -275,7 +391,7 @@ def _stage_summary(
     best: DirectionalThresholdSelection,
 ) -> dict[str, Any]:
     """Return a compact summary for one threshold-search stage."""
-    return {
+    summary = {
         "stage": int(stage_index),
         "name": stage_name,
         "step_down": _inferred_grid_step(down_candidates),
@@ -293,6 +409,9 @@ def _stage_summary(
         "best_rate_penalty": float(best.rate_penalty),
         "best_min_directional_precision": float(best.min_directional_precision),
     }
+    if best.score_details:
+        summary.update(best.score_details)
+    return summary
 
 
 def optimize_directional_thresholds(
@@ -307,6 +426,7 @@ def optimize_directional_thresholds(
     refinement_steps: tuple[float, ...] = (),
     delta: float = 0.0,
     score: str = "directional_macro_f1",
+    monitor_params: Any = None,
 ) -> DirectionalThresholdSelection:
     """Select thresholds using F1, rate, precision, then high-threshold tie-breaks."""
     if delta < 0.0:
@@ -334,6 +454,7 @@ def optimize_directional_thresholds(
         up_id=up_id,
         delta=delta,
         score=score,
+        monitor_params=monitor_params,
     )
     stage_summaries = [
         _stage_summary(
@@ -375,6 +496,7 @@ def optimize_directional_thresholds(
             up_id=up_id,
             delta=delta,
             score=score,
+            monitor_params=monitor_params,
         )
         total_candidates += int(stage_best.n_candidates)
         if _is_better_selection(stage_best, best):
@@ -501,6 +623,7 @@ def optimize_precision_floor_thresholds(
     up_id: int,
     delta: float = 0.0,
     score: str = "directional_macro_f1",
+    monitor_params: Any = None,
 ) -> DirectionalThresholdSelection:
     """Select independent down/up thresholds under precision floors."""
     probs = np.asarray(probabilities, dtype=np.float32)
@@ -538,13 +661,15 @@ def optimize_precision_floor_thresholds(
         down_enabled=bool(down_selection["enabled"]),
         up_enabled=bool(up_selection["enabled"]),
     )
-    selection_score, rate_penalty, min_directional_precision = _selection_metrics(
+    selection_score, rate_penalty, min_directional_precision, score_details = _selection_metrics(
         target_array,
         predictions,
         down_id=down_id,
         neutral_id=neutral_id,
         up_id=up_id,
         score=score,
+        probabilities=probs,
+        monitor_params=monitor_params,
     )
     return DirectionalThresholdSelection(
         threshold_down=down_selection["threshold"],
@@ -555,6 +680,7 @@ def optimize_precision_floor_thresholds(
         n_candidates=int(len(down_candidates) + len(up_candidates)),
         down_enabled=bool(down_selection["enabled"]),
         up_enabled=bool(up_selection["enabled"]),
+        score_details=score_details,
         selection_details={
             "down": down_selection,
             "up": up_selection,
@@ -599,6 +725,7 @@ def optimize_top_quantile_thresholds(
     up_id: int,
     delta: float = 0.0,
     score: str = "directional_macro_f1",
+    monitor_params: Any = None,
 ) -> DirectionalThresholdSelection:
     """Select down/up thresholds from top probability quantiles."""
     probs = np.asarray(probabilities, dtype=np.float32)
@@ -624,13 +751,15 @@ def optimize_top_quantile_thresholds(
         up_id=up_id,
         delta=delta,
     )
-    selection_score, rate_penalty, min_directional_precision = _selection_metrics(
+    selection_score, rate_penalty, min_directional_precision, score_details = _selection_metrics(
         target_array,
         predictions,
         down_id=down_id,
         neutral_id=neutral_id,
         up_id=up_id,
         score=score,
+        probabilities=probs,
+        monitor_params=monitor_params,
     )
     return DirectionalThresholdSelection(
         threshold_down=down_selection["threshold"],
@@ -641,6 +770,7 @@ def optimize_top_quantile_thresholds(
         n_candidates=2,
         down_enabled=True,
         up_enabled=True,
+        score_details=score_details,
         selection_details={
             "down": down_selection,
             "up": up_selection,

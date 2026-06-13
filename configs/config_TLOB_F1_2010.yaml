@@ -153,7 +153,7 @@ training:
   monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
   monitor_mode: max # allowed: min, max; tailored_score requires max
   monitor_params:
-    base_metric: val_macro_f1 # used only with tailored_score; allowed: val_macro_f1, val_directional_macro_f1
+    base_metric: val_macro_f1 # used by tailored_score monitor/thresholds; allowed: val_macro_f1, val_directional_macro_f1
     lambda_ece: 0.0
     lambda_rate: 0.1
   persistent_workers: true
@@ -174,7 +174,7 @@ training:
   directional_thresholds:
     enabled: true
     method: joint_up_down # allowed: joint_up_down, precision_floor, top_x_quantile
-    score: macro_f1 # allowed: directional_macro_f1, macro_f1; optimization score for joint_up_down
+    score: tailored_score # allowed: directional_macro_f1, macro_f1, tailored_score; tailored_score uses training.monitor_params
     min: 0.05 # lower bound for candidate probability thresholds
     max: 0.95 # upper bound for candidate probability thresholds
     step: 0.05 # coarse grid step; joint_up_down also refines around the best region

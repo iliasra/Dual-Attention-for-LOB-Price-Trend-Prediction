@@ -1515,10 +1515,10 @@ class TrainingDirectionalThresholdConfig:
                 "'precision_floor', or 'top_x_quantile'."
             )
         self.score = self.score.lower()
-        if self.score not in {"macro_f1", "directional_macro_f1"}:
+        if self.score not in {"macro_f1", "directional_macro_f1", "tailored_score"}:
             raise ValueError(
-                "training.directional_thresholds.score must be 'macro_f1' "
-                "or 'directional_macro_f1'."
+                "training.directional_thresholds.score must be 'macro_f1', "
+                "'directional_macro_f1', or 'tailored_score'."
             )
         if not 0.0 <= self.min_threshold <= 1.0:
             raise ValueError("training.directional_thresholds.min must be in [0, 1].")
@@ -1668,6 +1668,15 @@ class TrainingConfig:
                     "training.monitor_params.lambda_ece and training.monitor_params.lambda_rate "
                     "must be set for tailored_score."
                 )
+        if (
+            self.directional_thresholds.enabled
+            and self.directional_thresholds.score == "tailored_score"
+            and not self.monitor_params.complete
+        ):
+            raise ValueError(
+                "training.monitor_params.lambda_ece and training.monitor_params.lambda_rate "
+                "must be set when training.directional_thresholds.score is tailored_score."
+            )
         if self.persistent_workers and self.num_workers == 0:
             raise ValueError("training.persistent_workers requires training.num_workers > 0.")
         if self.class_weight_beta < 0.0:
