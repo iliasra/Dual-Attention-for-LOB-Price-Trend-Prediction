@@ -16,6 +16,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from run_training import (
     build_train_sampler,
+    monitor_value_after_postprocessing,
+    select_checkpoint_after_validation_postprocessing,
     evaluate_best_model_on_validation_and_test_splits,
     fold_artifact_paths,
     resolve_class_weights,
@@ -24,7 +26,7 @@ from run_training import (
     train_fold,
 )
 from configuration import load_config
-from training import ClassificationMetrics, EpochResult, EvaluationResult
+from training import CheckpointCandidate, ClassificationMetrics, EpochResult, EvaluationResult
 
 
 @pytest.fixture()
@@ -182,6 +184,85 @@ def test_best_model_evaluation_can_skip_missing_test_split() -> None:
     assert evaluation["test_seconds"] is None
     assert evaluation["test_outputs"] is None
     assert history[0].test_loss is None
+
+
+def test_checkpoint_selection_can_prefer_postprocessed_monitor(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config()
+    config.training.monitor = "val_macro_f1"
+    config.training.monitor_mode = "max"
+    config.training.top_k_checkpoints = 2
+    checkpoint_1 = artifact_dir / "epoch_0001.pth"
+    checkpoint_2 = artifact_dir / "epoch_0002.pth"
+    checkpoint_1.write_bytes(b"candidate-1")
+    checkpoint_2.write_bytes(b"candidate-2")
+
+    class FakeTrainer:
+        top_checkpoint_candidates = [
+            CheckpointCandidate(epoch=1, monitor_value=0.9, path=checkpoint_1),
+            CheckpointCandidate(epoch=2, monitor_value=0.8, path=checkpoint_2),
+        ]
+
+    def fake_evaluate_candidate(**kwargs: object) -> dict[str, object]:
+        candidate = kwargs["candidate"]
+        assert isinstance(candidate, CheckpointCandidate)
+        postprocessed = 0.7 if candidate.epoch == 1 else 0.95
+        return {
+            "epoch": candidate.epoch,
+            "checkpoint_path": candidate.path,
+            "raw_monitor_value": candidate.monitor_value,
+            "postprocessed_monitor_value": postprocessed,
+            "validation_loss": 1.0,
+            "validation_metrics": _dummy_metrics(),
+            "validation_expert_usage": None,
+            "validation_outputs": {},
+            "postprocessed_validation_metrics": _dummy_metrics(),
+            "postprocessed_validation_outputs": {},
+            "validation_seconds": 0.01,
+            "postprocessing_seconds": 0.02,
+            "candidate_dir": kwargs["candidate_dir"],
+            "temperature_scaling": {"enabled": False},
+            "temperature_scaling_path": None,
+            "directional_thresholds": {"enabled": False},
+            "directional_thresholds_path": None,
+        }
+
+    monkeypatch.setattr("run_training.evaluate_checkpoint_candidate_on_validation", fake_evaluate_candidate)
+
+    selection = select_checkpoint_after_validation_postprocessing(
+        config=config,
+        trainer=FakeTrainer(),  # type: ignore[arg-type]
+        model=object(),
+        validation_loader=object(),  # type: ignore[arg-type]
+        history=[
+            EpochResult(train_loss=1.0, val_loss=1.0, val_metrics=_dummy_metrics()),
+            EpochResult(train_loss=1.0, val_loss=1.0, val_metrics=_dummy_metrics()),
+        ],
+        fold="fold_001",
+        selection_dir=artifact_dir / "checkpoint_selection",
+    )
+
+    assert selection["selected"]["epoch"] == 2
+    assert selection["summary"]["selected_epoch"] == 2
+    assert selection["summary"]["raw_monitor_value"] == pytest.approx(0.8)
+    assert selection["summary"]["postprocessed_monitor_value"] == pytest.approx(0.95)
+
+
+def test_checkpoint_selection_keeps_raw_validation_loss_monitor() -> None:
+    config = load_config()
+    config.training.monitor = "val_loss"
+    config.training.monitor_mode = "min"
+
+    value = monitor_value_after_postprocessing(
+        config=config,
+        raw_monitor_value=0.42,
+        val_loss=99.0,
+        val_metrics=_dummy_metrics(),
+    )
+
+    assert value == pytest.approx(0.42)
 
 
 def test_train_fold_rejects_missing_validation_sequences(

@@ -808,10 +808,18 @@ class EpochResult:
     test_expert_usage: dict[str, Any] | None = None
 
 
+@dataclass(slots=True)
+class CheckpointCandidate:
+    epoch: int
+    monitor_value: float
+    path: Path
+
+
 class LobTrainer:
     def __init__(self, config: TrainingConfig | None = None) -> None:
         self.config = config or load_config().training
         self.device = torch.device(self.config.device)
+        self.top_checkpoint_candidates: list[CheckpointCandidate] = []
         self.amp_enabled = self.config.use_amp and self.device.type == "cuda"
         self.amp_dtype = torch.bfloat16 if self.amp_enabled and self._cuda_supports_bf16(self.device) else None
         self.scaler = torch.amp.GradScaler(
@@ -874,6 +882,38 @@ class LobTrainer:
             return value < best_value - min_delta
         return value > best_value + min_delta
 
+    def _rank_checkpoint_candidates(
+        self,
+        candidates: Iterable[CheckpointCandidate],
+    ) -> list[CheckpointCandidate]:
+        """Return checkpoint candidates sorted from best to worst."""
+        reverse_sign = -1.0 if self.config.monitor_mode == "max" else 1.0
+        return sorted(candidates, key=lambda item: (reverse_sign * float(item.monitor_value), int(item.epoch)))
+
+    def _save_top_checkpoint_candidate(
+        self,
+        model: nn.Module,
+        *,
+        epoch: int,
+        monitor_value: float,
+    ) -> None:
+        """Persist this epoch if it belongs to the configured top-k candidates."""
+        candidate = CheckpointCandidate(
+            epoch=int(epoch),
+            monitor_value=float(monitor_value),
+            path=self.config.checkpoint_path(epoch),
+        )
+        ranked = self._rank_checkpoint_candidates([*self.top_checkpoint_candidates, candidate])
+        kept = ranked[: self.config.top_k_checkpoints]
+        dropped = ranked[self.config.top_k_checkpoints :]
+        if any(item.epoch == candidate.epoch for item in kept):
+            candidate.path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), candidate.path)
+        for item in dropped:
+            if item.path.exists():
+                item.path.unlink()
+        self.top_checkpoint_candidates = kept
+
     def _optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         """Build the configured optimizer."""
         optimizer_name = self.config.optimizer.lower()
@@ -904,10 +944,12 @@ class LobTrainer:
         best_epoch = 0
         epochs_without_improvement = 0
         history: list[EpochResult] = []
+        self.top_checkpoint_candidates = []
 
         print(
             f"Starting training for {self.config.epochs} epoch(s) on {self.device}. "
             f"Monitoring {self.config.monitor} ({self.config.monitor_mode}); "
+            f"saving top_k_checkpoints={self.config.top_k_checkpoints}; "
             f"early stopping warmup={self.config.early_stopping_warmup} epoch(s), "
             f"min_delta={self.config.early_stopping_min_delta:.6g}; "
             f"optimizer={self.config.optimizer}."
@@ -943,6 +985,11 @@ class LobTrainer:
             )
 
             monitor_value = self._monitor_value(val_result)
+            self._save_top_checkpoint_candidate(
+                model,
+                epoch=epoch_number,
+                monitor_value=monitor_value,
+            )
             if self._is_improvement(monitor_value, best_monitor_value):
                 best_monitor_value = monitor_value
                 best_epoch = epoch_number

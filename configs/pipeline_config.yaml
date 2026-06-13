@@ -187,6 +187,7 @@ training:
   early_stopping_min_delta: 0.002
   monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
   monitor_mode: max # allowed: min, max; tailored_score requires max
+  top_k_checkpoints: 5 # keep the best k raw-monitor checkpoints, then select after calibration/thresholding
   monitor_params:
     base_metric: val_macro_f1 # used by tailored_score monitor/thresholds; allowed: val_macro_f1, val_directional_macro_f1
     lambda_ece: 0.0

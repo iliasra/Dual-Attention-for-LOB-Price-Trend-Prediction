@@ -152,6 +152,7 @@ training:
   early_stopping_min_delta: 0.0
   monitor: val_macro_f1
   monitor_mode: max
+  top_k_checkpoints: 5 # keep the best k raw-monitor checkpoints, then select after calibration/thresholding
   monitor_params:
     base_metric: val_macro_f1 # used by tailored_score thresholds; allowed: val_macro_f1, val_directional_macro_f1
     lambda_ece: 0.0

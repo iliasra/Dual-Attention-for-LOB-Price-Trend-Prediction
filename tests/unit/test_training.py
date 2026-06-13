@@ -225,6 +225,43 @@ def test_lob_trainer_fit_tracks_validation_ranking_metrics_without_outputs(
 
 
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_saves_only_configured_top_k_checkpoints(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config().training
+    config.epochs = 4
+    config.early_stopping_patience = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.top_k_checkpoints = 2
+    config.device = "cpu"
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_losses = iter([1.0, 0.8, 1.2, 0.7])
+
+    def fake_train_epoch(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=0.25, metrics=metrics)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        loss = next(validation_losses)
+        return EvaluationResult(loss=loss, metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_run_epoch", fake_train_epoch)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    trainer.fit(nn.Linear(1, 3), train_loader=[], val_loader=[])
+
+    assert [candidate.epoch for candidate in trainer.top_checkpoint_candidates] == [4, 2]
+    assert config.checkpoint_path(4).exists()
+    assert config.checkpoint_path(2).exists()
+    assert not config.checkpoint_path(1).exists()
+    assert not config.checkpoint_path(3).exists()
+    assert config.best_model_path.exists()
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
 def test_lob_trainer_sets_epoch_on_train_sampler(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,

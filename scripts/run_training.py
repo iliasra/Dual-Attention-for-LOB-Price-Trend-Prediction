@@ -7,8 +7,10 @@ from typing import Any
 import argparse
 import copy
 import os
+import shutil
 
 import numpy as np
+import torch
 from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +53,7 @@ from thresholding import (
     threshold_candidates,
 )
 from training import (
+    CheckpointCandidate,
     ClassificationMetrics,
     EpochResult,
     LobTrainer,
@@ -723,6 +726,302 @@ def evaluate_best_model_on_validation_and_test_splits(
     }
 
 
+def ranked_checkpoint_candidates(
+    config: ExperimentConfig,
+    trainer: LobTrainer,
+    history: list[EpochResult],
+) -> list[CheckpointCandidate]:
+    """Return saved candidate checkpoints sorted by raw validation monitor."""
+    candidates = list(getattr(trainer, "top_checkpoint_candidates", []))
+    if not candidates:
+        best_epoch, _best_history, best_monitor_value = best_epoch_from_history(config, history)
+        candidates = [
+            CheckpointCandidate(
+                epoch=best_epoch,
+                monitor_value=best_monitor_value,
+                path=config.training.best_model_path,
+            )
+        ]
+    missing = [str(candidate.path) for candidate in candidates if not candidate.path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Top-k checkpoint candidate file(s) are missing: {missing}")
+    reverse_sign = -1.0 if config.training.monitor_mode == "max" else 1.0
+    return sorted(candidates, key=lambda item: (reverse_sign * float(item.monitor_value), int(item.epoch)))
+
+
+def load_checkpoint_into_model(
+    *,
+    model: Any,
+    trainer: LobTrainer,
+    checkpoint_path: Path,
+) -> None:
+    """Load a candidate checkpoint into the shared model instance."""
+    state_dict = torch.load(checkpoint_path, map_location=trainer.device, weights_only=True)
+    model.load_state_dict(state_dict)
+
+
+def monitor_value_after_postprocessing(
+    *,
+    config: ExperimentConfig,
+    raw_monitor_value: float,
+    val_loss: float,
+    val_metrics: ClassificationMetrics,
+) -> float:
+    """Return the monitor used to select among postprocessed checkpoint candidates."""
+    if config.training.monitor == "val_loss":
+        return float(raw_monitor_value)
+    return epoch_monitor_value(
+        config,
+        EpochResult(
+            train_loss=0.0,
+            val_loss=float(val_loss),
+            val_metrics=val_metrics,
+        ),
+    )
+
+
+def compact_temperature_summary(summary: dict[str, Any], artifact_path: Path | None) -> dict[str, Any]:
+    """Return checkpoint-selection fields for a temperature scaling candidate."""
+    payload = {
+        "enabled": bool(summary.get("enabled", False)),
+        "class_bias_calibration": bool(summary.get("class_bias_calibration", False)),
+    }
+    if artifact_path is not None and payload["enabled"]:
+        payload["artifact"] = str(artifact_path)
+    for key in (
+        "method",
+        "temperature",
+        "class_bias_sum",
+        "validation_nll_before",
+        "validation_nll_after",
+        "fit_seconds",
+        "fit_duration",
+    ):
+        if key in summary:
+            payload[key] = summary[key]
+    return payload
+
+
+def compact_directional_threshold_summary(summary: dict[str, Any], artifact_path: Path | None) -> dict[str, Any]:
+    """Return checkpoint-selection fields for a directional threshold candidate."""
+    payload = {"enabled": bool(summary.get("enabled", False))}
+    if artifact_path is not None and payload["enabled"]:
+        payload["artifact"] = str(artifact_path)
+    for key in (
+        "method",
+        "configured_score",
+        "score",
+        "threshold_down",
+        "threshold_up",
+        "down_enabled",
+        "up_enabled",
+        "rate_penalty",
+        "tailored_base_metric",
+        "tailored_base_value",
+        "tailored_ece_dir",
+        "tailored_rate_penalty",
+        "tailored_lambda_ece",
+        "tailored_lambda_rate",
+        "min_directional_precision",
+        "n_candidates",
+    ):
+        if key in summary:
+            payload[key] = summary[key]
+    return payload
+
+
+def evaluate_checkpoint_candidate_on_validation(
+    *,
+    config: ExperimentConfig,
+    trainer: LobTrainer,
+    model: Any,
+    validation_loader: DataLoader,
+    candidate: CheckpointCandidate,
+    fold: str,
+    candidate_dir: Path,
+) -> dict[str, Any]:
+    """Evaluate and postprocess one checkpoint candidate on validation only."""
+    load_checkpoint_into_model(model=model, trainer=trainer, checkpoint_path=candidate.path)
+    validation_start = perf_counter()
+    validation_result = trainer.evaluate(
+        model=model,
+        data_loader=validation_loader,
+        description=f"Candidate epoch {candidate.epoch} [Validation selection]",
+        collect_outputs=True,
+        track_pr_metrics=True,
+        track_expert_usage=True,
+    )
+    validation_seconds = perf_counter() - validation_start
+    if validation_result.prediction_outputs is None:
+        raise RuntimeError("Checkpoint candidate validation evaluation did not collect probability outputs.")
+
+    validation_outputs = validation_result.prediction_outputs
+    validation_metrics = validation_result.metrics
+    temperature_scaling_summary: dict[str, Any] = {
+        "enabled": bool(config.training.temperature_scaling.enabled),
+        "class_bias_calibration": bool(config.training.temperature_scaling.class_bias_calibration),
+    }
+    temperature_path = candidate_dir / "temperature_scaling.yaml"
+    directional_threshold_summary: dict[str, Any] = {
+        "enabled": bool(config.training.directional_thresholds.enabled),
+    }
+    thresholds_path = candidate_dir / "directional_thresholds.yaml"
+
+    postprocess_start = perf_counter()
+    if config.training.temperature_scaling.enabled:
+        (
+            temperature_scaling_summary,
+            validation_metrics,
+            _test_calibrated_metrics,
+            validation_outputs,
+            _test_outputs,
+        ) = fit_and_apply_temperature_scaling(
+            config=config,
+            validation_outputs=validation_outputs,
+            test_outputs=None,
+            best_epoch=int(candidate.epoch),
+            fold=fold,
+            target_path=temperature_path,
+        )
+    if config.training.directional_thresholds.enabled:
+        (
+            directional_threshold_summary,
+            validation_metrics,
+            _test_threshold_metrics,
+            validation_outputs,
+            _test_outputs,
+        ) = fit_and_apply_directional_thresholds(
+            config=config,
+            validation_outputs=validation_outputs,
+            test_outputs=None,
+            best_epoch=int(candidate.epoch),
+            fold=fold,
+            target_path=thresholds_path,
+        )
+    postprocess_seconds = perf_counter() - postprocess_start
+    postprocessed_monitor_value = monitor_value_after_postprocessing(
+        config=config,
+        raw_monitor_value=float(candidate.monitor_value),
+        val_loss=validation_result.loss,
+        val_metrics=validation_metrics,
+    )
+    return {
+        "epoch": int(candidate.epoch),
+        "checkpoint_path": candidate.path,
+        "raw_monitor_value": float(candidate.monitor_value),
+        "postprocessed_monitor_value": float(postprocessed_monitor_value),
+        "validation_loss": float(validation_result.loss),
+        "validation_metrics": validation_result.metrics,
+        "validation_expert_usage": validation_result.expert_usage,
+        "validation_outputs": validation_result.prediction_outputs,
+        "postprocessed_validation_metrics": validation_metrics,
+        "postprocessed_validation_outputs": validation_outputs,
+        "validation_seconds": validation_seconds,
+        "postprocessing_seconds": postprocess_seconds,
+        "candidate_dir": candidate_dir,
+        "temperature_scaling": temperature_scaling_summary,
+        "temperature_scaling_path": temperature_path if temperature_scaling_summary.get("enabled") else None,
+        "directional_thresholds": directional_threshold_summary,
+        "directional_thresholds_path": thresholds_path if directional_threshold_summary.get("enabled") else None,
+    }
+
+
+def checkpoint_selection_sort_key(config: ExperimentConfig, candidate: dict[str, Any]) -> tuple[float, float, int]:
+    """Sort postprocessed checkpoint candidates from best to worst."""
+    reverse_sign = -1.0 if config.training.monitor_mode == "max" else 1.0
+    return (
+        reverse_sign * float(candidate["postprocessed_monitor_value"]),
+        reverse_sign * float(candidate["raw_monitor_value"]),
+        int(candidate["epoch"]),
+    )
+
+
+def checkpoint_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Return a YAML-friendly checkpoint candidate summary."""
+    temperature_path = candidate.get("temperature_scaling_path")
+    thresholds_path = candidate.get("directional_thresholds_path")
+    return {
+        "epoch": int(candidate["epoch"]),
+        "checkpoint_path": str(candidate["checkpoint_path"]),
+        "candidate_dir": str(candidate["candidate_dir"]),
+        "raw_monitor_value": float(candidate["raw_monitor_value"]),
+        "postprocessed_monitor_value": float(candidate["postprocessed_monitor_value"]),
+        "validation_loss": float(candidate["validation_loss"]),
+        "validation_seconds": round(float(candidate["validation_seconds"]), 6),
+        "postprocessing_seconds": round(float(candidate["postprocessing_seconds"]), 6),
+        "temperature_scaling": compact_temperature_summary(
+            candidate["temperature_scaling"],
+            None if temperature_path is None else Path(temperature_path),
+        ),
+        "directional_thresholds": compact_directional_threshold_summary(
+            candidate["directional_thresholds"],
+            None if thresholds_path is None else Path(thresholds_path),
+        ),
+    }
+
+
+def select_checkpoint_after_validation_postprocessing(
+    *,
+    config: ExperimentConfig,
+    trainer: LobTrainer,
+    model: Any,
+    validation_loader: DataLoader,
+    history: list[EpochResult],
+    fold: str,
+    selection_dir: Path,
+) -> dict[str, Any]:
+    """Select the final checkpoint from top-k candidates after validation postprocessing."""
+    selection_start = perf_counter()
+    candidates = ranked_checkpoint_candidates(config, trainer, history)
+    selection_dir.mkdir(parents=True, exist_ok=True)
+    evaluated_candidates = [
+        evaluate_checkpoint_candidate_on_validation(
+            config=config,
+            trainer=trainer,
+            model=model,
+            validation_loader=validation_loader,
+            candidate=candidate,
+            fold=fold,
+            candidate_dir=selection_dir / f"epoch_{candidate.epoch:04d}",
+        )
+        for candidate in candidates
+    ]
+    selected = sorted(evaluated_candidates, key=lambda item: checkpoint_selection_sort_key(config, item))[0]
+    total_seconds = perf_counter() - selection_start
+    summary = {
+        "enabled": True,
+        "top_k": int(config.training.top_k_checkpoints),
+        "monitor": config.training.monitor,
+        "monitor_mode": config.training.monitor_mode,
+        "selection_split": "validation",
+        "tie_break_order": [
+            "best_postprocessed_monitor",
+            "best_raw_monitor",
+            "earliest_epoch",
+        ],
+        "selected_epoch": int(selected["epoch"]),
+        "selected_checkpoint_path": str(selected["checkpoint_path"]),
+        "raw_monitor_value": float(selected["raw_monitor_value"]),
+        "postprocessed_monitor_value": float(selected["postprocessed_monitor_value"]),
+        "n_candidates": len(evaluated_candidates),
+        "selection_seconds": round(total_seconds, 6),
+        "selection_duration": format_duration(total_seconds),
+        "candidates": [checkpoint_candidate_summary(candidate) for candidate in evaluated_candidates],
+    }
+    print(
+        f"Selected checkpoint epoch {selected['epoch']} after validation postprocessing: "
+        f"raw_{config.training.monitor}={selected['raw_monitor_value']:.6f}, "
+        f"postprocessed_{config.training.monitor}={selected['postprocessed_monitor_value']:.6f} "
+        f"from {len(evaluated_candidates)} candidate(s)."
+    )
+    return {
+        "selected": selected,
+        "candidates": evaluated_candidates,
+        "summary": summary,
+        "selection_seconds": total_seconds,
+    }
+
+
 def fold_artifact_paths(
     *,
     sequence_dir: Path,
@@ -767,6 +1066,8 @@ def train_fold(
     run_pr_thresholds_path = fold_log_dir / "pr_thresholds.yaml"
     run_directional_thresholds_path = fold_log_dir / "directional_thresholds.yaml"
     run_temperature_scaling_path = fold_log_dir / "temperature_scaling.yaml"
+    run_checkpoint_selection_path = fold_log_dir / "checkpoint_selection.yaml"
+    run_checkpoint_selection_dir = fold_log_dir / "checkpoint_selection"
     run_pr_curves_dir = fold_log_dir / "pr_curves"
     run_probabilities_dir = fold_log_dir / "probabilities"
     config.training.model_dir = str(fold_result_dir)
@@ -907,31 +1208,114 @@ def train_fold(
     fit_start = perf_counter()
     model, history = trainer.fit(model, train_loader, validation_loader)
     fit_duration_seconds = perf_counter() - fit_start
-    best_evaluation = evaluate_best_model_on_validation_and_test_splits(
+    checkpoint_selection = select_checkpoint_after_validation_postprocessing(
         trainer=trainer,
         config=config,
         model=model,
         validation_loader=validation_loader,
-        test_loader=test_loader,
         history=history,
+        fold=fold_id,
+        selection_dir=run_checkpoint_selection_dir,
     )
-    best_epoch = int(best_evaluation["best_epoch"])
+    checkpoint_selection_summary = checkpoint_selection["summary"]
+    save_run_summary(checkpoint_selection_summary, run_checkpoint_selection_path)
+    selected_candidate = checkpoint_selection["selected"]
+    best_epoch = int(selected_candidate["epoch"])
+    best_history = history[best_epoch - 1]
+    best_history.val_loss = float(selected_candidate["validation_loss"])
+    best_history.val_metrics = selected_candidate["validation_metrics"]
+    best_history.val_expert_usage = selected_candidate["validation_expert_usage"]
+    validation_outputs_for_artifacts = selected_candidate["validation_outputs"]
+
+    selected_checkpoint_path = Path(selected_candidate["checkpoint_path"])
+    best_model_path = config.training.best_model_path
+    best_model_path.parent.mkdir(parents=True, exist_ok=True)
+    if selected_checkpoint_path.resolve() != best_model_path.resolve():
+        shutil.copy2(selected_checkpoint_path, best_model_path)
+    load_checkpoint_into_model(model=model, trainer=trainer, checkpoint_path=best_model_path)
+
+    validation_metrics = best_history.val_metrics
+    if validation_metrics is None:
+        raise RuntimeError("Selected checkpoint validation metrics are unavailable.")
+    print(
+        f"Selected epoch {best_epoch} validation evaluation: "
+        f"val_loss={best_history.val_loss:.6f}, "
+        f"val_acc={validation_metrics.accuracy:.4f}, "
+        f"val_macro_f1={validation_metrics.macro_f1:.4f}, "
+        f"val_directional_macro_f1={validation_metrics.directional_macro_f1:.4f}, "
+        f"val_ece={validation_metrics.expected_calibration_error:.4f}, "
+        f"{roc_auc_summary(config, validation_metrics, 'val')}, "
+        f"{pr_auc_summary(config, validation_metrics, 'val')}, "
+        f"{pr_ap_summary(config, validation_metrics, 'val')}."
+    )
+
+    test_duration_seconds: float | None = None
+    test_outputs_for_artifacts = None
+    if test_loader is None:
+        best_history.test_loss = None
+        best_history.test_metrics = None
+        best_history.test_expert_usage = None
+        print(f"Selected epoch {best_epoch} test evaluation skipped: fold has no configured test split.")
+    else:
+        test_start = perf_counter()
+        test_result = trainer.evaluate(
+            model=model,
+            data_loader=test_loader,
+            description=f"Selected epoch {best_epoch} [Test]",
+            collect_outputs=True,
+            track_pr_metrics=True,
+            track_expert_usage=True,
+        )
+        test_duration_seconds = perf_counter() - test_start
+        best_history.test_loss = test_result.loss
+        best_history.test_metrics = test_result.metrics
+        best_history.test_expert_usage = test_result.expert_usage
+        test_outputs_for_artifacts = test_result.prediction_outputs
+        test_ece_down = mapped_class_metric(
+            config,
+            test_result.metrics,
+            -1,
+            "per_class_expected_calibration_error",
+        )
+        test_ece_neutral = mapped_class_metric(
+            config,
+            test_result.metrics,
+            0,
+            "per_class_expected_calibration_error",
+        )
+        test_ece_up = mapped_class_metric(
+            config,
+            test_result.metrics,
+            1,
+            "per_class_expected_calibration_error",
+        )
+        print(
+            f"Selected epoch {best_epoch} test evaluation: "
+            f"test_loss={test_result.loss:.6f}, "
+            f"test_acc={test_result.metrics.accuracy:.4f}, "
+            f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
+            f"test_directional_macro_f1={test_result.metrics.directional_macro_f1:.4f}, "
+            f"test_ece={test_result.metrics.expected_calibration_error:.4f}, "
+            f"test_ece_down={format_optional_metric(test_ece_down)}, "
+            f"test_ece_neutral={format_optional_metric(test_ece_neutral)}, "
+            f"test_ece_up={format_optional_metric(test_ece_up)}, "
+            f"{roc_auc_summary(config, test_result.metrics, 'test')}, "
+            f"{pr_auc_summary(config, test_result.metrics, 'test')}, "
+            f"{pr_ap_summary(config, test_result.metrics, 'test')} "
+            f"({format_duration(test_duration_seconds)})."
+        )
+
     validation_probabilities_path = run_probabilities_dir / f"validation_best_epoch_{best_epoch}.csv"
     test_probabilities_path = (
         run_probabilities_dir / f"test_best_epoch_{best_epoch}.csv"
-        if best_evaluation["test_outputs"] is not None
+        if test_outputs_for_artifacts is not None
         else None
     )
-    if best_evaluation["validation_outputs"] is None:
-        raise RuntimeError("Best model validation evaluation did not collect probability outputs.")
-    validation_outputs_for_artifacts = best_evaluation["validation_outputs"]
-    test_outputs_for_artifacts = best_evaluation["test_outputs"]
     temperature_scaling_summary: dict[str, Any] = {
         "enabled": bool(config.training.temperature_scaling.enabled),
         "class_bias_calibration": bool(config.training.temperature_scaling.class_bias_calibration),
     }
     if config.training.temperature_scaling.enabled:
-        best_history = history[best_epoch - 1]
         (
             temperature_scaling_summary,
             val_calibrated_metrics,
@@ -959,7 +1343,6 @@ def train_fold(
         "enabled": bool(config.training.directional_thresholds.enabled),
     }
     if config.training.directional_thresholds.enabled:
-        best_history = history[best_epoch - 1]
         best_history.val_argmax_metrics = best_history.val_metrics
         best_history.test_argmax_metrics = best_history.test_metrics
         (
@@ -999,22 +1382,57 @@ def train_fold(
         best_epoch=best_epoch,
         fold=fold_id,
     )
+    final_postprocessed_monitor_value = monitor_value_after_postprocessing(
+        config=config,
+        raw_monitor_value=float(selected_candidate["raw_monitor_value"]),
+        val_loss=float(best_history.val_loss),
+        val_metrics=best_history.val_metrics,
+    )
+    selected_candidate["postprocessed_monitor_value"] = float(final_postprocessed_monitor_value)
+    checkpoint_selection_summary["postprocessed_monitor_value"] = float(final_postprocessed_monitor_value)
+    for candidate_summary in checkpoint_selection_summary.get("candidates", []):
+        if int(candidate_summary.get("epoch", -1)) == best_epoch:
+            candidate_summary["selected"] = True
+            candidate_summary["final_postprocessed_monitor_value"] = float(final_postprocessed_monitor_value)
+        else:
+            candidate_summary["selected"] = False
+    checkpoint_selection_summary["final_artifacts"] = {
+        "best_model_path": str(config.training.best_model_path),
+        "temperature_scaling": (
+            str(run_temperature_scaling_path) if temperature_scaling_summary.get("enabled") else None
+        ),
+        "directional_thresholds": (
+            str(run_directional_thresholds_path) if directional_threshold_summary.get("enabled") else None
+        ),
+        "validation_probabilities": str(validation_probabilities_path),
+        "test_probabilities": None if test_probabilities_path is None else str(test_probabilities_path),
+        "pr_thresholds": str(run_pr_thresholds_path),
+        "pr_curves_dir": str(run_pr_curves_dir),
+    }
+    save_run_summary(checkpoint_selection_summary, run_checkpoint_selection_path)
     fold_duration_seconds = perf_counter() - fold_start
     timing = {
         "fold_training_seconds": round(fold_duration_seconds, 6),
         "fold_training_duration": format_duration(fold_duration_seconds),
         "model_fit_seconds": round(fit_duration_seconds, 6),
         "model_fit_duration": format_duration(fit_duration_seconds),
-        "best_validation_evaluation_seconds": round(best_evaluation["validation_seconds"], 6),
-        "best_validation_evaluation_duration": format_duration(best_evaluation["validation_seconds"]),
+        "checkpoint_selection_seconds": round(float(checkpoint_selection["selection_seconds"]), 6),
+        "checkpoint_selection_duration": format_duration(float(checkpoint_selection["selection_seconds"])),
+        "best_validation_evaluation_seconds": round(float(selected_candidate["validation_seconds"]), 6),
+        "best_validation_evaluation_duration": format_duration(float(selected_candidate["validation_seconds"])),
         "test_evaluation_seconds": (
-            None if best_evaluation["test_seconds"] is None else round(best_evaluation["test_seconds"], 6)
+            None if test_duration_seconds is None else round(test_duration_seconds, 6)
         ),
         "test_evaluation_duration": (
-            "skipped" if best_evaluation["test_seconds"] is None else format_duration(best_evaluation["test_seconds"])
+            "skipped" if test_duration_seconds is None else format_duration(test_duration_seconds)
         ),
-        "best_model_evaluation_seconds": round(best_evaluation["total_seconds"], 6),
-        "best_model_evaluation_duration": format_duration(best_evaluation["total_seconds"]),
+        "best_model_evaluation_seconds": round(
+            float(selected_candidate["validation_seconds"]) + (test_duration_seconds or 0.0),
+            6,
+        ),
+        "best_model_evaluation_duration": format_duration(
+            float(selected_candidate["validation_seconds"]) + (test_duration_seconds or 0.0)
+        ),
     }
     if temperature_scaling_summary.get("enabled"):
         timing["temperature_scaling_fit_seconds"] = temperature_scaling_summary.get("fit_seconds")
@@ -1047,7 +1465,11 @@ def train_fold(
         ),
         directional_threshold_summary=directional_threshold_summary,
         selected_best_epoch=best_epoch,
-        selected_monitor_value=float(best_evaluation["best_monitor_value"]),
+        selected_monitor_value=float(selected_candidate["postprocessed_monitor_value"]),
+        selected_raw_monitor_value=float(selected_candidate["raw_monitor_value"]),
+        selected_postprocessed_monitor_value=float(selected_candidate["postprocessed_monitor_value"]),
+        checkpoint_selection_path=run_checkpoint_selection_path,
+        checkpoint_selection_summary=checkpoint_selection_summary,
         preprocessing_metadata=preprocessing_metadata,
         sampling_summary=sampling_summary,
         timing=timing,
@@ -1060,6 +1482,7 @@ def train_fold(
         f"Best model saved to: {config.training.best_model_path}"
     )
     print(f"Fold {fold_id} run log saved to: {run_log_path}")
+    print(f"Fold {fold_id} checkpoint selection saved to: {run_checkpoint_selection_path}")
     print(f"Fold {fold_id} PR thresholds saved to: {run_pr_thresholds_path}")
     if temperature_scaling_summary.get("enabled"):
         print(f"Fold {fold_id} temperature scaling saved to: {run_temperature_scaling_path}")
@@ -1125,6 +1548,7 @@ def train_fold(
             "confusion_matrices": str(run_confusion_matrices_path),
             "expert_usage": str(run_expert_usage_path),
             "pr_thresholds": str(run_pr_thresholds_path),
+            "checkpoint_selection": str(run_checkpoint_selection_path),
             "temperature_scaling": (
                 str(run_temperature_scaling_path) if temperature_scaling_summary.get("enabled") else None
             ),
@@ -1136,6 +1560,7 @@ def train_fold(
             "test_probabilities": None if test_probabilities_path is None else str(test_probabilities_path),
         },
         "pr_artifacts": pr_artifacts,
+        "checkpoint_selection": checkpoint_selection_summary,
         "temperature_scaling": temperature_scaling_summary,
         "directional_thresholds": directional_threshold_summary,
     }

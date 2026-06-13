@@ -284,6 +284,7 @@ def save_run_config_snapshot(
             "monitor": {
                 "name": config.training.monitor,
                 "mode": config.training.monitor_mode,
+                "top_k_checkpoints": config.training.top_k_checkpoints,
                 "early_stopping_patience": config.training.early_stopping_patience,
                 "early_stopping_warmup": config.training.early_stopping_warmup,
                 "params": {
@@ -907,6 +908,8 @@ def _write_best_epoch_summary(
     *,
     selected_epoch: int | None = None,
     selected_monitor_value: float | None = None,
+    selected_raw_monitor_value: float | None = None,
+    selected_postprocessed_monitor_value: float | None = None,
 ) -> None:
     handle.write("\nBest epoch\n")
     if not history:
@@ -936,10 +939,17 @@ def _write_best_epoch_summary(
         handle.write(f"monitor_base_metric: {config.training.monitor_params.base_metric}\n")
         handle.write(f"monitor_lambda_ece: {config.training.monitor_params.lambda_ece:.10g}\n")
         handle.write(f"monitor_lambda_rate: {config.training.monitor_params.lambda_rate:.10g}\n")
+    if selected_raw_monitor_value is not None:
+        handle.write(f"raw_monitor_value: {float(selected_raw_monitor_value):.10g}\n")
+    if selected_postprocessed_monitor_value is not None:
+        handle.write(f"postprocessed_monitor_value: {float(selected_postprocessed_monitor_value):.10g}\n")
     handle.write(f"monitor_value: {best_monitor_value:.10g}\n")
-    monitor_metrics = getattr(best_result, "val_argmax_metrics", None) or getattr(best_result, "val_metrics", None)
+    monitor_metrics = getattr(best_result, "val_metrics", None)
     if getattr(best_result, "val_argmax_metrics", None) is not None:
-        handle.write("monitor_metric_source: validation_argmax_before_thresholding\n")
+        handle.write("monitor_metric_source: validation_postprocessed_after_thresholding\n")
+        handle.write("raw_monitor_metric_source: validation_argmax_before_thresholding\n")
+    else:
+        handle.write("monitor_metric_source: validation\n")
     if config.training.monitor == "tailored_score" and monitor_metrics is not None:
         components = tailored_score_from_params(
             monitor_metrics,
@@ -1025,6 +1035,10 @@ def save_run_log(
     directional_threshold_summary: dict[str, Any] | None = None,
     selected_best_epoch: int | None = None,
     selected_monitor_value: float | None = None,
+    selected_raw_monitor_value: float | None = None,
+    selected_postprocessed_monitor_value: float | None = None,
+    checkpoint_selection_path: Path | None = None,
+    checkpoint_selection_summary: dict[str, Any] | None = None,
     preprocessing_metadata: dict[str, Any] | None = None,
     sampling_summary: dict[str, Any] | None = None,
     timing: dict[str, Any] | None = None,
@@ -1052,6 +1066,8 @@ def save_run_log(
             handle.write(f"Temperature scaling: {temperature_scaling_path}\n")
         if directional_thresholds_path is not None:
             handle.write(f"Directional thresholds: {directional_thresholds_path}\n")
+        if checkpoint_selection_path is not None:
+            handle.write(f"Checkpoint selection: {checkpoint_selection_path}\n")
         handle.write(f"Model directory: {config.training.model_dir}\n")
         handle.write(f"Best model path: {config.training.best_model_path}\n")
         if timing:
@@ -1072,6 +1088,7 @@ def save_run_log(
         handle.write("\nTraining monitor\n")
         handle.write(f"monitor: {config.training.monitor}\n")
         handle.write(f"monitor_mode: {config.training.monitor_mode}\n")
+        handle.write(f"top_k_checkpoints: {config.training.top_k_checkpoints}\n")
         handle.write(f"early_stopping_patience: {config.training.early_stopping_patience}\n")
         handle.write(f"early_stopping_warmup: {config.training.early_stopping_warmup}\n")
         if config.training.monitor_params.complete:
@@ -1163,8 +1180,30 @@ def save_run_log(
             details = threshold_summary.get("selection_details")
             if isinstance(details, dict) and details:
                 handle.write(f"selection_details: {details}\n")
-            if directional_thresholds_path is not None:
-                handle.write(f"artifact: {directional_thresholds_path}\n")
+        if directional_thresholds_path is not None:
+            handle.write(f"artifact: {directional_thresholds_path}\n")
+        handle.write("\nCheckpoint selection\n")
+        selection_summary = checkpoint_selection_summary or {"enabled": False}
+        handle.write(f"enabled: {selection_summary.get('enabled', False)}\n")
+        if selection_summary.get("enabled"):
+            for key in (
+                "top_k",
+                "monitor",
+                "monitor_mode",
+                "selected_epoch",
+                "raw_monitor_value",
+                "postprocessed_monitor_value",
+                "n_candidates",
+                "selection_split",
+                "tie_break_order",
+            ):
+                if key in selection_summary:
+                    handle.write(f"{key}: {selection_summary[key]}\n")
+            if checkpoint_selection_path is not None:
+                handle.write(f"artifact: {checkpoint_selection_path}\n")
+            final_artifacts = selection_summary.get("final_artifacts")
+            if isinstance(final_artifacts, dict):
+                handle.write(f"final_artifacts: {final_artifacts}\n")
         handle.write("\nTraining sampling\n")
         _write_sampling_summary(handle, sampling_summary or {"enabled": False})
         handle.write("\nModel parameters\n")
@@ -1187,6 +1226,8 @@ def save_run_log(
             config,
             selected_epoch=selected_best_epoch,
             selected_monitor_value=selected_monitor_value,
+            selected_raw_monitor_value=selected_raw_monitor_value,
+            selected_postprocessed_monitor_value=selected_postprocessed_monitor_value,
         )
 
         handle.write("\nEpoch history\n")

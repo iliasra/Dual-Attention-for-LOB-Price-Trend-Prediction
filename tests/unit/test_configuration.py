@@ -1190,6 +1190,38 @@ def test_directional_threshold_tailored_score_requires_monitor_params(artifact_d
         ExperimentConfig.from_yaml(config_path)
 
 
+def test_training_top_k_checkpoints_defaults_to_one_and_validates(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"].pop("top_k_checkpoints", None)
+
+    config_path = artifact_dir / "top_k_default.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.top_k_checkpoints == 1
+
+    payload["training"]["top_k_checkpoints"] = 0
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="top_k_checkpoints"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    [
+        Path("configs/pipeline_config.yaml"),
+        Path("configs/config_TLOB_F1_2010.yaml"),
+        Path("configs/config_TLOB_F1_2010_2.yaml"),
+    ],
+)
+def test_active_configs_use_top_five_checkpoints(config_path: Path) -> None:
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.top_k_checkpoints == 5
+
+
 def test_directional_threshold_config_validates_methods_and_floors(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))

@@ -177,6 +177,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "early_stopping_min_delta": None,
         "monitor": None,
         "monitor_mode": None,
+        "top_k_checkpoints": None,
         "monitor_params": {
             "base_metric": None,
             "lambda_ece": None,
@@ -230,6 +231,7 @@ OPTIONAL_CONFIG_KEYS = {
     "model.classifier_pooling",
     "training.monitor_params",
     "training.monitor_params.base_metric",
+    "training.top_k_checkpoints",
     "preprocessing.save_processed_dataframes",
     "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
     "preprocessing.sample_clock",
@@ -1617,6 +1619,7 @@ class TrainingConfig:
     monitor: str
     monitor_mode: str
     monitor_params: TrainingMonitorParamsConfig
+    top_k_checkpoints: int
     persistent_workers: bool
     optimizer: str
     learning_rate: float
@@ -1660,6 +1663,8 @@ class TrainingConfig:
             )
         if self.monitor_mode not in {"min", "max"}:
             raise ValueError("training.monitor_mode must be 'min' or 'max'.")
+        if self.top_k_checkpoints <= 0:
+            raise ValueError("training.top_k_checkpoints must be > 0.")
         if self.monitor == "tailored_score":
             if self.monitor_mode != "max":
                 raise ValueError("training.monitor_mode must be 'max' when training.monitor is tailored_score.")
@@ -1704,6 +1709,15 @@ class TrainingConfig:
         """
         return Path(self.model_dir) / BEST_MODEL_FILENAME
 
+    @property
+    def checkpoint_dir(self) -> Path:
+        """Directory where top-k candidate checkpoints are stored."""
+        return Path(self.model_dir) / "checkpoints"
+
+    def checkpoint_path(self, epoch: int) -> Path:
+        """Return the candidate checkpoint path for an epoch."""
+        return self.checkpoint_dir / f"epoch_{int(epoch):04d}.pth"
+
     def data_loader_kwargs(self) -> dict[str, bool | int]:
         """Return PyTorch data-loader worker and memory options.
 
@@ -1731,6 +1745,7 @@ class TrainingConfig:
             monitor=str(payload["monitor"]),
             monitor_mode=str(payload["monitor_mode"]),
             monitor_params=TrainingMonitorParamsConfig.from_dict(payload.get("monitor_params")),
+            top_k_checkpoints=int(payload.get("top_k_checkpoints", 1)),
             persistent_workers=bool(payload["persistent_workers"]),
             optimizer=str(payload.get("optimizer", "adamw")),
             learning_rate=float(payload["learning_rate"]),
