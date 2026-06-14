@@ -968,6 +968,7 @@ class LobTrainer:
         best_monitor_value = float("inf") if self.config.monitor_mode == "min" else -float("inf")
         best_epoch = 0
         best_checkpoint_label = ""
+        best_checkpoint_path: Path | None = None
         validations_without_improvement = 0
         validation_index = 0
         global_step = 0
@@ -988,12 +989,14 @@ class LobTrainer:
             nonlocal best_monitor_value
             nonlocal best_epoch
             nonlocal best_checkpoint_label
+            nonlocal best_checkpoint_path
             nonlocal validations_without_improvement
             nonlocal validation_index
 
             validation_index += 1
             checkpoint_global_step = None if validate_by_epoch else global_step_value
             checkpoint_label = self.config.checkpoint_label(epoch_number, global_step=checkpoint_global_step)
+            checkpoint_path = self.config.checkpoint_path(epoch_number, global_step=checkpoint_global_step)
             history.append(
                 EpochResult(
                     train_loss=train_result.loss,
@@ -1024,6 +1027,7 @@ class LobTrainer:
                 best_monitor_value = monitor_value
                 best_epoch = epoch_number
                 best_checkpoint_label = checkpoint_label
+                best_checkpoint_path = checkpoint_path
                 validations_without_improvement = 0
                 best_path = Path(self.config.best_model_path)
                 best_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1201,7 +1205,42 @@ class LobTrainer:
 
         if best_epoch:
             best_path = Path(self.config.best_model_path)
-            model.load_state_dict(torch.load(best_path, map_location=self.device, weights_only=True))
+            load_path = best_path
+            if not load_path.exists():
+                fallback_path = best_checkpoint_path
+                if fallback_path is not None and fallback_path.exists():
+                    load_path = fallback_path
+                else:
+                    fallback_path = next(
+                        (
+                            candidate.path
+                            for candidate in self.top_checkpoint_candidates
+                            if candidate.checkpoint_label == best_checkpoint_label and candidate.path.exists()
+                        ),
+                        None,
+                    )
+                    if fallback_path is not None:
+                        load_path = fallback_path
+            if not load_path.exists():
+                candidate_summary = ", ".join(
+                    f"{candidate.checkpoint_label}:{candidate.path}"
+                    for candidate in self.top_checkpoint_candidates
+                )
+                raise FileNotFoundError(
+                    "Best checkpoint could not be reloaded. "
+                    f"Missing best_model_path={best_path}; "
+                    f"tracked_best_candidate={best_checkpoint_path}; "
+                    f"top_k_candidates=[{candidate_summary}]."
+                )
+            state_dict = torch.load(load_path, map_location=self.device, weights_only=True)
+            model.load_state_dict(state_dict)
+            if load_path != best_path:
+                best_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(state_dict, best_path)
+                print(
+                    f"Best model path {best_path} was missing; restored it from "
+                    f"{load_path}."
+                )
             print(
                 f"Best model selected from {best_checkpoint_label or f'epoch {best_epoch}'}: "
                 f"{self.config.monitor}={best_monitor_value:.6f}."

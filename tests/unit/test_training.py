@@ -267,6 +267,44 @@ def test_lob_trainer_saves_only_configured_top_k_checkpoints(
     assert config.best_model_path.exists()
 
 
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_recovers_missing_best_model_from_top_checkpoint(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _training_config()
+    config.epochs = 2
+    config.early_stopping_patience = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.top_k_checkpoints = 1
+    config.device = "cpu"
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_losses = iter([1.0, 1.2])
+    validation_calls = 0
+
+    def fake_train_epoch(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=0.25, metrics=metrics)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        nonlocal validation_calls
+        validation_calls += 1
+        if validation_calls == 2 and config.best_model_path.exists():
+            config.best_model_path.unlink()
+        return EvaluationResult(loss=next(validation_losses), metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_run_epoch", fake_train_epoch)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    trainer.fit(nn.Linear(1, 3), train_loader=[], val_loader=[])
+
+    assert config.checkpoint_path(1).exists()
+    assert config.best_model_path.exists()
+    assert [candidate.epoch for candidate in trainer.top_checkpoint_candidates] == [1]
+
+
 class TinySequenceClassifier(nn.Module):
     def __init__(self) -> None:
         super().__init__()
