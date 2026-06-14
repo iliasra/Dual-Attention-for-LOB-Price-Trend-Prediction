@@ -175,6 +175,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "early_stopping_patience": None,
         "early_stopping_warmup": None,
         "early_stopping_min_delta": None,
+        "validate_every_n_batches": None,
         "monitor": None,
         "monitor_mode": None,
         "top_k_checkpoints": None,
@@ -232,6 +233,7 @@ OPTIONAL_CONFIG_KEYS = {
     "training.monitor_params",
     "training.monitor_params.base_metric",
     "training.top_k_checkpoints",
+    "training.validate_every_n_batches",
     "preprocessing.save_processed_dataframes",
     "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
     "preprocessing.sample_clock",
@@ -1616,6 +1618,7 @@ class TrainingConfig:
     early_stopping_patience: int
     early_stopping_warmup: int
     early_stopping_min_delta: float
+    validate_every_n_batches: int | str
     monitor: str
     monitor_mode: str
     monitor_params: TrainingMonitorParamsConfig
@@ -1651,6 +1654,18 @@ class TrainingConfig:
             raise ValueError("training.early_stopping_warmup must be >= 0.")
         if self.early_stopping_min_delta < 0.0:
             raise ValueError("training.early_stopping_min_delta must be >= 0.")
+        if isinstance(self.validate_every_n_batches, bool):
+            raise ValueError("training.validate_every_n_batches must be a positive integer or 'epoch'.")
+        if isinstance(self.validate_every_n_batches, str):
+            self.validate_every_n_batches = self.validate_every_n_batches.lower()
+            if self.validate_every_n_batches != "epoch":
+                raise ValueError("training.validate_every_n_batches must be a positive integer or 'epoch'.")
+        else:
+            if not isinstance(self.validate_every_n_batches, int):
+                raise ValueError("training.validate_every_n_batches must be a positive integer or 'epoch'.")
+            self.validate_every_n_batches = int(self.validate_every_n_batches)
+            if self.validate_every_n_batches <= 0:
+                raise ValueError("training.validate_every_n_batches must be a positive integer or 'epoch'.")
         self.monitor = self.monitor.lower()
         self.monitor_mode = self.monitor_mode.lower()
         self.optimizer = self.optimizer.lower()
@@ -1714,9 +1729,30 @@ class TrainingConfig:
         """Directory where top-k candidate checkpoints are stored."""
         return Path(self.model_dir) / "checkpoints"
 
-    def checkpoint_path(self, epoch: int) -> Path:
-        """Return the candidate checkpoint path for an epoch."""
-        return self.checkpoint_dir / f"epoch_{int(epoch):04d}.pth"
+    def checkpoint_label(
+        self,
+        epoch: int,
+        *,
+        global_step: int | None = None,
+    ) -> str:
+        """Return a stable label for an epoch or intra-epoch validation."""
+        if global_step is None:
+            return f"epoch_{int(epoch):04d}"
+        return f"epoch_{int(epoch):04d}_step_{int(global_step):08d}"
+
+    def checkpoint_path(
+        self,
+        epoch: int,
+        *,
+        global_step: int | None = None,
+    ) -> Path:
+        """Return the candidate checkpoint path for a validation point."""
+        return self.checkpoint_dir / f"{self.checkpoint_label(epoch, global_step=global_step)}.pth"
+
+    @property
+    def validates_by_epoch(self) -> bool:
+        """Whether validation is scheduled only at epoch boundaries."""
+        return self.validate_every_n_batches == "epoch"
 
     def data_loader_kwargs(self) -> dict[str, bool | int]:
         """Return PyTorch data-loader worker and memory options.
@@ -1742,6 +1778,7 @@ class TrainingConfig:
             early_stopping_patience=int(payload["early_stopping_patience"]),
             early_stopping_warmup=int(payload.get("early_stopping_warmup", 0)),
             early_stopping_min_delta=float(payload.get("early_stopping_min_delta", 0.0)),
+            validate_every_n_batches=payload.get("validate_every_n_batches", "epoch"),
             monitor=str(payload["monitor"]),
             monitor_mode=str(payload["monitor_mode"]),
             monitor_params=TrainingMonitorParamsConfig.from_dict(payload.get("monitor_params")),

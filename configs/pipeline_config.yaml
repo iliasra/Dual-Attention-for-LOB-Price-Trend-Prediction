@@ -182,8 +182,9 @@ training:
   batch_size: 128 # tuned with the dry-run
   eval_batch_size: 256 # evaluation only; no backward pass
   num_workers: 8
-  early_stopping_patience: 5
-  early_stopping_warmup: 3
+  validate_every_n_batches: 5000 # allowed: positive int or "epoch"; int validates/checkpoints intra-epoch
+  early_stopping_patience: 8 # counts validation intervals when validate_every_n_batches is an int
+  early_stopping_warmup: 1 # counts validation intervals when validate_every_n_batches is an int
   early_stopping_min_delta: 0.002
   monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
   monitor_mode: max # allowed: min, max; tailored_score requires max

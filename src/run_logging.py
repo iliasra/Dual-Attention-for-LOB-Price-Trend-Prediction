@@ -285,6 +285,7 @@ def save_run_config_snapshot(
                 "name": config.training.monitor,
                 "mode": config.training.monitor_mode,
                 "top_k_checkpoints": config.training.top_k_checkpoints,
+                "validate_every_n_batches": config.training.validate_every_n_batches,
                 "early_stopping_patience": config.training.early_stopping_patience,
                 "early_stopping_warmup": config.training.early_stopping_warmup,
                 "params": {
@@ -493,9 +494,18 @@ def _epoch_row(
     fold: str,
     config: ExperimentConfig,
 ) -> dict[str, str | int]:
+    epoch_value = int(getattr(result, "epoch", epoch_index) or epoch_index)
+    validation_index = int(getattr(result, "validation_index", epoch_index) or epoch_index)
+    checkpoint_label = str(getattr(result, "checkpoint_label", "") or f"epoch_{epoch_value:04d}")
+    batch_in_epoch = getattr(result, "batch_in_epoch", None)
+    global_step = getattr(result, "global_step", None)
     row: dict[str, str | int] = {
         "fold": fold,
-        "epoch": epoch_index,
+        "epoch": epoch_value,
+        "validation_index": validation_index,
+        "batch_in_epoch": "" if batch_in_epoch is None else int(batch_in_epoch),
+        "global_step": "" if global_step is None else int(global_step),
+        "checkpoint_label": checkpoint_label,
         "train_loss": f"{result.train_loss:.10g}",
         "val_loss": f"{result.val_loss:.10g}",
         "test_loss": "" if result.test_loss is None else f"{result.test_loss:.10g}",
@@ -568,7 +578,17 @@ def _epoch_row(
 
 
 def _epoch_fieldnames(config: ExperimentConfig) -> list[str]:
-    fieldnames = ["fold", "epoch", "train_loss", "val_loss", "test_loss"]
+    fieldnames = [
+        "fold",
+        "epoch",
+        "validation_index",
+        "batch_in_epoch",
+        "global_step",
+        "checkpoint_label",
+        "train_loss",
+        "val_loss",
+        "test_loss",
+    ]
     for split in SPLIT_METRIC_PREFIXES:
         fieldnames.extend(f"{split}_{metric}" for metric in METRIC_NAMES)
         fieldnames.extend(f"{split}_class_{class_id}_f1" for class_id in range(config.model.num_classes))
@@ -636,6 +656,17 @@ def _confusion_payload(metrics: Any) -> dict[str, Any] | None:
     }
 
 
+def _history_label(result: Any, fallback_index: int) -> str:
+    """Return a stable label for per-validation artifacts."""
+    epoch_value = int(getattr(result, "epoch", fallback_index) or fallback_index)
+    if getattr(result, "global_step", None) is None:
+        return f"epoch_{epoch_value}"
+    label = getattr(result, "checkpoint_label", None)
+    if label:
+        return str(label)
+    return f"epoch_{epoch_value}"
+
+
 def save_confusion_matrices(
     history: list[Any],
     target: Path,
@@ -650,7 +681,11 @@ def save_confusion_matrices(
         ),
         "folds": {
             fold: {
-                f"epoch_{epoch_index}": {
+                _history_label(result, epoch_index): {
+                    "epoch": int(getattr(result, "epoch", epoch_index) or epoch_index),
+                    "validation_index": int(getattr(result, "validation_index", epoch_index) or epoch_index),
+                    "batch_in_epoch": getattr(result, "batch_in_epoch", None),
+                    "global_step": getattr(result, "global_step", None),
                     "train": _confusion_payload(getattr(result, "train_metrics", None)),
                     "validation": _confusion_payload(getattr(result, "val_metrics", None)),
                     "test": _confusion_payload(getattr(result, "test_metrics", None)),
@@ -750,6 +785,7 @@ def save_best_pr_artifacts(
     thresholds_path: Path,
     config: ExperimentConfig,
     best_epoch: int,
+    checkpoint_label: str | None = None,
     fold: str = "single",
 ) -> dict[str, Any]:
     """Write validation PR curves and max-F1 thresholds for the best epoch."""
@@ -780,14 +816,16 @@ def save_best_pr_artifacts(
         "fold": fold,
         "split": "validation",
         "best_epoch": int(best_epoch),
+        "checkpoint_label": checkpoint_label,
         "selection_rule": "max_f1",
         "classes": {},
     }
+    artifact_label = checkpoint_label or f"epoch_{int(best_epoch)}"
     curve_paths: dict[str, str] = {}
     for class_id, label in enumerate(labels):
         safe_label = _safe_artifact_label(label)
         curve = curves[label]
-        curve_path = curves_dir / f"validation_best_epoch_{best_epoch}_{safe_label}.csv"
+        curve_path = curves_dir / f"validation_best_{artifact_label}_{safe_label}.csv"
         curve.to_csv(curve_path, index=False)
         threshold = best_f1_threshold(curve)
         threshold_payload["classes"][label] = {
@@ -847,7 +885,11 @@ def save_expert_usage(
         "class_labels": _class_label_names(config),
         "folds": {
             fold: {
-                f"epoch_{epoch_index}": {
+                _history_label(result, epoch_index): {
+                    "epoch": int(getattr(result, "epoch", epoch_index) or epoch_index),
+                    "validation_index": int(getattr(result, "validation_index", epoch_index) or epoch_index),
+                    "batch_in_epoch": getattr(result, "batch_in_epoch", None),
+                    "global_step": getattr(result, "global_step", None),
                     "train": _expert_usage_payload(getattr(result, "train_expert_usage", None)),
                     "validation": _expert_usage_payload(getattr(result, "val_expert_usage", None)),
                     "test": _expert_usage_payload(getattr(result, "test_expert_usage", None)),
@@ -961,7 +1003,16 @@ def _write_best_epoch_summary(
                 handle.write(f"{key}: {value}\n")
             else:
                 handle.write(f"{key}: {value:.10g}\n")
-    handle.write(f"epoch: {best_index}\n")
+    epoch_value = int(getattr(best_result, "epoch", best_index) or best_index)
+    validation_index = int(getattr(best_result, "validation_index", best_index) or best_index)
+    checkpoint_label = _history_label(best_result, best_index)
+    handle.write(f"epoch: {epoch_value}\n")
+    handle.write(f"validation_index: {validation_index}\n")
+    handle.write(f"checkpoint_label: {checkpoint_label}\n")
+    if getattr(best_result, "batch_in_epoch", None) is not None:
+        handle.write(f"batch_in_epoch: {int(best_result.batch_in_epoch)}\n")
+    if getattr(best_result, "global_step", None) is not None:
+        handle.write(f"global_step: {int(best_result.global_step)}\n")
     handle.write(f"train_loss: {best_result.train_loss:.10g}\n")
     handle.write(f"val_loss: {best_result.val_loss:.10g}\n")
     if best_result.test_loss is not None:
@@ -1089,6 +1140,7 @@ def save_run_log(
         handle.write(f"monitor: {config.training.monitor}\n")
         handle.write(f"monitor_mode: {config.training.monitor_mode}\n")
         handle.write(f"top_k_checkpoints: {config.training.top_k_checkpoints}\n")
+        handle.write(f"validate_every_n_batches: {config.training.validate_every_n_batches}\n")
         handle.write(f"early_stopping_patience: {config.training.early_stopping_patience}\n")
         handle.write(f"early_stopping_warmup: {config.training.early_stopping_warmup}\n")
         if config.training.monitor_params.complete:

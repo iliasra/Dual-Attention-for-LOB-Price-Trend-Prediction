@@ -806,6 +806,11 @@ class EpochResult:
     train_expert_usage: dict[str, Any] | None = None
     val_expert_usage: dict[str, Any] | None = None
     test_expert_usage: dict[str, Any] | None = None
+    epoch: int | None = None
+    batch_in_epoch: int | None = None
+    global_step: int | None = None
+    validation_index: int | None = None
+    checkpoint_label: str | None = None
 
 
 @dataclass(slots=True)
@@ -813,6 +818,10 @@ class CheckpointCandidate:
     epoch: int
     monitor_value: float
     path: Path
+    batch_in_epoch: int | None = None
+    global_step: int | None = None
+    validation_index: int | None = None
+    checkpoint_label: str | None = None
 
 
 class LobTrainer:
@@ -888,25 +897,41 @@ class LobTrainer:
     ) -> list[CheckpointCandidate]:
         """Return checkpoint candidates sorted from best to worst."""
         reverse_sign = -1.0 if self.config.monitor_mode == "max" else 1.0
-        return sorted(candidates, key=lambda item: (reverse_sign * float(item.monitor_value), int(item.epoch)))
+        return sorted(
+            candidates,
+            key=lambda item: (
+                reverse_sign * float(item.monitor_value),
+                int(item.validation_index if item.validation_index is not None else item.epoch),
+                int(item.global_step if item.global_step is not None else 0),
+            ),
+        )
 
     def _save_top_checkpoint_candidate(
         self,
         model: nn.Module,
         *,
         epoch: int,
+        batch_in_epoch: int | None = None,
+        global_step: int | None = None,
+        validation_index: int | None = None,
+        checkpoint_label: str | None = None,
         monitor_value: float,
     ) -> None:
         """Persist this epoch if it belongs to the configured top-k candidates."""
+        checkpoint_label = checkpoint_label or self.config.checkpoint_label(epoch, global_step=global_step)
         candidate = CheckpointCandidate(
             epoch=int(epoch),
             monitor_value=float(monitor_value),
-            path=self.config.checkpoint_path(epoch),
+            path=self.config.checkpoint_path(epoch, global_step=global_step),
+            batch_in_epoch=None if batch_in_epoch is None else int(batch_in_epoch),
+            global_step=None if global_step is None else int(global_step),
+            validation_index=None if validation_index is None else int(validation_index),
+            checkpoint_label=checkpoint_label,
         )
         ranked = self._rank_checkpoint_candidates([*self.top_checkpoint_candidates, candidate])
         kept = ranked[: self.config.top_k_checkpoints]
         dropped = ranked[self.config.top_k_checkpoints :]
-        if any(item.epoch == candidate.epoch for item in kept):
+        if any(item.checkpoint_label == candidate.checkpoint_label for item in kept):
             candidate.path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(model.state_dict(), candidate.path)
         for item in dropped:
@@ -942,37 +967,33 @@ class LobTrainer:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config.epochs)
         best_monitor_value = float("inf") if self.config.monitor_mode == "min" else -float("inf")
         best_epoch = 0
-        epochs_without_improvement = 0
+        best_checkpoint_label = ""
+        validations_without_improvement = 0
+        validation_index = 0
+        global_step = 0
         history: list[EpochResult] = []
         self.top_checkpoint_candidates = []
+        validate_by_epoch = bool(self.config.validates_by_epoch)
+        validation_interval = None if validate_by_epoch else int(self.config.validate_every_n_batches)
+        validation_unit = "epoch" if validate_by_epoch else "validation interval"
 
-        print(
-            f"Starting training for {self.config.epochs} epoch(s) on {self.device}. "
-            f"Monitoring {self.config.monitor} ({self.config.monitor_mode}); "
-            f"saving top_k_checkpoints={self.config.top_k_checkpoints}; "
-            f"early stopping warmup={self.config.early_stopping_warmup} epoch(s), "
-            f"min_delta={self.config.early_stopping_min_delta:.6g}; "
-            f"optimizer={self.config.optimizer}."
-        )
-        for epoch in range(self.config.epochs):
-            epoch_number = epoch + 1
-            self._set_epoch(train_loader, epoch)
-            print(f"Starting epoch {epoch_number}/{self.config.epochs}.")
-            train_result = self._run_epoch(
-                model=model,
-                data_loader=train_loader,
-                criterion=criterion,
-                optimizer=optimizer,
-                description=f"Epoch {epoch_number}/{self.config.epochs} [Train]",
-            )
-            val_result = self.evaluate(
-                model=model,
-                data_loader=val_loader,
-                criterion=criterion,
-                description=f"Epoch {epoch_number}/{self.config.epochs} [Val]",
-                track_pr_metrics=True,
-            )
-            scheduler.step()
+        def record_validation(
+            *,
+            epoch_number: int,
+            batch_in_epoch: int | None,
+            global_step_value: int | None,
+            train_result: EvaluationResult,
+            val_result: EvaluationResult,
+        ) -> bool:
+            nonlocal best_monitor_value
+            nonlocal best_epoch
+            nonlocal best_checkpoint_label
+            nonlocal validations_without_improvement
+            nonlocal validation_index
+
+            validation_index += 1
+            checkpoint_global_step = None if validate_by_epoch else global_step_value
+            checkpoint_label = self.config.checkpoint_label(epoch_number, global_step=checkpoint_global_step)
             history.append(
                 EpochResult(
                     train_loss=train_result.loss,
@@ -981,6 +1002,11 @@ class LobTrainer:
                     val_metrics=val_result.metrics,
                     train_expert_usage=train_result.expert_usage,
                     val_expert_usage=val_result.expert_usage,
+                    epoch=epoch_number,
+                    batch_in_epoch=batch_in_epoch,
+                    global_step=global_step_value,
+                    validation_index=validation_index,
+                    checkpoint_label=checkpoint_label,
                 )
             )
 
@@ -988,25 +1014,37 @@ class LobTrainer:
             self._save_top_checkpoint_candidate(
                 model,
                 epoch=epoch_number,
+                batch_in_epoch=batch_in_epoch,
+                global_step=checkpoint_global_step,
+                validation_index=validation_index,
+                checkpoint_label=checkpoint_label,
                 monitor_value=monitor_value,
             )
             if self._is_improvement(monitor_value, best_monitor_value):
                 best_monitor_value = monitor_value
                 best_epoch = epoch_number
-                epochs_without_improvement = 0
+                best_checkpoint_label = checkpoint_label
+                validations_without_improvement = 0
                 best_path = Path(self.config.best_model_path)
                 best_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(model.state_dict(), best_path)
                 print(
-                    f"Saved new best model to {best_path} from epoch {best_epoch} "
+                    f"Saved new best model to {best_path} from {checkpoint_label} "
                     f"with {self.config.monitor}={best_monitor_value:.6f}."
                 )
             else:
-                if epoch_number > self.config.early_stopping_warmup:
-                    epochs_without_improvement += 1
+                if validation_index > self.config.early_stopping_warmup:
+                    validations_without_improvement += 1
 
+            if validate_by_epoch:
+                progress = f"Epoch {epoch_number}/{self.config.epochs}"
+            else:
+                progress = (
+                    f"Validation {validation_index} at epoch {epoch_number}/{self.config.epochs}, "
+                    f"batch {batch_in_epoch}, global_step={global_step_value}"
+                )
             print(
-                f"Epoch {epoch_number}/{self.config.epochs} completed: "
+                f"{progress} completed: "
                 f"train_loss={train_result.loss:.6f}, val_loss={val_result.loss:.6f}, "
                 f"train_acc={train_result.metrics.accuracy:.4f}, "
                 f"val_acc={val_result.metrics.accuracy:.4f}, "
@@ -1016,23 +1054,156 @@ class LobTrainer:
             )
             if (
                 self.config.early_stopping_patience > 0
-                and epoch_number > self.config.early_stopping_warmup
-                and epochs_without_improvement >= self.config.early_stopping_patience
+                and validation_index > self.config.early_stopping_warmup
+                and validations_without_improvement >= self.config.early_stopping_patience
             ):
                 print(
                     "Early stopping triggered after "
-                    f"{epochs_without_improvement} epoch(s) without {self.config.monitor} improvement. "
+                    f"{validations_without_improvement} {validation_unit}(s) without "
+                    f"{self.config.monitor} improvement. "
                     f"Best {self.config.monitor}={best_monitor_value:.6f}; "
-                    f"warmup={self.config.early_stopping_warmup} epoch(s); "
+                    f"warmup={self.config.early_stopping_warmup} {validation_unit}(s); "
                     f"min_delta={self.config.early_stopping_min_delta:.6g}."
                 )
+                return True
+            return False
+
+        print(
+            f"Starting training for {self.config.epochs} epoch(s) on {self.device}. "
+            f"Monitoring {self.config.monitor} ({self.config.monitor_mode}); "
+            f"saving top_k_checkpoints={self.config.top_k_checkpoints}; "
+            f"validate_every_n_batches={self.config.validate_every_n_batches}; "
+            f"early stopping warmup={self.config.early_stopping_warmup} {validation_unit}(s), "
+            f"min_delta={self.config.early_stopping_min_delta:.6g}; "
+            f"optimizer={self.config.optimizer}."
+        )
+        for epoch in range(self.config.epochs):
+            epoch_number = epoch + 1
+            self._set_epoch(train_loader, epoch)
+            print(f"Starting epoch {epoch_number}/{self.config.epochs}.")
+            if validate_by_epoch:
+                train_result = self._run_epoch(
+                    model=model,
+                    data_loader=train_loader,
+                    criterion=criterion,
+                    optimizer=optimizer,
+                    description=f"Epoch {epoch_number}/{self.config.epochs} [Train]",
+                )
+                val_result = self.evaluate(
+                    model=model,
+                    data_loader=val_loader,
+                    criterion=criterion,
+                    description=f"Epoch {epoch_number}/{self.config.epochs} [Val]",
+                    track_pr_metrics=True,
+                )
+                scheduler.step()
+                if record_validation(
+                    epoch_number=epoch_number,
+                    batch_in_epoch=None,
+                    global_step_value=None,
+                    train_result=train_result,
+                    val_result=val_result,
+                ):
+                    break
+                continue
+
+            model.train()
+            interval_loss = 0.0
+            interval_batches = 0
+            interval_metrics = ClassificationMetricAccumulator(device=self.device)
+            stopped = False
+            last_batch_in_epoch = 0
+            progress = tqdm(train_loader, desc=f"Epoch {epoch_number}/{self.config.epochs} [Train]")
+            for batch_in_epoch, (x_batch, t_batch, y_batch) in enumerate(progress, start=1):
+                last_batch_in_epoch = batch_in_epoch
+                x_batch = x_batch.to(self.device, non_blocking=True)
+                t_batch = t_batch.to(self.device, non_blocking=True)
+                y_batch = y_batch.to(self.device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
+
+                with self._amp_context():
+                    logits = model(x_batch, t_batch)
+                    loss = criterion(logits, y_batch)
+                    moe_loss = getattr(model, "moe_load_balancing_loss", None)
+                    if moe_loss is not None:
+                        loss = loss + moe_loss
+
+                if not bool(torch.isfinite(logits).all()):
+                    finite_summary = logits.detach().float().nan_to_num()
+                    raise FloatingPointError(
+                        f"Non-finite logits at batch {batch_in_epoch}: "
+                        f"logits min={finite_summary.min().item()}, "
+                        f"max={finite_summary.max().item()}"
+                    )
+                if not bool(torch.isfinite(loss)):
+                    raise FloatingPointError(f"Non-finite loss at batch {batch_in_epoch}: {loss.item()}")
+
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
+                self.scaler.step(optimizer)
+                self.scaler.update()
+
+                interval_metrics.update(logits, y_batch)
+                interval_loss += float(loss.item())
+                interval_batches += 1
+                global_step += 1
+
+                if validation_interval is not None and global_step % validation_interval == 0:
+                    train_result = EvaluationResult(
+                        loss=interval_loss / max(interval_batches, 1),
+                        metrics=interval_metrics.compute(),
+                    )
+                    val_result = self.evaluate(
+                        model=model,
+                        data_loader=val_loader,
+                        criterion=criterion,
+                        description=f"{self.config.checkpoint_label(epoch_number, global_step=global_step)} [Val]",
+                        track_pr_metrics=True,
+                    )
+                    stopped = record_validation(
+                        epoch_number=epoch_number,
+                        batch_in_epoch=batch_in_epoch,
+                        global_step_value=global_step,
+                        train_result=train_result,
+                        val_result=val_result,
+                    )
+                    interval_loss = 0.0
+                    interval_batches = 0
+                    interval_metrics = ClassificationMetricAccumulator(device=self.device)
+                    model.train()
+                    if stopped:
+                        break
+            if stopped:
                 break
+
+            if interval_batches > 0:
+                train_result = EvaluationResult(
+                    loss=interval_loss / max(interval_batches, 1),
+                    metrics=interval_metrics.compute(),
+                )
+                val_result = self.evaluate(
+                    model=model,
+                    data_loader=val_loader,
+                    criterion=criterion,
+                    description=f"{self.config.checkpoint_label(epoch_number, global_step=global_step)} [Val]",
+                    track_pr_metrics=True,
+                )
+                if record_validation(
+                    epoch_number=epoch_number,
+                    batch_in_epoch=last_batch_in_epoch,
+                    global_step_value=global_step,
+                    train_result=train_result,
+                    val_result=val_result,
+                ):
+                    break
+            scheduler.step()
 
         if best_epoch:
             best_path = Path(self.config.best_model_path)
             model.load_state_dict(torch.load(best_path, map_location=self.device, weights_only=True))
             print(
-                f"Best model selected from epoch {best_epoch}: "
+                f"Best model selected from {best_checkpoint_label or f'epoch {best_epoch}'}: "
                 f"{self.config.monitor}={best_monitor_value:.6f}."
             )
         print(f"Training finished ({format_duration(perf_counter() - fit_start)}).")

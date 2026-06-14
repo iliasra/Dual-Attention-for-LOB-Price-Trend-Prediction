@@ -238,6 +238,38 @@ def epoch_monitor_value(config: ExperimentConfig, result: EpochResult) -> float:
     )
 
 
+def validation_index_for_history_item(result: EpochResult, fallback_index: int) -> int:
+    """Return the stable validation index for a history item."""
+    value = getattr(result, "validation_index", None)
+    return int(fallback_index if value is None else value)
+
+
+def checkpoint_label_for_history_item(result: EpochResult, fallback_index: int) -> str:
+    """Return a display/filesystem label for a history item."""
+    label = getattr(result, "checkpoint_label", None)
+    if label:
+        return str(label)
+    epoch = int(getattr(result, "epoch", fallback_index) or fallback_index)
+    return f"epoch_{epoch:04d}"
+
+
+def history_item_by_validation_index(history: list[EpochResult], validation_index: int) -> EpochResult:
+    """Find a training history entry by its validation index."""
+    for fallback_index, result in enumerate(history, start=1):
+        if validation_index_for_history_item(result, fallback_index) == int(validation_index):
+            return result
+    raise ValueError(f"Selected validation index {validation_index} is outside the training history.")
+
+
+def candidate_checkpoint_label(candidate: CheckpointCandidate) -> str:
+    """Return a stable label for a checkpoint candidate."""
+    if candidate.checkpoint_label:
+        return str(candidate.checkpoint_label)
+    if candidate.global_step is not None:
+        return f"epoch_{int(candidate.epoch):04d}_step_{int(candidate.global_step):08d}"
+    return f"epoch_{int(candidate.epoch):04d}"
+
+
 def mapped_class_metric(config: ExperimentConfig, metrics: Any, raw_label: int, metric_name: str) -> float | None:
     """Return a per-class metric using the configured raw-to-class label mapping."""
     mapped_label = config.data.label_mapping.get(raw_label)
@@ -332,6 +364,10 @@ def fit_and_apply_temperature_scaling(
     validation_outputs: dict[str, Any],
     test_outputs: dict[str, Any] | None,
     best_epoch: int,
+    checkpoint_label: str | None = None,
+    batch_in_epoch: int | None = None,
+    global_step: int | None = None,
+    validation_index: int | None = None,
     fold: str,
     target_path: Path,
 ) -> tuple[
@@ -389,6 +425,14 @@ def fit_and_apply_temperature_scaling(
         "fit_seconds": round(fit_seconds, 6),
         "fit_duration": format_duration(fit_seconds),
     }
+    if checkpoint_label is not None:
+        payload["checkpoint_label"] = checkpoint_label
+    if batch_in_epoch is not None:
+        payload["batch_in_epoch"] = int(batch_in_epoch)
+    if global_step is not None:
+        payload["global_step"] = int(global_step)
+    if validation_index is not None:
+        payload["validation_index"] = int(validation_index)
     save_temperature_scaling_artifact(payload, target_path)
     return payload, validation_metrics, test_metrics, validation_outputs_calibrated, test_outputs_calibrated
 
@@ -399,6 +443,10 @@ def fit_and_apply_directional_thresholds(
     validation_outputs: dict[str, Any],
     test_outputs: dict[str, Any] | None,
     best_epoch: int,
+    checkpoint_label: str | None = None,
+    batch_in_epoch: int | None = None,
+    global_step: int | None = None,
+    validation_index: int | None = None,
     fold: str,
     target_path: Path,
 ) -> tuple[
@@ -423,7 +471,7 @@ def fit_and_apply_directional_thresholds(
     )
     refinement_steps = tuple(
         step
-        for step in (0.01, 0.005)
+        for step in (0.01, 0.005, 0.002, 0.001)
         if step < float(threshold_config.step) - 1e-12
     )
     probabilities_validation = np.asarray(validation_outputs["probabilities"], dtype=np.float32)
@@ -594,6 +642,14 @@ def fit_and_apply_directional_thresholds(
         "validation_threshold_metrics": validation_summary,
         "test_threshold_metrics": test_summary,
     }
+    if checkpoint_label is not None:
+        payload["checkpoint_label"] = checkpoint_label
+    if batch_in_epoch is not None:
+        payload["batch_in_epoch"] = int(batch_in_epoch)
+    if global_step is not None:
+        payload["global_step"] = int(global_step)
+    if validation_index is not None:
+        payload["validation_index"] = int(validation_index)
     if threshold_config.method != "top_x_quantile":
         payload["min_directional_precision"] = float(selection.min_directional_precision)
     if selection.score_details:
@@ -735,18 +791,31 @@ def ranked_checkpoint_candidates(
     candidates = list(getattr(trainer, "top_checkpoint_candidates", []))
     if not candidates:
         best_epoch, _best_history, best_monitor_value = best_epoch_from_history(config, history)
+        best_validation_index = validation_index_for_history_item(_best_history, best_epoch)
+        best_label = checkpoint_label_for_history_item(_best_history, best_epoch)
         candidates = [
             CheckpointCandidate(
-                epoch=best_epoch,
+                epoch=int(getattr(_best_history, "epoch", best_epoch) or best_epoch),
                 monitor_value=best_monitor_value,
                 path=config.training.best_model_path,
+                batch_in_epoch=getattr(_best_history, "batch_in_epoch", None),
+                global_step=getattr(_best_history, "global_step", None),
+                validation_index=best_validation_index,
+                checkpoint_label=best_label,
             )
         ]
     missing = [str(candidate.path) for candidate in candidates if not candidate.path.exists()]
     if missing:
         raise FileNotFoundError(f"Top-k checkpoint candidate file(s) are missing: {missing}")
     reverse_sign = -1.0 if config.training.monitor_mode == "max" else 1.0
-    return sorted(candidates, key=lambda item: (reverse_sign * float(item.monitor_value), int(item.epoch)))
+    return sorted(
+        candidates,
+        key=lambda item: (
+            reverse_sign * float(item.monitor_value),
+            int(item.validation_index if item.validation_index is not None else item.epoch),
+            int(item.global_step if item.global_step is not None else 0),
+        ),
+    )
 
 
 def load_checkpoint_into_model(
@@ -841,12 +910,13 @@ def evaluate_checkpoint_candidate_on_validation(
     candidate_dir: Path,
 ) -> dict[str, Any]:
     """Evaluate and postprocess one checkpoint candidate on validation only."""
+    label = candidate_checkpoint_label(candidate)
     load_checkpoint_into_model(model=model, trainer=trainer, checkpoint_path=candidate.path)
     validation_start = perf_counter()
     validation_result = trainer.evaluate(
         model=model,
         data_loader=validation_loader,
-        description=f"Candidate epoch {candidate.epoch} [Validation selection]",
+        description=f"Candidate {label} [Validation selection]",
         collect_outputs=True,
         track_pr_metrics=True,
         track_expert_usage=True,
@@ -880,6 +950,10 @@ def evaluate_checkpoint_candidate_on_validation(
             validation_outputs=validation_outputs,
             test_outputs=None,
             best_epoch=int(candidate.epoch),
+            checkpoint_label=label,
+            batch_in_epoch=candidate.batch_in_epoch,
+            global_step=candidate.global_step,
+            validation_index=candidate.validation_index,
             fold=fold,
             target_path=temperature_path,
         )
@@ -895,6 +969,10 @@ def evaluate_checkpoint_candidate_on_validation(
             validation_outputs=validation_outputs,
             test_outputs=None,
             best_epoch=int(candidate.epoch),
+            checkpoint_label=label,
+            batch_in_epoch=candidate.batch_in_epoch,
+            global_step=candidate.global_step,
+            validation_index=candidate.validation_index,
             fold=fold,
             target_path=thresholds_path,
         )
@@ -907,6 +985,10 @@ def evaluate_checkpoint_candidate_on_validation(
     )
     return {
         "epoch": int(candidate.epoch),
+        "batch_in_epoch": candidate.batch_in_epoch,
+        "global_step": candidate.global_step,
+        "validation_index": candidate.validation_index,
+        "checkpoint_label": label,
         "checkpoint_path": candidate.path,
         "raw_monitor_value": float(candidate.monitor_value),
         "postprocessed_monitor_value": float(postprocessed_monitor_value),
@@ -932,7 +1014,7 @@ def checkpoint_selection_sort_key(config: ExperimentConfig, candidate: dict[str,
     return (
         reverse_sign * float(candidate["postprocessed_monitor_value"]),
         reverse_sign * float(candidate["raw_monitor_value"]),
-        int(candidate["epoch"]),
+        int(candidate.get("validation_index") or candidate["epoch"]),
     )
 
 
@@ -940,8 +1022,13 @@ def checkpoint_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
     """Return a YAML-friendly checkpoint candidate summary."""
     temperature_path = candidate.get("temperature_scaling_path")
     thresholds_path = candidate.get("directional_thresholds_path")
+    checkpoint_label = str(candidate.get("checkpoint_label") or f"epoch_{int(candidate['epoch']):04d}")
     return {
         "epoch": int(candidate["epoch"]),
+        "batch_in_epoch": candidate.get("batch_in_epoch"),
+        "global_step": candidate.get("global_step"),
+        "validation_index": candidate.get("validation_index"),
+        "checkpoint_label": checkpoint_label,
         "checkpoint_path": str(candidate["checkpoint_path"]),
         "candidate_dir": str(candidate["candidate_dir"]),
         "raw_monitor_value": float(candidate["raw_monitor_value"]),
@@ -982,24 +1069,31 @@ def select_checkpoint_after_validation_postprocessing(
             validation_loader=validation_loader,
             candidate=candidate,
             fold=fold,
-            candidate_dir=selection_dir / f"epoch_{candidate.epoch:04d}",
+            candidate_dir=selection_dir / candidate_checkpoint_label(candidate),
         )
         for candidate in candidates
     ]
     selected = sorted(evaluated_candidates, key=lambda item: checkpoint_selection_sort_key(config, item))[0]
+    selected_checkpoint_label = str(selected.get("checkpoint_label") or f"epoch_{int(selected['epoch']):04d}")
+    selected["checkpoint_label"] = selected_checkpoint_label
     total_seconds = perf_counter() - selection_start
     summary = {
         "enabled": True,
         "top_k": int(config.training.top_k_checkpoints),
         "monitor": config.training.monitor,
         "monitor_mode": config.training.monitor_mode,
+        "validate_every_n_batches": config.training.validate_every_n_batches,
         "selection_split": "validation",
         "tie_break_order": [
             "best_postprocessed_monitor",
             "best_raw_monitor",
-            "earliest_epoch",
+            "earliest_validation_index",
         ],
         "selected_epoch": int(selected["epoch"]),
+        "selected_batch_in_epoch": selected.get("batch_in_epoch"),
+        "selected_global_step": selected.get("global_step"),
+        "selected_validation_index": selected.get("validation_index"),
+        "selected_checkpoint_label": selected_checkpoint_label,
         "selected_checkpoint_path": str(selected["checkpoint_path"]),
         "raw_monitor_value": float(selected["raw_monitor_value"]),
         "postprocessed_monitor_value": float(selected["postprocessed_monitor_value"]),
@@ -1009,7 +1103,7 @@ def select_checkpoint_after_validation_postprocessing(
         "candidates": [checkpoint_candidate_summary(candidate) for candidate in evaluated_candidates],
     }
     print(
-        f"Selected checkpoint epoch {selected['epoch']} after validation postprocessing: "
+        f"Selected checkpoint {selected_checkpoint_label} after validation postprocessing: "
         f"raw_{config.training.monitor}={selected['raw_monitor_value']:.6f}, "
         f"postprocessed_{config.training.monitor}={selected['postprocessed_monitor_value']:.6f} "
         f"from {len(evaluated_candidates)} candidate(s)."
@@ -1221,7 +1315,9 @@ def train_fold(
     save_run_summary(checkpoint_selection_summary, run_checkpoint_selection_path)
     selected_candidate = checkpoint_selection["selected"]
     best_epoch = int(selected_candidate["epoch"])
-    best_history = history[best_epoch - 1]
+    selected_validation_index = int(selected_candidate.get("validation_index") or best_epoch)
+    best_checkpoint_label = str(selected_candidate["checkpoint_label"])
+    best_history = history_item_by_validation_index(history, selected_validation_index)
     best_history.val_loss = float(selected_candidate["validation_loss"])
     best_history.val_metrics = selected_candidate["validation_metrics"]
     best_history.val_expert_usage = selected_candidate["validation_expert_usage"]
@@ -1238,7 +1334,7 @@ def train_fold(
     if validation_metrics is None:
         raise RuntimeError("Selected checkpoint validation metrics are unavailable.")
     print(
-        f"Selected epoch {best_epoch} validation evaluation: "
+        f"Selected checkpoint {best_checkpoint_label} validation evaluation: "
         f"val_loss={best_history.val_loss:.6f}, "
         f"val_acc={validation_metrics.accuracy:.4f}, "
         f"val_macro_f1={validation_metrics.macro_f1:.4f}, "
@@ -1255,13 +1351,13 @@ def train_fold(
         best_history.test_loss = None
         best_history.test_metrics = None
         best_history.test_expert_usage = None
-        print(f"Selected epoch {best_epoch} test evaluation skipped: fold has no configured test split.")
+        print(f"Selected checkpoint {best_checkpoint_label} test evaluation skipped: fold has no configured test split.")
     else:
         test_start = perf_counter()
         test_result = trainer.evaluate(
             model=model,
             data_loader=test_loader,
-            description=f"Selected epoch {best_epoch} [Test]",
+            description=f"Selected {best_checkpoint_label} [Test]",
             collect_outputs=True,
             track_pr_metrics=True,
             track_expert_usage=True,
@@ -1290,7 +1386,7 @@ def train_fold(
             "per_class_expected_calibration_error",
         )
         print(
-            f"Selected epoch {best_epoch} test evaluation: "
+            f"Selected checkpoint {best_checkpoint_label} test evaluation: "
             f"test_loss={test_result.loss:.6f}, "
             f"test_acc={test_result.metrics.accuracy:.4f}, "
             f"test_macro_f1={test_result.metrics.macro_f1:.4f}, "
@@ -1305,9 +1401,9 @@ def train_fold(
             f"({format_duration(test_duration_seconds)})."
         )
 
-    validation_probabilities_path = run_probabilities_dir / f"validation_best_epoch_{best_epoch}.csv"
+    validation_probabilities_path = run_probabilities_dir / f"validation_best_{best_checkpoint_label}.csv"
     test_probabilities_path = (
-        run_probabilities_dir / f"test_best_epoch_{best_epoch}.csv"
+        run_probabilities_dir / f"test_best_{best_checkpoint_label}.csv"
         if test_outputs_for_artifacts is not None
         else None
     )
@@ -1327,6 +1423,10 @@ def train_fold(
             validation_outputs=validation_outputs_for_artifacts,
             test_outputs=test_outputs_for_artifacts,
             best_epoch=best_epoch,
+            checkpoint_label=best_checkpoint_label,
+            batch_in_epoch=selected_candidate.get("batch_in_epoch"),
+            global_step=selected_candidate.get("global_step"),
+            validation_index=selected_validation_index,
             fold=fold_id,
             target_path=run_temperature_scaling_path,
         )
@@ -1356,6 +1456,10 @@ def train_fold(
             validation_outputs=validation_outputs_for_artifacts,
             test_outputs=test_outputs_for_artifacts,
             best_epoch=best_epoch,
+            checkpoint_label=best_checkpoint_label,
+            batch_in_epoch=selected_candidate.get("batch_in_epoch"),
+            global_step=selected_candidate.get("global_step"),
+            validation_index=selected_validation_index,
             fold=fold_id,
             target_path=run_directional_thresholds_path,
         )
@@ -1380,6 +1484,7 @@ def train_fold(
         thresholds_path=run_pr_thresholds_path,
         config=config,
         best_epoch=best_epoch,
+        checkpoint_label=best_checkpoint_label,
         fold=fold_id,
     )
     final_postprocessed_monitor_value = monitor_value_after_postprocessing(
@@ -1391,7 +1496,8 @@ def train_fold(
     selected_candidate["postprocessed_monitor_value"] = float(final_postprocessed_monitor_value)
     checkpoint_selection_summary["postprocessed_monitor_value"] = float(final_postprocessed_monitor_value)
     for candidate_summary in checkpoint_selection_summary.get("candidates", []):
-        if int(candidate_summary.get("epoch", -1)) == best_epoch:
+        candidate_validation_index = int(candidate_summary.get("validation_index") or candidate_summary.get("epoch", -1))
+        if candidate_validation_index == selected_validation_index:
             candidate_summary["selected"] = True
             candidate_summary["final_postprocessed_monitor_value"] = float(final_postprocessed_monitor_value)
         else:
@@ -1464,7 +1570,7 @@ def train_fold(
             run_directional_thresholds_path if directional_threshold_summary.get("enabled") else None
         ),
         directional_threshold_summary=directional_threshold_summary,
-        selected_best_epoch=best_epoch,
+        selected_best_epoch=selected_validation_index,
         selected_monitor_value=float(selected_candidate["postprocessed_monitor_value"]),
         selected_raw_monitor_value=float(selected_candidate["raw_monitor_value"]),
         selected_postprocessed_monitor_value=float(selected_candidate["postprocessed_monitor_value"]),
@@ -1493,6 +1599,7 @@ def train_fold(
     else:
         print(f"Fold {fold_id} validation/test probability outputs saved to: {run_probabilities_dir}")
     for epoch_index, result in enumerate(history, start=1):
+        history_label = checkpoint_label_for_history_item(result, epoch_index)
         test_suffix = "" if result.test_loss is None else f", test_loss={result.test_loss:.6f}"
         val_metrics = result.val_metrics
         metric_suffix = ""
@@ -1527,7 +1634,7 @@ def train_fold(
                 f"{pr_ap_summary(config, val_metrics, 'val')}"
             )
         print(
-            f"epoch {epoch_index}: train_loss={result.train_loss:.6f}, "
+            f"{history_label}: train_loss={result.train_loss:.6f}, "
             f"val_loss={result.val_loss:.6f}{test_suffix}{metric_suffix}"
         )
 

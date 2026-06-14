@@ -79,6 +79,41 @@ def test_epoch_history_contains_tailored_monitor_columns(artifact_dir: Path) -> 
     assert row["val_tailored_rate_penalty"] == "0.025"
 
 
+def test_epoch_history_writes_intra_epoch_metadata(artifact_dir: Path) -> None:
+    config = load_config()
+    config.training.monitor = "val_loss"
+    config.training.monitor_mode = "min"
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    target = artifact_dir / "metrics.csv"
+
+    save_epoch_history(
+        [
+            EpochResult(
+                train_loss=1.0,
+                val_loss=0.5,
+                val_metrics=metrics,
+                epoch=1,
+                batch_in_epoch=5000,
+                global_step=5000,
+                validation_index=1,
+                checkpoint_label="epoch_0001_step_00005000",
+            )
+        ],
+        target,
+        config=config,
+        fold="fold_001",
+    )
+
+    with target.open("r", newline="", encoding="utf-8") as handle:
+        row = next(csv.DictReader(handle))
+
+    assert row["epoch"] == "1"
+    assert row["validation_index"] == "1"
+    assert row["batch_in_epoch"] == "5000"
+    assert row["global_step"] == "5000"
+    assert row["checkpoint_label"] == "epoch_0001_step_00005000"
+
+
 def test_epoch_history_contains_threshold_columns(artifact_dir: Path) -> None:
     config = load_config()
     metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)

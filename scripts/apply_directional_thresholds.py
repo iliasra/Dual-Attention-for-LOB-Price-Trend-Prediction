@@ -155,7 +155,7 @@ def frame_to_arrays(frame: pd.DataFrame, config: ExperimentConfig) -> tuple[np.n
 
 def refinement_steps_from_config(step: float) -> tuple[float, ...]:
     """Return fine-grid refinement steps used by the training pipeline."""
-    return tuple(candidate for candidate in (0.01, 0.005) if candidate < float(step) - 1e-12)
+    return tuple(candidate for candidate in (0.01, 0.005, 0.002, 0.001) if candidate < float(step) - 1e-12)
 
 
 def fit_thresholds(

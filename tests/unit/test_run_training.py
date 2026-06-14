@@ -250,6 +250,106 @@ def test_checkpoint_selection_can_prefer_postprocessed_monitor(
     assert selection["summary"]["postprocessed_monitor_value"] == pytest.approx(0.95)
 
 
+def test_checkpoint_selection_distinguishes_intra_epoch_candidates(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config()
+    config.training.monitor = "val_macro_f1"
+    config.training.monitor_mode = "max"
+    first = artifact_dir / "epoch_0001_step_00005000.pth"
+    second = artifact_dir / "epoch_0001_step_00010000.pth"
+    first.write_bytes(b"candidate-1")
+    second.write_bytes(b"candidate-2")
+
+    class FakeTrainer:
+        top_checkpoint_candidates = [
+            CheckpointCandidate(
+                epoch=1,
+                batch_in_epoch=5000,
+                global_step=5000,
+                validation_index=1,
+                checkpoint_label="epoch_0001_step_00005000",
+                monitor_value=0.9,
+                path=first,
+            ),
+            CheckpointCandidate(
+                epoch=1,
+                batch_in_epoch=10000,
+                global_step=10000,
+                validation_index=2,
+                checkpoint_label="epoch_0001_step_00010000",
+                monitor_value=0.8,
+                path=second,
+            ),
+        ]
+
+    def fake_evaluate_candidate(**kwargs: object) -> dict[str, object]:
+        candidate = kwargs["candidate"]
+        assert isinstance(candidate, CheckpointCandidate)
+        return {
+            "epoch": candidate.epoch,
+            "batch_in_epoch": candidate.batch_in_epoch,
+            "global_step": candidate.global_step,
+            "validation_index": candidate.validation_index,
+            "checkpoint_label": candidate.checkpoint_label,
+            "checkpoint_path": candidate.path,
+            "raw_monitor_value": candidate.monitor_value,
+            "postprocessed_monitor_value": 0.7 if candidate.validation_index == 1 else 0.95,
+            "validation_loss": 1.0,
+            "validation_metrics": _dummy_metrics(),
+            "validation_expert_usage": None,
+            "validation_outputs": {},
+            "postprocessed_validation_metrics": _dummy_metrics(),
+            "postprocessed_validation_outputs": {},
+            "validation_seconds": 0.01,
+            "postprocessing_seconds": 0.02,
+            "candidate_dir": kwargs["candidate_dir"],
+            "temperature_scaling": {"enabled": False},
+            "temperature_scaling_path": None,
+            "directional_thresholds": {"enabled": False},
+            "directional_thresholds_path": None,
+        }
+
+    monkeypatch.setattr("run_training.evaluate_checkpoint_candidate_on_validation", fake_evaluate_candidate)
+
+    selection = select_checkpoint_after_validation_postprocessing(
+        config=config,
+        trainer=FakeTrainer(),  # type: ignore[arg-type]
+        model=object(),
+        validation_loader=object(),  # type: ignore[arg-type]
+        history=[
+            EpochResult(
+                train_loss=1.0,
+                val_loss=1.0,
+                val_metrics=_dummy_metrics(),
+                epoch=1,
+                batch_in_epoch=5000,
+                global_step=5000,
+                validation_index=1,
+                checkpoint_label="epoch_0001_step_00005000",
+            ),
+            EpochResult(
+                train_loss=1.0,
+                val_loss=1.0,
+                val_metrics=_dummy_metrics(),
+                epoch=1,
+                batch_in_epoch=10000,
+                global_step=10000,
+                validation_index=2,
+                checkpoint_label="epoch_0001_step_00010000",
+            ),
+        ],
+        fold="fold_001",
+        selection_dir=artifact_dir / "checkpoint_selection",
+    )
+
+    assert selection["summary"]["selected_epoch"] == 1
+    assert selection["summary"]["selected_validation_index"] == 2
+    assert selection["summary"]["selected_checkpoint_label"] == "epoch_0001_step_00010000"
+    assert selection["summary"]["candidates"][1]["global_step"] == 10000
+
+
 def test_checkpoint_selection_keeps_raw_validation_loss_monitor() -> None:
     config = load_config()
     config.training.monitor = "val_loss"

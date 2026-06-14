@@ -30,12 +30,18 @@ def artifact_dir(request: pytest.FixtureRequest) -> Path:
     return path
 
 
+def _training_config():
+    config = load_config().training
+    config.validate_every_n_batches = "epoch"
+    return config
+
+
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
 def test_lob_trainer_stops_after_patience_without_val_improvement(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = load_config().training
+    config = _training_config()
     config.epochs = 10
     config.early_stopping_patience = 2
     config.early_stopping_warmup = 0
@@ -67,7 +73,7 @@ def test_lob_trainer_does_not_check_early_stopping_during_warmup(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = load_config().training
+    config = _training_config()
     config.epochs = 10
     config.early_stopping_patience = 1
     config.early_stopping_warmup = 3
@@ -95,7 +101,7 @@ def test_lob_trainer_does_not_check_early_stopping_during_warmup(
 
 
 def test_run_epoch_raises_on_non_finite_logits(artifact_dir: Path) -> None:
-    config = load_config().training
+    config = _training_config()
     config.device = "cpu"
     config.use_amp = False
     config.model_dir = str(artifact_dir)
@@ -135,7 +141,7 @@ def test_lob_trainer_uses_bf16_amp_when_cuda_supports_it(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = load_config().training
+    config = _training_config()
     config.device = "cuda"
     config.use_amp = True
     config.model_dir = str(artifact_dir)
@@ -156,7 +162,7 @@ def test_lob_trainer_fit_uses_only_train_and_validation_loaders(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = load_config().training
+    config = _training_config()
     config.epochs = 3
     config.early_stopping_patience = 0
     config.monitor = "val_loss"
@@ -193,7 +199,7 @@ def test_lob_trainer_fit_tracks_validation_ranking_metrics_without_outputs(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = load_config().training
+    config = _training_config()
     config.epochs = 2
     config.early_stopping_patience = 0
     config.monitor = "val_loss"
@@ -229,7 +235,7 @@ def test_lob_trainer_saves_only_configured_top_k_checkpoints(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = load_config().training
+    config = _training_config()
     config.epochs = 4
     config.early_stopping_patience = 0
     config.monitor = "val_loss"
@@ -261,6 +267,97 @@ def test_lob_trainer_saves_only_configured_top_k_checkpoints(
     assert config.best_model_path.exists()
 
 
+class TinySequenceClassifier(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = nn.Linear(1, 3)
+
+    def forward(self, x_batch: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
+        del t_batch
+        return self.linear(x_batch[:, -1, :])
+
+
+def _tiny_batches(count: int) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    return [
+        (
+            torch.full((2, 2, 1), float(index), dtype=torch.float32),
+            torch.zeros((2, 2), dtype=torch.float32),
+            torch.tensor([0, 2], dtype=torch.long),
+        )
+        for index in range(count)
+    ]
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_validates_every_n_batches_and_at_epoch_end(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _training_config()
+    config.epochs = 1
+    config.validate_every_n_batches = 2
+    config.early_stopping_patience = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.device = "cpu"
+    config.use_amp = False
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_losses = iter([1.0, 0.9, 0.8])
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=next(validation_losses), metrics=metrics)
+
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    _, history = trainer.fit(TinySequenceClassifier(), train_loader=_tiny_batches(5), val_loader=[])
+
+    assert [(item.epoch, item.batch_in_epoch, item.global_step, item.validation_index) for item in history] == [
+        (1, 2, 2, 1),
+        (1, 4, 4, 2),
+        (1, 5, 5, 3),
+    ]
+    assert [item.checkpoint_label for item in history] == [
+        "epoch_0001_step_00000002",
+        "epoch_0001_step_00000004",
+        "epoch_0001_step_00000005",
+    ]
+    assert config.checkpoint_path(1, global_step=5).exists()
+    assert config.best_model_path.exists()
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_early_stopping_counts_validation_intervals(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _training_config()
+    config.epochs = 2
+    config.validate_every_n_batches = 2
+    config.early_stopping_patience = 2
+    config.early_stopping_warmup = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.device = "cpu"
+    config.use_amp = False
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_losses = iter([1.0, 1.1, 1.2, 0.5])
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=next(validation_losses), metrics=metrics)
+
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    _, history = trainer.fit(TinySequenceClassifier(), train_loader=_tiny_batches(10), val_loader=[])
+
+    assert len(history) == 3
+    assert [item.global_step for item in history] == [2, 4, 6]
+    assert [item.val_loss for item in history] == [1.0, 1.1, 1.2]
+
+
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
 def test_lob_trainer_sets_epoch_on_train_sampler(
     artifact_dir: Path,
@@ -277,7 +374,7 @@ def test_lob_trainer_sets_epoch_on_train_sampler(
         def __init__(self) -> None:
             self.sampler = DummySampler()
 
-    config = load_config().training
+    config = _training_config()
     config.epochs = 3
     config.early_stopping_patience = 0
     config.monitor = "val_loss"
@@ -307,7 +404,7 @@ def test_lob_trainer_can_monitor_directional_macro_f1(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = load_config().training
+    config = _training_config()
     config.epochs = 3
     config.early_stopping_patience = 0
     config.monitor = "val_directional_macro_f1"
@@ -339,7 +436,7 @@ def test_lob_trainer_can_monitor_tailored_score(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = load_config().training
+    config = _training_config()
     config.epochs = 3
     config.early_stopping_patience = 0
     config.monitor = "tailored_score"
@@ -376,7 +473,7 @@ def test_lob_trainer_can_monitor_tailored_score(
 
 
 def test_lob_trainer_uses_configured_adam_optimizer() -> None:
-    config = load_config().training
+    config = _training_config()
     config.device = "cpu"
     config.optimizer = "adam"
     trainer = LobTrainer(config)
@@ -392,7 +489,7 @@ def test_lob_trainer_min_delta_filters_tiny_val_loss_improvements(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = load_config().training
+    config = _training_config()
     config.epochs = 2
     config.early_stopping_patience = 0
     config.early_stopping_min_delta = 0.002
@@ -566,7 +663,7 @@ def test_lob_trainer_evaluate_collects_moe_expert_usage() -> None:
                 device=x.device,
             )
 
-    config = load_config().training
+    config = _training_config()
     config.device = "cpu"
     config.class_weights = None
     trainer = LobTrainer(config)
@@ -608,7 +705,7 @@ def test_lob_trainer_evaluate_without_moe_routing_has_no_expert_usage() -> None:
             del x, t
             return torch.tensor([[4.0, 0.0, 0.0]], device=self.dummy.device)
 
-    config = load_config().training
+    config = _training_config()
     config.device = "cpu"
     config.class_weights = None
     trainer = LobTrainer(config)
@@ -646,7 +743,7 @@ def test_lob_trainer_evaluate_can_collect_probability_outputs() -> None:
                 ]
             )
 
-    config = load_config().training
+    config = _training_config()
     config.device = "cpu"
     config.class_weights = None
     trainer = LobTrainer(config)
@@ -687,7 +784,7 @@ def test_lob_trainer_evaluate_skips_optional_expensive_tracking_by_default() -> 
             del x, t
             return torch.tensor([[4.0, 0.0, 0.0]])
 
-    config = load_config().training
+    config = _training_config()
     config.device = "cpu"
     config.class_weights = None
     trainer = LobTrainer(config)

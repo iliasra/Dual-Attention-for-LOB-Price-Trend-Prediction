@@ -978,6 +978,32 @@ def test_training_early_stopping_warmup_is_optional_and_validated(artifact_dir: 
         ExperimentConfig.from_yaml(config_path)
 
 
+def test_training_validate_every_n_batches_defaults_to_epoch_and_validates(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"].pop("validate_every_n_batches", None)
+
+    config_path = artifact_dir / "legacy_without_validate_every.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.validate_every_n_batches == "epoch"
+    assert loaded.training.validates_by_epoch is True
+
+    payload["training"]["validate_every_n_batches"] = 5000
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.validate_every_n_batches == 5000
+    assert loaded.training.validates_by_epoch is False
+
+    for bad_value in (0, -1, 1.5, "batch", "5000"):
+        payload["training"]["validate_every_n_batches"] = bad_value
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="validate_every_n_batches"):
+            ExperimentConfig.from_yaml(config_path)
+
+
 def test_training_tailored_monitor_requires_params_and_max_mode(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
@@ -1220,6 +1246,18 @@ def test_active_configs_use_top_five_checkpoints(config_path: Path) -> None:
     loaded = ExperimentConfig.from_yaml(config_path)
 
     assert loaded.training.top_k_checkpoints == 5
+
+
+def test_active_configs_use_expected_validation_schedule() -> None:
+    pipeline = ExperimentConfig.from_yaml(Path("configs/pipeline_config.yaml"))
+    fi2010 = ExperimentConfig.from_yaml(Path("configs/config_TLOB_F1_2010.yaml"))
+    fi2010_2 = ExperimentConfig.from_yaml(Path("configs/config_TLOB_F1_2010_2.yaml"))
+
+    assert pipeline.training.validate_every_n_batches == 5000
+    assert pipeline.training.early_stopping_patience == 8
+    assert pipeline.training.early_stopping_warmup == 1
+    assert fi2010.training.validate_every_n_batches == "epoch"
+    assert fi2010_2.training.validate_every_n_batches == "epoch"
 
 
 def test_directional_threshold_config_validates_methods_and_floors(artifact_dir: Path) -> None:

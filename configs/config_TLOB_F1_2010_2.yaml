@@ -150,6 +150,7 @@ training:
   early_stopping_patience: 8
   early_stopping_warmup: 0
   early_stopping_min_delta: 0.0
+  validate_every_n_batches: "epoch" # FI2010 keeps legacy validation/checkpointing at epoch boundaries
   monitor: val_macro_f1
   monitor_mode: max
   top_k_checkpoints: 5 # keep the best k raw-monitor checkpoints, then select after calibration/thresholding

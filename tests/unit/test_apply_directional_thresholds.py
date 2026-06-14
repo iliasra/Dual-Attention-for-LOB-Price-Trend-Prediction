@@ -41,6 +41,6 @@ def test_replay_fit_thresholds_supports_tailored_score() -> None:
 
     selection, refinements = fit_thresholds(config, targets, probabilities)
 
-    assert refinements == (0.01, 0.005)
+    assert refinements == (0.01, 0.005, 0.002, 0.001)
     assert (selection.threshold_down, selection.threshold_up) == pytest.approx((0.2, 0.2))
     assert selection.score_details["tailored_lambda_rate"] == pytest.approx(0.5)
