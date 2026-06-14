@@ -5,6 +5,10 @@
 *.o[0-9]*
 *.e[0-9]*
 
+# Results dir
+results/*
+!results/.gitkeep
+
 # Data
 data/*
 !data/.gitkeep 
