@@ -5,9 +5,10 @@
 *.o[0-9]*
 *.e[0-9]*
 
-# Results dir
+# Results/logs dir
 results/*
 !results/.gitkeep
+logs/*
 
 # Data
 data/*
