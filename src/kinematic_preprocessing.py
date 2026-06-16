@@ -1347,6 +1347,8 @@ class DerivativeNormalizer:
         if not self.stats_:
             self.stats_ = self.load_stats(self.output_path)
         if not self.stats_:
+            if not derivative_feature_columns(df):
+                return df.copy()
             raise ValueError("Derivative normalizer has no fitted statistics to apply.")
 
         normalized = df.copy()

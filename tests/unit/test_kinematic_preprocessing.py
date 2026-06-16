@@ -5,6 +5,7 @@ import shutil
 
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 from configuration import (
@@ -215,6 +216,40 @@ def test_derivative_normalizer_saves_metadata_without_polluting_loaded_stats() -
 
     assert raw_payload["__metadata__"] == metadata
     assert set(loaded_stats) == {"microprice_2_kin_vel"}
+
+
+def test_derivative_normalizer_noops_when_no_derivative_features() -> None:
+    artifact_dir = Path(__file__).resolve().parent / ".test_artifacts" / "derivative_normalizer_static_only"
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True)
+    stats_path = artifact_dir / "derivatives_stats.yaml"
+    static_only = pd.DataFrame(
+        {
+            "price_static_bid_price_1": [0.1, 0.2, 0.3],
+            "volume_static_bid_size_1": [0.4, 0.5, 0.6],
+            "time": [34200.0, 34201.0, 34202.0],
+        }
+    )
+
+    normalizer = DerivativeNormalizer(stats_path).fit([static_only])
+    normalized = normalizer.transform(static_only)
+
+    pd.testing.assert_frame_equal(normalized, static_only)
+    assert normalized is not static_only
+    assert DerivativeNormalizer.load_stats(stats_path) == {}
+
+
+def test_derivative_normalizer_still_fails_without_stats_for_derivative_features() -> None:
+    artifact_dir = Path(__file__).resolve().parent / ".test_artifacts" / "derivative_normalizer_missing_stats"
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True)
+    stats_path = artifact_dir / "missing_stats.yaml"
+    derivatives = pd.DataFrame({"price_kin_vel": [1.0, 2.0, 3.0]})
+
+    with pytest.raises(ValueError, match="no fitted statistics"):
+        DerivativeNormalizer(stats_path).transform(derivatives)
 
 
 def test_derivative_normalizer_zscore_transform_matches_existing_formula() -> None:
