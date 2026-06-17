@@ -257,6 +257,8 @@ def test_model_layer_config_defaults_for_old_snapshots(artifact_dir: Path) -> No
     del payload["model"]["latent_spatial_embed_dim"]
     payload["model"].pop("use_moe", None)
     payload["model"].pop("classifier_pooling", None)
+    payload["model"].pop("auxiliary_heads", None)
+    payload["training"].pop("auxiliary_losses", None)
 
     config_path = artifact_dir / "old_model_layer_snapshot.yaml"
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
@@ -267,6 +269,9 @@ def test_model_layer_config_defaults_for_old_snapshots(artifact_dir: Path) -> No
     assert loaded.model.use_moe is True
     assert loaded.model.classifier_pooling.methods == ("last",)
     assert loaded.model.classifier_pooling.last_k == 1
+    assert loaded.model.auxiliary_heads.enabled is False
+    assert loaded.training.auxiliary_losses.movement_weight == 0.0
+    assert loaded.training.auxiliary_losses.direction_weight == 0.0
 
 
 def test_classifier_pooling_config_is_validated(artifact_dir: Path) -> None:
@@ -295,6 +300,84 @@ def test_classifier_pooling_config_is_validated(artifact_dir: Path) -> None:
         payload["model"]["classifier_pooling"] = classifier_pooling
         config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
         with pytest.raises(ValueError, match="classifier_pooling"):
+            ExperimentConfig.from_yaml(config_path)
+
+
+def test_auxiliary_head_and_loss_configs_are_loaded(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["model"]["auxiliary_heads"] = {
+        "enabled": True,
+        "movement": True,
+        "direction": False,
+        "hidden_dim": 64,
+    }
+    payload["training"]["auxiliary_losses"] = {
+        "movement_weight": 0.05,
+        "direction_weight": 0.02,
+        "consistency_weight": 0.01,
+        "movement_pos_weight": "auto_clipped",
+        "movement_pos_weight_min": 0.5,
+        "movement_pos_weight_max": 4.0,
+        "direction_class_weight_beta": 0.25,
+    }
+    config_path = artifact_dir / "auxiliary_config.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.model.auxiliary_heads.enabled is True
+    assert loaded.model.auxiliary_heads.direction is False
+    assert loaded.model.auxiliary_heads.hidden_dim == 64
+    assert loaded.training.auxiliary_losses.enabled is True
+    assert loaded.training.auxiliary_losses.movement_weight == 0.05
+    assert loaded.training.auxiliary_losses.movement_pos_weight == "auto_clipped"
+    assert loaded.training.auxiliary_losses.direction_class_weight_beta == 0.25
+
+
+def test_legacy_auxiliary_head_dropout_is_ignored(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["model"]["auxiliary_heads"] = {
+        "enabled": True,
+        "movement": True,
+        "direction": True,
+        "hidden_dim": 64,
+        "dropout": 0.2,
+    }
+    config_path = artifact_dir / "legacy_auxiliary_dropout.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.model.auxiliary_heads.hidden_dim == 64
+    assert not hasattr(loaded.model.auxiliary_heads, "dropout")
+
+
+def test_auxiliary_configs_are_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    base_payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    config_path = artifact_dir / "bad_auxiliary_config.yaml"
+
+    invalid_cases = (
+        ("model", "auxiliary_heads", {"enabled": True, "movement": True, "direction": True, "hidden_dim": 0}),
+        ("training", "auxiliary_losses", {"movement_weight": -0.1}),
+        ("training", "auxiliary_losses", {"direction_weight": -0.1}),
+        ("training", "auxiliary_losses", {"consistency_weight": -0.1}),
+        ("training", "auxiliary_losses", {"movement_pos_weight": "bad"}),
+        ("training", "auxiliary_losses", {"movement_pos_weight_min": 0.0}),
+        (
+            "training",
+            "auxiliary_losses",
+            {"movement_pos_weight_min": 2.0, "movement_pos_weight_max": 1.0},
+        ),
+        ("training", "auxiliary_losses", {"direction_class_weight_beta": -0.1}),
+    )
+    for section, key, value in invalid_cases:
+        payload = yaml.safe_load(yaml.safe_dump(base_payload))
+        payload[section][key] = value
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="auxiliary"):
             ExperimentConfig.from_yaml(config_path)
 
 

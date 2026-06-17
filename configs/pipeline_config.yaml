@@ -175,6 +175,11 @@ model:
   classifier_pooling:
     methods: [last, mean, max] # allowed elements: last, mean, max; multiple values are concatenated
     last_k: 16 # number of final tokens used by mean/max pooling
+  auxiliary_heads:
+    enabled: true # add movement/neutral and up/down auxiliary heads during training
+    movement: true # binary movement head: directional vs neutral
+    direction: true # directional head: up vs down on non-neutral examples
+    hidden_dim: null # null = d_model // 2 shared classifier trunk
 
 training:
   device: cuda # allowed: cpu, cuda
@@ -201,6 +206,14 @@ training:
   class_weight_beta: 0.0
   class_weight_min: 1.0
   class_weight_max: 1.0
+  auxiliary_losses:
+    movement_weight: 0.05 # BCE movement-vs-neutral auxiliary loss weight
+    direction_weight: 0.05 # CE up-vs-down auxiliary loss weight on directional examples
+    consistency_weight: 0.0 # optional MSE between main and movement probabilities
+    movement_pos_weight: auto_clipped # auto = neutral_count / directional_count, clipped below
+    movement_pos_weight_min: 0.5
+    movement_pos_weight_max: 5.0
+    direction_class_weight_beta: 0.0 # up/down auxiliary class weighting exponent
   grad_clip_norm: 1.0
   model_dir: ../results
   use_amp: true

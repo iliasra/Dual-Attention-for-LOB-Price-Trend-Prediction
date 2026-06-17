@@ -127,6 +127,11 @@ model:
   moe_router_noise: 0.01
   moe_load_balancing_weight: 0.01
   classifier_dropout: 0.1
+  auxiliary_heads:
+    enabled: true
+    movement: true
+    direction: true
+    hidden_dim:
 
 training:
   device: cpu
@@ -144,6 +149,14 @@ training:
   class_weight_beta: 0.25
   class_weight_min: 0.5
   class_weight_max: 3.0
+  auxiliary_losses:
+    movement_weight: 0.05
+    direction_weight: 0.05
+    consistency_weight: 0.0
+    movement_pos_weight: auto_clipped
+    movement_pos_weight_min: 0.5
+    movement_pos_weight_max: 5.0
+    direction_class_weight_beta: 0.0
   grad_clip_norm: 1.0
   model_dir: .smoke
   use_amp: false

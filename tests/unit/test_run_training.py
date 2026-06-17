@@ -15,6 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from run_training import (
+    build_auxiliary_criterion,
     build_train_sampler,
     monitor_value_after_postprocessing,
     select_checkpoint_after_validation_postprocessing,
@@ -49,6 +50,30 @@ def test_fold_artifact_paths_are_scoped_by_fold() -> None:
     assert paths["sequence_dir"] == Path("data/sequences/fold_003")
     assert paths["log_dir"] == Path("logs/run_7/fold_003")
     assert paths["result_dir"] == Path("results/run_7/fold_003")
+
+
+def test_build_auxiliary_criterion_uses_auto_clipped_weights() -> None:
+    config = load_config()
+    config.model.auxiliary_heads.enabled = True
+    config.model.auxiliary_heads.movement = True
+    config.model.auxiliary_heads.direction = True
+    config.training.auxiliary_losses.movement_weight = 0.05
+    config.training.auxiliary_losses.direction_weight = 0.05
+    config.training.auxiliary_losses.movement_pos_weight = "auto_clipped"
+    config.training.auxiliary_losses.movement_pos_weight_min = 0.5
+    config.training.auxiliary_losses.movement_pos_weight_max = 5.0
+    config.training.auxiliary_losses.direction_class_weight_beta = 1.0
+    config.training.class_weight_min = 0.1
+    config.training.class_weight_max = 10.0
+
+    criterion, summary = build_auxiliary_criterion(config, class_counts=[10, 60, 30])
+
+    assert criterion is not None
+    assert summary["enabled"] is True
+    assert summary["movement_pos_weight"] == pytest.approx(1.5)
+    assert summary["direction_class_weights"] == pytest.approx([0.5, 1.5])
+    assert float(criterion.movement_pos_weight) == pytest.approx(1.5)
+    assert criterion.direction_class_weights.tolist() == pytest.approx([0.5, 1.5])
 
 
 def test_sequence_time_span_quantile_uses_train_window_duration() -> None:

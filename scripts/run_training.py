@@ -57,6 +57,7 @@ from training import (
     ClassificationMetrics,
     EpochResult,
     LobTrainer,
+    MovementDirectionAuxiliaryLoss,
     class_weights_from_class_counts,
     class_weights_from_sequence_labels,
     classification_metrics_from_predictions,
@@ -225,6 +226,89 @@ def resolve_class_weights(
         "min": config.training.class_weight_min,
         "max": config.training.class_weight_max,
         "source": source,
+    }
+
+
+def build_auxiliary_criterion(
+    config: ExperimentConfig,
+    *,
+    class_counts: list[int],
+) -> tuple[MovementDirectionAuxiliaryLoss | None, dict[str, Any]]:
+    """Create the optional movement/direction auxiliary loss for training."""
+    aux_heads = config.model.auxiliary_heads
+    aux_losses = config.training.auxiliary_losses
+    required_labels = {-1: "down", 0: "neutral", 1: "up"}
+    missing = [name for raw_label, name in required_labels.items() if raw_label not in config.data.label_mapping]
+    if missing:
+        raise ValueError(f"Auxiliary heads require label_mapping entries for: {', '.join(missing)}.")
+
+    down_id = int(config.data.label_mapping[-1])
+    neutral_id = int(config.data.label_mapping[0])
+    up_id = int(config.data.label_mapping[1])
+    counts = np.asarray(class_counts, dtype=np.int64)
+    if counts.size < config.model.num_classes:
+        counts = np.pad(counts, (0, config.model.num_classes - counts.size))
+
+    neutral_count = int(counts[neutral_id]) if 0 <= neutral_id < counts.size else 0
+    down_count = int(counts[down_id]) if 0 <= down_id < counts.size else 0
+    up_count = int(counts[up_id]) if 0 <= up_id < counts.size else 0
+    directional_count = int(down_count + up_count)
+
+    movement_pos_weight: float | None = None
+    if aux_losses.movement_pos_weight == "auto_clipped":
+        raw_ratio = float("inf") if directional_count == 0 else float(neutral_count / max(directional_count, 1))
+        movement_pos_weight = float(
+            np.clip(raw_ratio, aux_losses.movement_pos_weight_min, aux_losses.movement_pos_weight_max)
+        )
+    elif aux_losses.movement_pos_weight is not None:
+        movement_pos_weight = float(aux_losses.movement_pos_weight)
+
+    direction_weights: list[float] | None = None
+    direction_weights_tensor: torch.Tensor | None = None
+    if aux_losses.direction_weight > 0.0 and directional_count > 0:
+        direction_weights, _ = class_weights_from_class_counts(
+            [up_count, down_count],
+            beta=aux_losses.direction_class_weight_beta,
+            min_weight=config.training.class_weight_min,
+            max_weight=config.training.class_weight_max,
+        )
+        direction_weights_tensor = torch.tensor(direction_weights, dtype=torch.float32)
+
+    enabled = bool(aux_heads.enabled and aux_losses.enabled)
+    criterion = None
+    if enabled:
+        criterion = MovementDirectionAuxiliaryLoss(
+            up_id=up_id,
+            neutral_id=neutral_id,
+            down_id=down_id,
+            movement_weight=aux_losses.movement_weight if aux_heads.movement else 0.0,
+            direction_weight=aux_losses.direction_weight if aux_heads.direction else 0.0,
+            consistency_weight=aux_losses.consistency_weight if aux_heads.movement else 0.0,
+            movement_pos_weight=movement_pos_weight,
+            direction_class_weights=direction_weights_tensor,
+        )
+
+    return criterion, {
+        "enabled": enabled,
+        "heads_enabled": bool(aux_heads.enabled),
+        "movement_head": bool(aux_heads.enabled and aux_heads.movement),
+        "direction_head": bool(aux_heads.enabled and aux_heads.direction),
+        "movement_weight": float(aux_losses.movement_weight),
+        "direction_weight": float(aux_losses.direction_weight),
+        "consistency_weight": float(aux_losses.consistency_weight),
+        "movement_pos_weight": movement_pos_weight,
+        "movement_pos_weight_mode": aux_losses.movement_pos_weight,
+        "movement_pos_weight_min": float(aux_losses.movement_pos_weight_min),
+        "movement_pos_weight_max": float(aux_losses.movement_pos_weight_max),
+        "direction_class_weight_beta": float(aux_losses.direction_class_weight_beta),
+        "direction_class_weights": direction_weights,
+        "label_ids": {"down": down_id, "neutral": neutral_id, "up": up_id},
+        "counts": {
+            "down": down_count,
+            "neutral": neutral_count,
+            "up": up_count,
+            "directional": directional_count,
+        },
     }
 
 
@@ -1229,6 +1313,20 @@ def train_fold(
         f"source={class_weight_summary['source']}, counts={class_weight_summary['counts']}, "
         f"weights={class_weight_summary['weights']}."
     )
+    auxiliary_criterion, auxiliary_loss_summary = build_auxiliary_criterion(
+        config,
+        class_counts=list(class_weight_summary["counts"]),  # type: ignore[arg-type]
+    )
+    if auxiliary_loss_summary.get("enabled"):
+        print(
+            f"Fold '{fold_id}' auxiliary losses enabled: "
+            f"movement_weight={auxiliary_loss_summary['movement_weight']}, "
+            f"direction_weight={auxiliary_loss_summary['direction_weight']}, "
+            f"movement_pos_weight={auxiliary_loss_summary['movement_pos_weight']}, "
+            f"direction_class_weights={auxiliary_loss_summary['direction_class_weights']}."
+        )
+    else:
+        print(f"Fold '{fold_id}' auxiliary losses disabled.")
 
     loader_kwargs = config.training.data_loader_kwargs()
     loader_kwargs["worker_init_fn"] = seed_torch_worker
@@ -1297,8 +1395,9 @@ def train_fold(
         model_parameters=model_parameters,
         preprocessing_metadata=preprocessing_metadata,
         sampling_summary=sampling_summary,
+        auxiliary_loss_summary=auxiliary_loss_summary,
     )
-    trainer = LobTrainer(config.training)
+    trainer = LobTrainer(config.training, auxiliary_criterion=auxiliary_criterion)
     fit_start = perf_counter()
     model, history = trainer.fit(model, train_loader, validation_loader)
     fit_duration_seconds = perf_counter() - fit_start
@@ -1578,6 +1677,7 @@ def train_fold(
         checkpoint_selection_summary=checkpoint_selection_summary,
         preprocessing_metadata=preprocessing_metadata,
         sampling_summary=sampling_summary,
+        auxiliary_loss_summary=auxiliary_loss_summary,
         timing=timing,
         fold=fold_id,
     )
@@ -1645,6 +1745,7 @@ def train_fold(
         "best_model_path": str(config.training.best_model_path),
         "model_max_dt": max_dt_summary,
         "class_weights": class_weight_summary,
+        "auxiliary_losses": auxiliary_loss_summary,
         "sampling": sampling_summary,
         "dataset_sizes": dataset_sizes,
         "timing": timing,

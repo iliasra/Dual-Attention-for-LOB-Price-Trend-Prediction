@@ -824,10 +824,97 @@ class CheckpointCandidate:
     checkpoint_label: str | None = None
 
 
+class MovementDirectionAuxiliaryLoss(nn.Module):
+    def __init__(
+        self,
+        *,
+        up_id: int,
+        neutral_id: int,
+        down_id: int,
+        movement_weight: float = 0.0,
+        direction_weight: float = 0.0,
+        consistency_weight: float = 0.0,
+        movement_pos_weight: float | None = None,
+        direction_class_weights: torch.Tensor | None = None,
+    ) -> None:
+        super().__init__()
+        self.up_id = int(up_id)
+        self.neutral_id = int(neutral_id)
+        self.down_id = int(down_id)
+        self.movement_weight = float(movement_weight)
+        self.direction_weight = float(direction_weight)
+        self.consistency_weight = float(consistency_weight)
+        self.register_buffer(
+            "movement_pos_weight",
+            None if movement_pos_weight is None else torch.tensor(float(movement_pos_weight), dtype=torch.float32),
+            persistent=False,
+        )
+        if direction_class_weights is None:
+            self.direction_class_weights = None
+        else:
+            self.register_buffer("direction_class_weights", direction_class_weights.float(), persistent=False)
+
+    def forward(
+        self,
+        *,
+        class_logits: torch.Tensor,
+        targets: torch.Tensor,
+        auxiliary_outputs: dict[str, torch.Tensor] | None,
+    ) -> torch.Tensor:
+        if not auxiliary_outputs:
+            return class_logits.new_zeros(())
+
+        total = class_logits.new_zeros(())
+
+        movement_logit = auxiliary_outputs.get("movement_logit")
+        if movement_logit is not None and self.movement_weight > 0.0:
+            movement_target = (targets != self.neutral_id).float()
+            total = total + self.movement_weight * F.binary_cross_entropy_with_logits(
+                movement_logit.float(),
+                movement_target,
+                pos_weight=self.movement_pos_weight,
+            )
+
+        direction_logits = auxiliary_outputs.get("direction_logits")
+        if direction_logits is not None and self.direction_weight > 0.0:
+            directional_mask = targets != self.neutral_id
+            if bool(directional_mask.any()):
+                directional_targets_raw = targets[directional_mask]
+                direction_targets = torch.where(
+                    directional_targets_raw == self.up_id,
+                    torch.zeros_like(directional_targets_raw),
+                    torch.ones_like(directional_targets_raw),
+                )
+                total = total + self.direction_weight * F.cross_entropy(
+                    direction_logits[directional_mask].float(),
+                    direction_targets.long(),
+                    weight=self.direction_class_weights,
+                )
+
+        if movement_logit is not None and self.consistency_weight > 0.0:
+            probabilities = torch.softmax(class_logits.float(), dim=-1)
+            main_movement_prob = (
+                probabilities[:, self.up_id] + probabilities[:, self.down_id]
+            ).clamp(1e-6, 1.0 - 1e-6)
+            aux_movement_prob = torch.sigmoid(movement_logit.float()).clamp(1e-6, 1.0 - 1e-6)
+            total = total + self.consistency_weight * F.mse_loss(
+                aux_movement_prob,
+                main_movement_prob.detach(),
+            )
+
+        return total
+
+
 class LobTrainer:
-    def __init__(self, config: TrainingConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: TrainingConfig | None = None,
+        *,
+        auxiliary_criterion: MovementDirectionAuxiliaryLoss | None = None,
+    ) -> None:
         self.config = config or load_config().training
         self.device = torch.device(self.config.device)
+        self.auxiliary_criterion = None if auxiliary_criterion is None else auxiliary_criterion.to(self.device)
         self.top_checkpoint_candidates: list[CheckpointCandidate] = []
         self.amp_enabled = self.config.use_amp and self.device.type == "cuda"
         self.amp_dtype = torch.bfloat16 if self.amp_enabled and self._cuda_supports_bf16(self.device) else None
@@ -862,6 +949,20 @@ class LobTrainer:
         if self.config.class_weights is not None:
             alpha = torch.tensor(self.config.class_weights, dtype=torch.float32, device=self.device)
         return FocalLoss(alpha=alpha, gamma=self.config.focal_gamma).to(self.device)
+
+    def _auxiliary_loss(
+        self,
+        model: nn.Module,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.auxiliary_criterion is None:
+            return logits.new_zeros(())
+        return self.auxiliary_criterion(
+            class_logits=logits,
+            targets=targets,
+            auxiliary_outputs=getattr(model, "auxiliary_outputs", None),
+        )
 
     def _amp_context(self):
         if self.amp_dtype is None:
@@ -1128,6 +1229,8 @@ class LobTrainer:
                 with self._amp_context():
                     logits = model(x_batch, t_batch)
                     loss = criterion(logits, y_batch)
+                    aux_loss = self._auxiliary_loss(model, logits, y_batch)
+                    loss = loss + aux_loss
                     moe_loss = getattr(model, "moe_load_balancing_loss", None)
                     if moe_loss is not None:
                         loss = loss + moe_loss
@@ -1270,6 +1373,8 @@ class LobTrainer:
             with self._amp_context():
                 logits = model(x_batch, t_batch)
                 loss = criterion(logits, y_batch)
+                aux_loss = self._auxiliary_loss(model, logits, y_batch)
+                loss = loss + aux_loss
                 moe_loss = getattr(model, "moe_load_balancing_loss", None)  # load-balancing for MoE training
                 if moe_loss is not None:  # add MoE auxiliary loss only when the model exposes it
                     loss = loss + moe_loss

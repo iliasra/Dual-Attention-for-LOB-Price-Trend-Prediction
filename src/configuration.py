@@ -165,6 +165,12 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "methods": None,
             "last_k": None,
         },
+        "auxiliary_heads": {
+            "enabled": None,
+            "movement": None,
+            "direction": None,
+            "hidden_dim": None,
+        },
     },
     "training": {
         "device": None,
@@ -192,6 +198,15 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "class_weight_beta": None,
         "class_weight_min": None,
         "class_weight_max": None,
+        "auxiliary_losses": {
+            "movement_weight": None,
+            "direction_weight": None,
+            "consistency_weight": None,
+            "movement_pos_weight": None,
+            "movement_pos_weight_min": None,
+            "movement_pos_weight_max": None,
+            "direction_class_weight_beta": None,
+        },
         "grad_clip_norm": None,
         "model_dir": None,
         "use_amp": None,
@@ -230,10 +245,23 @@ OPTIONAL_CONFIG_KEYS = {
     "model.latent_spatial_embed_dim",
     "model.use_moe",
     "model.classifier_pooling",
+    "model.auxiliary_heads",
+    "model.auxiliary_heads.enabled",
+    "model.auxiliary_heads.movement",
+    "model.auxiliary_heads.direction",
+    "model.auxiliary_heads.hidden_dim",
     "training.monitor_params",
     "training.monitor_params.base_metric",
     "training.top_k_checkpoints",
     "training.validate_every_n_batches",
+    "training.auxiliary_losses",
+    "training.auxiliary_losses.movement_weight",
+    "training.auxiliary_losses.direction_weight",
+    "training.auxiliary_losses.consistency_weight",
+    "training.auxiliary_losses.movement_pos_weight",
+    "training.auxiliary_losses.movement_pos_weight_min",
+    "training.auxiliary_losses.movement_pos_weight_max",
+    "training.auxiliary_losses.direction_class_weight_beta",
     "preprocessing.save_processed_dataframes",
     "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
     "preprocessing.sample_clock",
@@ -263,6 +291,9 @@ OPTIONAL_CONFIG_KEYS = {
     "training.directional_thresholds.up_quantile",
     "training.directional_thresholds.down_quantile",
     "training.sampling",
+}
+LEGACY_IGNORED_CONFIG_KEYS = {
+    "model.auxiliary_heads.dropout",
 }
 
 
@@ -335,8 +366,9 @@ def _validate_required_config(payload: Any, schema: dict[str, Any]) -> None:
         if prefix == "":
             allowed_keys |= OPTIONAL_TOP_LEVEL_KEYS
         for key in node:
-            if key not in allowed_keys:
-                unexpected.append(f"{prefix}.{key}" if prefix else str(key))
+            key_path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in allowed_keys and key_path not in LEGACY_IGNORED_CONFIG_KEYS:
+                unexpected.append(key_path)
 
     walk(payload, schema)
     if missing or invalid_mappings or unexpected:
@@ -1329,6 +1361,39 @@ class ClassifierPoolingConfig:
 
 
 @dataclass(slots=True)
+class AuxiliaryHeadsConfig:
+    enabled: bool = False
+    movement: bool = True
+    direction: bool = True
+    hidden_dim: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate optional auxiliary classification heads."""
+        if self.hidden_dim is not None and self.hidden_dim <= 0:
+            raise ValueError("model.auxiliary_heads.hidden_dim must be > 0 or null.")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "AuxiliaryHeadsConfig":
+        """Build auxiliary head settings from YAML."""
+        if payload is None:
+            return cls()
+        # "dropout" is accepted only as a legacy no-op. The classifier always uses
+        # model.classifier_dropout for the shared trunk.
+        unexpected = sorted(set(payload) - {"enabled", "movement", "direction", "hidden_dim", "dropout"})
+        if unexpected:
+            raise ValueError(
+                "Invalid experiment config; unexpected key(s) in model.auxiliary_heads: "
+                f"{unexpected}"
+            )
+        return cls(
+            enabled=bool(payload.get("enabled", False)),
+            movement=bool(payload.get("movement", True)),
+            direction=bool(payload.get("direction", True)),
+            hidden_dim=_optional_int(payload.get("hidden_dim"), "model.auxiliary_heads.hidden_dim"),
+        )
+
+
+@dataclass(slots=True)
 class ModelConfig:
     d_input: int | None
     d_model: int
@@ -1348,6 +1413,7 @@ class ModelConfig:
     moe_load_balancing_weight: float
     classifier_dropout: float
     classifier_pooling: ClassifierPoolingConfig = field(default_factory=ClassifierPoolingConfig)
+    auxiliary_heads: AuxiliaryHeadsConfig = field(default_factory=AuxiliaryHeadsConfig)
     num_layers: int = 1
     latent_spatial_embed_dim: int | None = None
     use_moe: bool = True
@@ -1398,6 +1464,7 @@ class ModelConfig:
             moe_load_balancing_weight=float(payload["moe_load_balancing_weight"]),
             classifier_dropout=float(payload["classifier_dropout"]),
             classifier_pooling=ClassifierPoolingConfig.from_dict(payload.get("classifier_pooling")),
+            auxiliary_heads=AuxiliaryHeadsConfig.from_dict(payload.get("auxiliary_heads")),
             num_layers=_required_int(payload.get("num_layers", 1), "model.num_layers"),
             latent_spatial_embed_dim=_optional_int(
                 payload.get("latent_spatial_embed_dim"),
@@ -1608,6 +1675,107 @@ class TrainingTemperatureScalingConfig:
         )
 
 
+def _optional_movement_pos_weight(value: Any) -> float | str | None:
+    """Parse optional movement positive-class weighting."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"", "none", "null"}:
+            return None
+        if lowered == "auto_clipped":
+            return lowered
+        try:
+            parsed = float(value)
+        except ValueError as exc:
+            raise ValueError(
+                "training.auxiliary_losses.movement_pos_weight must be numeric, null, "
+                "or 'auto_clipped'."
+            ) from exc
+    else:
+        parsed = float(value)
+    if parsed <= 0.0:
+        raise ValueError("training.auxiliary_losses.movement_pos_weight must be > 0, null, or 'auto_clipped'.")
+    return parsed
+
+
+@dataclass(slots=True)
+class TrainingAuxiliaryLossConfig:
+    movement_weight: float = 0.0
+    direction_weight: float = 0.0
+    consistency_weight: float = 0.0
+    movement_pos_weight: float | str | None = None
+    movement_pos_weight_min: float = 0.5
+    movement_pos_weight_max: float = 5.0
+    direction_class_weight_beta: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Validate auxiliary loss weights and automatic weighting bounds."""
+        if self.movement_weight < 0.0:
+            raise ValueError("training.auxiliary_losses.movement_weight must be >= 0.")
+        if self.direction_weight < 0.0:
+            raise ValueError("training.auxiliary_losses.direction_weight must be >= 0.")
+        if self.consistency_weight < 0.0:
+            raise ValueError("training.auxiliary_losses.consistency_weight must be >= 0.")
+        if self.movement_pos_weight_min <= 0.0:
+            raise ValueError("training.auxiliary_losses.movement_pos_weight_min must be > 0.")
+        if self.movement_pos_weight_max < self.movement_pos_weight_min:
+            raise ValueError(
+                "training.auxiliary_losses.movement_pos_weight_max must be >= "
+                "training.auxiliary_losses.movement_pos_weight_min."
+            )
+        if self.direction_class_weight_beta < 0.0:
+            raise ValueError("training.auxiliary_losses.direction_class_weight_beta must be >= 0.")
+
+    @property
+    def enabled(self) -> bool:
+        """Whether any auxiliary training objective has a non-zero weight."""
+        return (
+            self.movement_weight > 0.0
+            or self.direction_weight > 0.0
+            or self.consistency_weight > 0.0
+        )
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingAuxiliaryLossConfig":
+        """Build auxiliary loss settings from YAML."""
+        if payload is None:
+            return cls()
+        unexpected = sorted(
+            set(payload)
+            - {
+                "movement_weight",
+                "direction_weight",
+                "consistency_weight",
+                "movement_pos_weight",
+                "movement_pos_weight_min",
+                "movement_pos_weight_max",
+                "direction_class_weight_beta",
+            }
+        )
+        if unexpected:
+            raise ValueError(
+                "Invalid experiment config; unexpected key(s) in training.auxiliary_losses: "
+                f"{unexpected}"
+            )
+        defaults = cls()
+        return cls(
+            movement_weight=float(payload.get("movement_weight", defaults.movement_weight)),
+            direction_weight=float(payload.get("direction_weight", defaults.direction_weight)),
+            consistency_weight=float(payload.get("consistency_weight", defaults.consistency_weight)),
+            movement_pos_weight=_optional_movement_pos_weight(payload.get("movement_pos_weight")),
+            movement_pos_weight_min=float(
+                payload.get("movement_pos_weight_min", defaults.movement_pos_weight_min)
+            ),
+            movement_pos_weight_max=float(
+                payload.get("movement_pos_weight_max", defaults.movement_pos_weight_max)
+            ),
+            direction_class_weight_beta=float(
+                payload.get("direction_class_weight_beta", defaults.direction_class_weight_beta)
+            ),
+        )
+
+
 @dataclass(slots=True)
 class TrainingConfig:
     device: str
@@ -1631,6 +1799,7 @@ class TrainingConfig:
     class_weight_beta: float
     class_weight_min: float
     class_weight_max: float
+    auxiliary_losses: TrainingAuxiliaryLossConfig
     grad_clip_norm: float
     model_dir: str
     use_amp: bool
@@ -1791,6 +1960,7 @@ class TrainingConfig:
             class_weight_beta=float(payload["class_weight_beta"]),
             class_weight_min=float(payload["class_weight_min"]),
             class_weight_max=float(payload["class_weight_max"]),
+            auxiliary_losses=TrainingAuxiliaryLossConfig.from_dict(payload.get("auxiliary_losses")),
             grad_clip_norm=float(payload["grad_clip_norm"]),
             model_dir=str(payload["model_dir"]),
             use_amp=bool(payload["use_amp"]),

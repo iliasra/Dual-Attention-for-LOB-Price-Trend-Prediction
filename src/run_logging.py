@@ -257,6 +257,7 @@ def save_run_config_snapshot(
     model_parameters: dict[str, int] | None = None,
     preprocessing_metadata: dict[str, Any] | None = None,
     sampling_summary: dict[str, Any] | None = None,
+    auxiliary_loss_summary: dict[str, Any] | None = None,
 ) -> None:
     payload = load_config_snapshot(config)
     payload.setdefault("run_metadata", {})
@@ -279,8 +280,15 @@ def save_run_config_snapshot(
                     "methods": list(config.model.classifier_pooling.methods),
                     "last_k": config.model.classifier_pooling.last_k,
                 },
+                "auxiliary_heads": {
+                    "enabled": config.model.auxiliary_heads.enabled,
+                    "movement": config.model.auxiliary_heads.movement,
+                    "direction": config.model.auxiliary_heads.direction,
+                    "hidden_dim": config.model.auxiliary_heads.hidden_dim,
+                },
             },
             "class_weights": config.training.class_weights,
+            "auxiliary_losses": auxiliary_loss_summary or {"enabled": False},
             "monitor": {
                 "name": config.training.monitor,
                 "mode": config.training.monitor_mode,
@@ -1092,6 +1100,7 @@ def save_run_log(
     checkpoint_selection_summary: dict[str, Any] | None = None,
     preprocessing_metadata: dict[str, Any] | None = None,
     sampling_summary: dict[str, Any] | None = None,
+    auxiliary_loss_summary: dict[str, Any] | None = None,
     timing: dict[str, Any] | None = None,
     fold: str = "single",
 ) -> None:
@@ -1131,11 +1140,35 @@ def save_run_log(
         handle.write(f"latent_spatial_embed_dim: {config.model.latent_spatial_embed_dim}\n")
         handle.write(f"classifier_pooling_methods: {list(config.model.classifier_pooling.methods)}\n")
         handle.write(f"classifier_pooling_last_k: {config.model.classifier_pooling.last_k}\n")
+        handle.write(f"auxiliary_heads_enabled: {config.model.auxiliary_heads.enabled}\n")
+        handle.write(f"auxiliary_movement_head: {config.model.auxiliary_heads.movement}\n")
+        handle.write(f"auxiliary_direction_head: {config.model.auxiliary_heads.direction}\n")
+        handle.write(f"auxiliary_hidden_dim: {config.model.auxiliary_heads.hidden_dim}\n")
         handle.write("\nModel temporal window\n")
         handle.write(f"max_dt_quantile: {config.model.max_dt_quantile}\n")
         handle.write(f"resolved_max_dt: {config.model.max_dt}\n")
         handle.write("\nTraining class weights\n")
         handle.write(f"class_weights: {config.training.class_weights}\n")
+        handle.write("\nAuxiliary losses\n")
+        aux_summary = auxiliary_loss_summary or {"enabled": False}
+        for key in (
+            "enabled",
+            "movement_head",
+            "direction_head",
+            "movement_weight",
+            "direction_weight",
+            "consistency_weight",
+            "movement_pos_weight",
+            "movement_pos_weight_mode",
+            "movement_pos_weight_min",
+            "movement_pos_weight_max",
+            "direction_class_weight_beta",
+            "direction_class_weights",
+            "label_ids",
+            "counts",
+        ):
+            if key in aux_summary:
+                handle.write(f"{key}: {aux_summary[key]}\n")
         handle.write("\nTraining monitor\n")
         handle.write(f"monitor: {config.training.monitor}\n")
         handle.write(f"monitor_mode: {config.training.monitor_mode}\n")

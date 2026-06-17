@@ -416,16 +416,22 @@ class TrendClassifier(nn.Module):
         self.pooling_methods = tuple(config.classifier_pooling.methods)
         self.last_k = int(config.classifier_pooling.last_k)
         input_dim = len(self.pooling_methods) * config.d_model
-        self.head = nn.Sequential(
+        aux_cfg = config.auxiliary_heads
+        hidden_dim = aux_cfg.hidden_dim if aux_cfg.hidden_dim is not None else config.d_model // 2
+        self.trunk = nn.Sequential(
             nn.LayerNorm(input_dim),
             nn.Dropout(config.classifier_dropout),
-            nn.Linear(input_dim, config.d_model // 2),
+            nn.Linear(input_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(config.classifier_dropout),
-            nn.Linear(config.d_model // 2, config.num_classes),
         )
+        self.class_head = nn.Linear(hidden_dim, config.num_classes)
+        self.use_auxiliary_heads = bool(aux_cfg.enabled)
+        self.movement_head = nn.Linear(hidden_dim, 1) if self.use_auxiliary_heads and aux_cfg.movement else None
+        self.direction_head = nn.Linear(hidden_dim, 2) if self.use_auxiliary_heads and aux_cfg.direction else None
+        self.last_auxiliary_outputs: dict[str, torch.Tensor] = {}
 
-    def forward(self, transformer_output: torch.Tensor) -> torch.Tensor:
+    def _pool(self, transformer_output: torch.Tensor) -> torch.Tensor:
         if transformer_output.ndim != 3:
             raise ValueError(
                 "transformer_output must have shape [batch, sequence, d_model], "
@@ -447,8 +453,54 @@ class TrendClassifier(nn.Module):
                 pooled_outputs.append(tail.max(dim=1).values)
             else:
                 raise RuntimeError(f"Unsupported classifier pooling method: {method}")
-        pooled = pooled_outputs[0] if len(pooled_outputs) == 1 else torch.cat(pooled_outputs, dim=-1)
-        return self.head(pooled)
+        return pooled_outputs[0] if len(pooled_outputs) == 1 else torch.cat(pooled_outputs, dim=-1)
+
+    def forward(self, transformer_output: torch.Tensor) -> torch.Tensor:
+        pooled = self._pool(transformer_output)
+        hidden = self.trunk(pooled)
+        class_logits = self.class_head(hidden)
+
+        self.last_auxiliary_outputs = {}
+        if self.movement_head is not None:
+            self.last_auxiliary_outputs["movement_logit"] = self.movement_head(hidden).squeeze(-1)
+        if self.direction_head is not None:
+            self.last_auxiliary_outputs["direction_logits"] = self.direction_head(hidden)
+
+        return class_logits
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ) -> None:
+        # Preserve compatibility with checkpoints saved before the classifier head was split.
+        legacy_key_map = {
+            "head.0.": "trunk.0.",
+            "head.2.": "trunk.2.",
+            "head.5.": "class_head.",
+        }
+        for legacy_prefix, current_prefix in legacy_key_map.items():
+            for suffix in ("weight", "bias"):
+                legacy_key = f"{prefix}{legacy_prefix}{suffix}"
+                current_key = f"{prefix}{current_prefix}{suffix}"
+                if legacy_key in state_dict:
+                    if current_key not in state_dict:
+                        state_dict[current_key] = state_dict[legacy_key]
+                    state_dict.pop(legacy_key)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
 
 class LobTrendTransformer(nn.Module):
@@ -460,16 +512,19 @@ class LobTrendTransformer(nn.Module):
         self.classifier = TrendClassifier(resolved_config)
         self.moe_load_balancing_loss: torch.Tensor | None = None  # expose MoE auxiliary loss to training
         self.moe_routing: dict[str, torch.Tensor | int] | None = None
+        self.auxiliary_outputs: dict[str, torch.Tensor] = {}
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         encoded = self.encoder(x, t)
+        logits = self.classifier(encoded)
+        self.auxiliary_outputs = self.classifier.last_auxiliary_outputs
         if self.encoder.moe is None:
             self.moe_load_balancing_loss = None
             self.moe_routing = None
         else:
             self.moe_load_balancing_loss = self.encoder.moe.load_balancing_loss  # load-balancing for MoE training
             self.moe_routing = self.encoder.moe.last_routing
-        return self.classifier(encoded)
+        return logits
 
 
 def build_model(config: ModelConfig | None = None, d_input: int | None = None) -> LobTrendTransformer:

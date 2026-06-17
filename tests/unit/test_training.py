@@ -15,6 +15,7 @@ from training import (
     ClassificationMetricAccumulator,
     EvaluationResult,
     LobTrainer,
+    MovementDirectionAuxiliaryLoss,
     class_weights_from_class_counts,
     class_weights_from_sequence_labels,
     classification_metrics_from_predictions,
@@ -668,6 +669,111 @@ def test_class_weights_from_class_counts_uses_configurable_clip_bounds() -> None
 
     assert min(weights) >= 0.8
     assert max(weights) <= 1.5
+
+
+def test_movement_direction_auxiliary_loss_uses_label_mapping_and_masks_neutral() -> None:
+    criterion = MovementDirectionAuxiliaryLoss(
+        up_id=2,
+        neutral_id=1,
+        down_id=0,
+        movement_weight=0.5,
+        direction_weight=0.25,
+        movement_pos_weight=2.0,
+        direction_class_weights=torch.tensor([1.0, 3.0]),
+    )
+    class_logits = torch.zeros((3, 3))
+    targets = torch.tensor([0, 1, 2])
+    auxiliary_outputs = {
+        "movement_logit": torch.tensor([0.0, 0.0, 0.0]),
+        "direction_logits": torch.tensor([[0.0, 1.0], [3.0, 0.0], [1.0, 0.0]]),
+    }
+
+    loss = criterion(
+        class_logits=class_logits,
+        targets=targets,
+        auxiliary_outputs=auxiliary_outputs,
+    )
+
+    expected_movement = torch.nn.functional.binary_cross_entropy_with_logits(
+        auxiliary_outputs["movement_logit"],
+        torch.tensor([1.0, 0.0, 1.0]),
+        pos_weight=torch.tensor(2.0),
+    )
+    expected_direction = torch.nn.functional.cross_entropy(
+        auxiliary_outputs["direction_logits"][[0, 2]],
+        torch.tensor([1, 0]),
+        weight=torch.tensor([1.0, 3.0]),
+    )
+    assert float(loss) == pytest.approx(float(0.5 * expected_movement + 0.25 * expected_direction))
+
+
+def test_movement_direction_auxiliary_loss_handles_batch_without_directional_examples() -> None:
+    criterion = MovementDirectionAuxiliaryLoss(
+        up_id=2,
+        neutral_id=1,
+        down_id=0,
+        movement_weight=0.0,
+        direction_weight=1.0,
+    )
+
+    loss = criterion(
+        class_logits=torch.zeros((2, 3)),
+        targets=torch.tensor([1, 1]),
+        auxiliary_outputs={"direction_logits": torch.zeros((2, 2))},
+    )
+
+    assert loss.item() == 0.0
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_auxiliary_loss_is_train_only_and_evaluate_keeps_primary_loss(
+    artifact_dir: Path,
+) -> None:
+    class AuxModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bias = nn.Parameter(torch.zeros(()))
+            self.auxiliary_outputs = {}
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            del t
+            batch_size = x.shape[0]
+            logits = self.bias * torch.ones((batch_size, 3), device=x.device)
+            self.auxiliary_outputs = {
+                "movement_logit": self.bias * torch.ones(batch_size, device=x.device),
+                "direction_logits": self.bias * torch.ones((batch_size, 2), device=x.device),
+            }
+            return logits
+
+    config = _training_config()
+    config.device = "cpu"
+    config.focal_gamma = 0.0
+    config.class_weights = None
+    config.model_dir = str(artifact_dir)
+    auxiliary = MovementDirectionAuxiliaryLoss(
+        up_id=2,
+        neutral_id=1,
+        down_id=0,
+        movement_weight=1.0,
+        direction_weight=1.0,
+    )
+    trainer = LobTrainer(config, auxiliary_criterion=auxiliary)
+    model = AuxModel()
+    data_loader = [
+        (
+            torch.zeros((3, 2, 1)),
+            torch.zeros((3, 2)),
+            torch.tensor([0, 1, 2]),
+        )
+    ]
+    criterion = trainer._criterion()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+
+    train_result = trainer._run_epoch(model, data_loader, criterion, optimizer, "Aux train")
+    eval_result = trainer.evaluate(model, data_loader, criterion=criterion, description="Aux eval")
+
+    assert train_result.loss == pytest.approx(np.log(3.0) + 2.0 * np.log(2.0), rel=1e-5)
+    assert eval_result.loss == pytest.approx(np.log(3.0), rel=1e-5)
 
 
 def test_lob_trainer_evaluate_collects_moe_expert_usage() -> None:
