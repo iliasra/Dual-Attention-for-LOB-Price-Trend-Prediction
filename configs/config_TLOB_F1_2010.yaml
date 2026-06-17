@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: FI2010macroF1
+  name: auxiliary_test_h100
 
 data:
   raw_data_dir: ../data/F1_2010
@@ -25,7 +25,7 @@ dataset_splits:
   test_dates: ["0003-test"]
 
 folds:
-  - id: fi2010_tlob
+  - id: fi2010_tlob_h100
     train_dates: ["0001-train"]
     validation_dates: ["0002-validation"]
     test_dates: ["0003-test"]
@@ -165,7 +165,7 @@ training:
     lambda_rate: 0.1
   persistent_workers: true
   optimizer: adamw
-  learning_rate: 2.0e-4
+  learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   focal_gamma: 0.0
   class_weight_beta: 0.25
