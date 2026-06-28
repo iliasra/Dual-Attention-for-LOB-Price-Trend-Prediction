@@ -40,6 +40,7 @@ preprocessing:
     smoothing:
       method: C
       threshold: 0.0
+      fit_scope: null # allowed: null/per_split/train; set null unless threshold is a fitted mode
       k: 0
       h: 1
       bid_column: bid_price_1

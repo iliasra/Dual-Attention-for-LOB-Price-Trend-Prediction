@@ -6,11 +6,17 @@ import shutil
 
 import numpy as np
 import pytest
+import yaml
 
 pytest.importorskip("torch")
 
 from configuration import load_config
-from run_logging import save_best_pr_artifacts, save_epoch_history, save_probability_outputs
+from run_logging import (
+    save_best_pr_artifacts,
+    save_confusion_matrices,
+    save_epoch_history,
+    save_probability_outputs,
+)
 from training import ClassificationMetricAccumulator, EpochResult
 
 
@@ -114,6 +120,60 @@ def test_epoch_history_writes_intra_epoch_metadata(artifact_dir: Path) -> None:
     assert row["checkpoint_label"] == "epoch_0001_step_00005000"
 
 
+def test_confusion_matrices_include_selected_best_block(artifact_dir: Path) -> None:
+    interval_train_metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    interval_train_metrics.confusion_matrix = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    selected_train_metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    selected_train_metrics.confusion_matrix = [[9, 0, 0], [0, 8, 0], [0, 0, 7]]
+    selected_val_metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    selected_val_metrics.confusion_matrix = [[2, 1, 0], [0, 3, 0], [1, 0, 2]]
+    selected_test_metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    selected_test_metrics.confusion_matrix = [[4, 0, 1], [0, 5, 0], [1, 0, 4]]
+    target = artifact_dir / "confusion_matrices.yaml"
+
+    save_confusion_matrices(
+        [
+            EpochResult(
+                train_loss=1.0,
+                val_loss=0.5,
+                train_metrics=interval_train_metrics,
+                val_metrics=selected_val_metrics,
+                epoch=1,
+                batch_in_epoch=5000,
+                global_step=5000,
+                validation_index=1,
+                checkpoint_label="epoch_0001_step_00005000",
+            )
+        ],
+        target,
+        fold="fold_001",
+        selected_best_result=EpochResult(
+            train_loss=0.1,
+            val_loss=0.5,
+            test_loss=0.4,
+            train_metrics=selected_train_metrics,
+            val_metrics=selected_val_metrics,
+            test_metrics=selected_test_metrics,
+            epoch=1,
+            batch_in_epoch=5000,
+            global_step=5000,
+            validation_index=1,
+            checkpoint_label="epoch_0001_step_00005000",
+        ),
+        selected_best_label="epoch_0001_step_00005000",
+    )
+
+    with target.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle)
+
+    fold_payload = payload["folds"]["fold_001"]
+    assert fold_payload["epoch_0001_step_00005000"]["train"]["raw"] == [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    assert fold_payload["selected_best_checkpoint"]["checkpoint_label"] == "epoch_0001_step_00005000"
+    assert fold_payload["selected_best_checkpoint"]["train"]["raw"] == [[9, 0, 0], [0, 8, 0], [0, 0, 7]]
+    assert fold_payload["selected_best_checkpoint"]["validation"]["raw"] == [[2, 1, 0], [0, 3, 0], [1, 0, 2]]
+    assert fold_payload["selected_best_checkpoint"]["test"]["raw"] == [[4, 0, 1], [0, 5, 0], [1, 0, 4]]
+
+
 def test_epoch_history_contains_threshold_columns(artifact_dir: Path) -> None:
     config = load_config()
     metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
@@ -189,6 +249,7 @@ def test_best_pr_artifacts_and_probabilities_are_written(artifact_dir: Path) -> 
     save_probability_outputs(outputs, probabilities_path, config)
     artifacts = save_best_pr_artifacts(
         outputs,
+        test_outputs=outputs,
         curves_dir=artifact_dir / "pr_curves",
         thresholds_path=artifact_dir / "pr_thresholds.yaml",
         config=config,
@@ -202,8 +263,14 @@ def test_best_pr_artifacts_and_probabilities_are_written(artifact_dir: Path) -> 
     assert header == ["sample_index", "true_label", "pred_label", "p_down", "p_neutral", "p_up"]
     assert (artifact_dir / "pr_thresholds.yaml").exists()
     assert (artifact_dir / "pr_curves" / "validation_best_epoch_2_down.csv").exists()
+    assert (artifact_dir / "pr_curves" / "test_best_epoch_2_down.csv").exists()
     assert artifacts["thresholds"]["fold"] == "fold_001"
     assert artifacts["thresholds"]["selection_rule"] == "max_f1"
+    assert artifacts["thresholds"]["selection_split"] == "validation"
+    assert artifacts["thresholds"]["evaluated_splits"] == ["validation", "test"]
     assert artifacts["thresholds"]["classes"]["down"]["pr_auc"] == pytest.approx(1.0)
     assert artifacts["thresholds"]["classes"]["down"]["roc_auc"] == pytest.approx(1.0)
+    assert artifacts["thresholds"]["splits"]["test"]["classes"]["down"]["curve_csv"].endswith(
+        "test_best_epoch_2_down.csv"
+    )
     assert set(artifacts["thresholds"]["classes"]) == {"down", "neutral", "up"}

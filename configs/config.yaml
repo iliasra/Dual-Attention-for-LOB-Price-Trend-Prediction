@@ -1,10 +1,10 @@
 seed: 42
 
 experiment:
-  name: ablationKinematic
+  name: INTC2024_downsampling10
 
 data:
-  raw_data_dir: ../data/INTC_TLOB_2
+  raw_data_dir: ../data/INTC_TLOB
   processed_data_dir: ../data/processed_dataframes
   sequence_data_dir: ../data/sequences
   logs_dir: ../logs
@@ -38,14 +38,14 @@ folds:
 #    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07"]
 #    validation_dates: ["2024-03-08", "2024-03-11"]
 #    test_dates: []
-#  - id: fold_003
-#    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08"]
-#    validation_dates: ["2024-03-11", "2024-03-12"]
-#    test_dates: []
-  - id: fold_abl_kin
-    train_dates: ["2015-01-02", "2015-01-05", "2015-01-06", "2015-01-07", "2015-01-08", "2015-01-09", "2015-01-12", "2015-01-13", "2015-01-14", "2015-01-15", "2015-01-16", "2015-01-20", "2015-01-21", "2015-01-22", "2015-01-23", "2015-01-26", "2015-01-27"]
-    validation_dates: ["2015-01-28"]
-    test_dates: ["2015-01-29", "2015-01-30"]
+  - id: fold_003
+    train_dates: ["2024-03-04", "2024-03-05", "2024-03-06", "2024-03-07", "2024-03-08", "2024-03-11"]
+    validation_dates: ["2024-03-12", "2024-03-13"]
+    test_dates: ["2024-03-14", "2024-03-15"]
+# -  id: fold_tlob_quantity_h10
+#    train_dates: ["2015-01-02", "2015-01-05", "2015-01-06", "2015-01-07", "2015-01-08", "2015-01-09", "2015-01-12", "2015-01-13", "2015-01-14", "2015-01-15", "2015-01-16", "2015-01-20", "2015-01-21", "2015-01-22", "2015-01-23", "2015-01-26", "2015-01-27"]
+#    validation_dates: ["2015-01-28"]
+#    test_dates: ["2015-01-29", "2015-01-30"]
 
 preprocessing:
   snapshot_window: 100
@@ -56,7 +56,7 @@ preprocessing:
       method: C # allowed: A, B, C
       threshold: null # allowed: numeric fixed threshold, null for adaptive_threshold.enabled=true, or fitted modes mean_spread/mean_pct/mean_pct_2
       fit_scope: null # allowed: null/per_split/train; set null unless threshold is a fitted mode
-      k: 9 # 9 to have a window of length 10 to replicate TLOB experiment
+      k: 10 # 9 to have a window of length 10 to replicate TLOB experiment
       h: 100
       bid_column: bid_price_1
       ask_column: ask_price_1
@@ -88,8 +88,8 @@ preprocessing:
     keep_timestamp: true
     market_open_seconds: 34200 # 34200 = 9.30 am for NYSE opening
     market_close_seconds: 57600 # 57600 = 4 pm for NYSE closing
-    start_offset_minutes: 0
-    end_offset_minutes: 0
+    start_offset_minutes: 15
+    end_offset_minutes: 15
   normalization:
     derivatives_stats_dir: ../data/derivatives_z_scores
     scope: train_only # allowed: train_only (used for readiness only)
@@ -105,10 +105,10 @@ preprocessing:
     volume_source: traded # allowed: traded, message_size
     trade_type_values: [4, 5] # LOBSTER visible/hidden executions for traded-shares volume clock
   microprice:
-    enabled: false # adds a price-like kinematic microprice stream only
+    enabled: true # adds a price-like kinematic microprice stream only
     levels: 5 # number of LOB levels used to compute microprice
   price_kinematic:
-    enabled: false
+    enabled: true
     columns: auto
     reference: tick # allowed: tick, time
     basis:
@@ -124,7 +124,7 @@ preprocessing:
     columns: auto
     tau_start: 2.0
   volume_kinematic:
-    enabled: false
+    enabled: true
     columns: auto
     reference: tick # allowed: tick, time
     basis:
@@ -178,7 +178,7 @@ model:
   auxiliary_heads:
     enabled: true # add movement/neutral and up/down auxiliary heads during training
     movement: true # binary movement head: directional vs neutral
-    direction: true # directional head: up vs down on non-neutral examples
+    direction: false # directional head: up vs down on non-neutral examples
     hidden_dim: null # null = d_model // 2 shared classifier trunk
 
 training:
@@ -202,10 +202,10 @@ training:
   optimizer: adamw # allowed: adam, adamw
   learning_rate: 1.0e-5
   weight_decay: 1.0e-4
-  focal_gamma: 0.0
-  class_weight_beta: 0.0
-  class_weight_min: 1.0
-  class_weight_max: 1.0
+  focal_gamma: 0.5
+  class_weight_beta: 0.25
+  class_weight_min: 0.5
+  class_weight_max: 3.0
   auxiliary_losses:
     movement_weight: 0.05 # BCE movement-vs-neutral auxiliary loss weight
     direction_weight: 0.05 # CE up-vs-down auxiliary loss weight on directional examples
@@ -234,4 +234,4 @@ training:
     up_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
     down_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
   sampling:
-    neutral_to_directional_ratio: 8.0 # downsampling of neutral class
+    neutral_to_directional_ratio: 10.0 # downsampling of neutral class

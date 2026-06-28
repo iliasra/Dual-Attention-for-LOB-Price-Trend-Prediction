@@ -742,6 +742,43 @@ def fit_and_apply_directional_thresholds(
     return payload, validation_metrics, test_metrics, validation_outputs_thresholded, test_outputs_thresholded
 
 
+def apply_final_prediction_postprocessing(
+    *,
+    config: ExperimentConfig,
+    outputs: dict[str, Any],
+    temperature_scaling_summary: dict[str, Any],
+    directional_threshold_summary: dict[str, Any],
+) -> tuple[dict[str, Any], ClassificationMetrics]:
+    """Apply fitted calibration/threshold decisions to collected outputs."""
+    processed_outputs = outputs
+    if temperature_scaling_summary.get("enabled"):
+        use_class_biases = bool(temperature_scaling_summary.get("class_bias_calibration"))
+        processed_outputs = apply_logit_calibration_to_outputs(
+            processed_outputs,
+            float(temperature_scaling_summary["temperature"]),
+            class_biases=temperature_scaling_summary.get("class_biases") if use_class_biases else None,
+        )
+
+    if directional_threshold_summary.get("enabled"):
+        down_id, neutral_id, up_id = directional_threshold_class_ids(config)
+        threshold_config = config.training.directional_thresholds
+        predictions = apply_directional_threshold_policy(
+            np.asarray(processed_outputs["probabilities"], dtype=np.float32),
+            threshold_down=directional_threshold_summary.get("threshold_down"),
+            threshold_up=directional_threshold_summary.get("threshold_up"),
+            down_id=down_id,
+            neutral_id=neutral_id,
+            up_id=up_id,
+            delta=threshold_config.delta,
+            down_enabled=bool(directional_threshold_summary.get("down_enabled", True)),
+            up_enabled=bool(directional_threshold_summary.get("up_enabled", True)),
+        )
+        processed_outputs = prediction_outputs_with_decisions(processed_outputs, predictions)
+
+    predictions = np.asarray(processed_outputs["predictions"], dtype=np.int64)
+    return processed_outputs, metrics_from_prediction_outputs(config, processed_outputs, predictions)
+
+
 def best_epoch_from_history(config: ExperimentConfig, history: list[EpochResult]) -> tuple[int, EpochResult, float]:
     """Select the best epoch using the configured validation monitor."""
     if not history:
@@ -1347,6 +1384,12 @@ def train_fold(
             generator=torch_generator_from_seed(fold_seed),
             **loader_kwargs,
         )
+    train_eval_loader = DataLoader(
+        train_dataset,
+        batch_size=config.training.eval_batch_size,
+        shuffle=False,
+        **loader_kwargs,
+    )
     validation_loader = DataLoader(
         validation_dataset,
         batch_size=config.training.eval_batch_size,
@@ -1574,11 +1617,42 @@ def train_fold(
             f"val_threshold_{directional_threshold_summary['configured_score']}="
             f"{directional_threshold_summary['score']:.4f}."
         )
+    selected_best_confusion_result = None
+    train_confusion_duration_seconds: float | None = None
+    if not config.training.validates_by_epoch:
+        train_confusion_start = perf_counter()
+        train_confusion_result = trainer.evaluate(
+            model=model,
+            data_loader=train_eval_loader,
+            description=f"Selected {best_checkpoint_label} [Train confusion]",
+            collect_outputs=True,
+        )
+        train_confusion_duration_seconds = perf_counter() - train_confusion_start
+        if train_confusion_result.prediction_outputs is None:
+            raise RuntimeError("Full train confusion evaluation did not collect prediction outputs.")
+        _, train_confusion_metrics = apply_final_prediction_postprocessing(
+            config=config,
+            outputs=train_confusion_result.prediction_outputs,
+            temperature_scaling_summary=temperature_scaling_summary,
+            directional_threshold_summary=directional_threshold_summary,
+        )
+        selected_best_confusion_result = copy.copy(best_history)
+        selected_best_confusion_result.train_loss = train_confusion_result.loss
+        selected_best_confusion_result.train_metrics = train_confusion_metrics
+        selected_best_confusion_result.train_expert_usage = train_confusion_result.expert_usage
+        print(
+            f"Selected checkpoint {best_checkpoint_label} full train confusion evaluation: "
+            f"train_loss={train_confusion_result.loss:.6f}, "
+            f"train_acc={train_confusion_metrics.accuracy:.4f}, "
+            f"train_macro_f1={train_confusion_metrics.macro_f1:.4f} "
+            f"({format_duration(train_confusion_duration_seconds)})."
+        )
     save_probability_outputs(validation_outputs_for_artifacts, validation_probabilities_path, config)
     if test_outputs_for_artifacts is not None and test_probabilities_path is not None:
         save_probability_outputs(test_outputs_for_artifacts, test_probabilities_path, config)
     pr_artifacts = save_best_pr_artifacts(
         validation_outputs_for_artifacts,
+        test_outputs=test_outputs_for_artifacts,
         curves_dir=run_pr_curves_dir,
         thresholds_path=run_pr_thresholds_path,
         config=config,
@@ -1639,12 +1713,21 @@ def train_fold(
             float(selected_candidate["validation_seconds"]) + (test_duration_seconds or 0.0)
         ),
     }
+    if train_confusion_duration_seconds is not None:
+        timing["best_train_confusion_evaluation_seconds"] = round(train_confusion_duration_seconds, 6)
+        timing["best_train_confusion_evaluation_duration"] = format_duration(train_confusion_duration_seconds)
     if temperature_scaling_summary.get("enabled"):
         timing["temperature_scaling_fit_seconds"] = temperature_scaling_summary.get("fit_seconds")
         timing["temperature_scaling_fit_duration"] = temperature_scaling_summary.get("fit_duration")
 
     save_epoch_history(history, run_losses_path, config=config, fold=fold_id)
-    save_confusion_matrices(history, run_confusion_matrices_path, fold=fold_id)
+    save_confusion_matrices(
+        history,
+        run_confusion_matrices_path,
+        fold=fold_id,
+        selected_best_result=selected_best_confusion_result,
+        selected_best_label=best_checkpoint_label if selected_best_confusion_result is not None else None,
+    )
     save_expert_usage(history, run_expert_usage_path, config=config, fold=fold_id)
     save_run_log(
         target=run_log_path,

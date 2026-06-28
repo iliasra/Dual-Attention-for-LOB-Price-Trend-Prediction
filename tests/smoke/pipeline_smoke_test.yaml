@@ -1,3 +1,5 @@
+seed: 42
+
 data:
   raw_data_dir: ../data/LOBSTER
   processed_data_dir: ../data/processed_dataframes
@@ -29,8 +31,9 @@ preprocessing:
     strategy: smoothing
     smoothing:
       method: C
-      threshold: 1.0e-5
-      k: 2
+      threshold: null
+      fit_scope: null # allowed: null/per_split/train; set null unless threshold is a fitted mode
+      k: 1
       h: 2
       bid_column: bid_price_1
       ask_column: ask_price_1

@@ -675,38 +675,53 @@ def _history_label(result: Any, fallback_index: int) -> str:
     return f"epoch_{epoch_value}"
 
 
+def _confusion_entry(result: Any, fallback_index: int) -> dict[str, Any]:
+    return {
+        "epoch": int(getattr(result, "epoch", fallback_index) or fallback_index),
+        "validation_index": int(getattr(result, "validation_index", fallback_index) or fallback_index),
+        "batch_in_epoch": getattr(result, "batch_in_epoch", None),
+        "global_step": getattr(result, "global_step", None),
+        "train": _confusion_payload(getattr(result, "train_metrics", None)),
+        "validation": _confusion_payload(getattr(result, "val_metrics", None)),
+        "test": _confusion_payload(getattr(result, "test_metrics", None)),
+        "validation_argmax_ablation": _confusion_payload(
+            getattr(result, "val_argmax_metrics", None),
+        ),
+        "test_argmax_ablation": _confusion_payload(
+            getattr(result, "test_argmax_metrics", None),
+        ),
+    }
+
+
 def save_confusion_matrices(
     history: list[Any],
     target: Path,
     *,
     fold: str = "single",
+    selected_best_result: Any | None = None,
+    selected_best_label: str | None = None,
 ) -> None:
+    fold_payload = {
+        _history_label(result, epoch_index): _confusion_entry(result, epoch_index)
+        for epoch_index, result in enumerate(history, start=1)
+    }
+    if selected_best_result is not None:
+        fallback_index = len(history) if history else 1
+        selected_entry = _confusion_entry(selected_best_result, fallback_index)
+        selected_entry["checkpoint_label"] = selected_best_label or _history_label(
+            selected_best_result,
+            fallback_index,
+        )
+        fold_payload["selected_best_checkpoint"] = selected_entry
+
     payload = {
         "normalization": (
             "Rows are true classes; columns are predicted classes. Normalized rows sum to 1 when support > 0. "
             "When directional thresholds are enabled, validation/test entries for the best epoch use thresholded "
-            "decisions; *_argmax_ablation entries keep the original softmax argmax decisions for comparison."
+            "decisions; selected_best_checkpoint uses the final postprocessed decisions for every available split; "
+            "*_argmax_ablation entries keep the original softmax argmax decisions for comparison."
         ),
-        "folds": {
-            fold: {
-                _history_label(result, epoch_index): {
-                    "epoch": int(getattr(result, "epoch", epoch_index) or epoch_index),
-                    "validation_index": int(getattr(result, "validation_index", epoch_index) or epoch_index),
-                    "batch_in_epoch": getattr(result, "batch_in_epoch", None),
-                    "global_step": getattr(result, "global_step", None),
-                    "train": _confusion_payload(getattr(result, "train_metrics", None)),
-                    "validation": _confusion_payload(getattr(result, "val_metrics", None)),
-                    "test": _confusion_payload(getattr(result, "test_metrics", None)),
-                    "validation_argmax_ablation": _confusion_payload(
-                        getattr(result, "val_argmax_metrics", None),
-                    ),
-                    "test_argmax_ablation": _confusion_payload(
-                        getattr(result, "test_argmax_metrics", None),
-                    ),
-                }
-                for epoch_index, result in enumerate(history, start=1)
-            }
-        },
+        "folds": {fold: fold_payload},
     }
     with target.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
@@ -786,27 +801,28 @@ def save_probability_outputs(outputs: dict[str, Any], target: Path, config: Expe
     prediction_outputs_to_frame(outputs, config).to_csv(target, index=False)
 
 
-def save_best_pr_artifacts(
-    validation_outputs: dict[str, Any],
-    *,
-    curves_dir: Path,
-    thresholds_path: Path,
-    config: ExperimentConfig,
-    best_epoch: int,
-    checkpoint_label: str | None = None,
-    fold: str = "single",
-) -> dict[str, Any]:
-    """Write validation PR curves and max-F1 thresholds for the best epoch."""
-    probabilities = np.asarray(validation_outputs.get("probabilities", []), dtype=np.float32)
-    targets = np.asarray(validation_outputs.get("targets", []), dtype=np.int64).reshape(-1)
+def _pr_inputs(outputs: dict[str, Any], *, config: ExperimentConfig, split: str) -> tuple[np.ndarray, np.ndarray]:
+    probabilities = np.asarray(outputs.get("probabilities", []), dtype=np.float32)
+    targets = np.asarray(outputs.get("targets", []), dtype=np.int64).reshape(-1)
     if probabilities.ndim == 1 and probabilities.size == 0:
         probabilities = np.empty((0, config.model.num_classes), dtype=np.float32)
     if probabilities.ndim != 2:
-        raise ValueError("validation probabilities must be a 2D array.")
+        raise ValueError(f"{split} probabilities must be a 2D array.")
     if probabilities.shape[0] != targets.shape[0]:
-        raise ValueError("validation probabilities and targets have inconsistent row counts.")
+        raise ValueError(f"{split} probabilities and targets have inconsistent row counts.")
+    return probabilities, targets
 
-    labels = _ordered_class_labels(config)
+
+def _save_pr_curves_for_split(
+    outputs: dict[str, Any],
+    *,
+    curves_dir: Path,
+    config: ExperimentConfig,
+    split: str,
+    artifact_label: str,
+    labels: list[str],
+) -> tuple[dict[str, Any], dict[str, str], dict[str, pd.DataFrame]]:
+    probabilities, targets = _pr_inputs(outputs, config=config, split=split)
     ranking_metrics = per_class_ranking_metrics(
         probabilities,
         targets,
@@ -818,36 +834,94 @@ def save_best_pr_artifacts(
     pr_ap_values = ranking_metrics["pr_ap"]
     pr_auc_values = ranking_metrics["pr_auc"]
     roc_auc_values = ranking_metrics["roc_auc"]
-    curves_dir.mkdir(parents=True, exist_ok=True)
-    threshold_payload: dict[str, Any] = {
-        "description": "One-vs-rest thresholds selected on validation by maximizing F1.",
-        "fold": fold,
-        "split": "validation",
-        "best_epoch": int(best_epoch),
-        "checkpoint_label": checkpoint_label,
-        "selection_rule": "max_f1",
+    split_payload: dict[str, Any] = {
+        "split": split,
         "classes": {},
     }
-    artifact_label = checkpoint_label or f"epoch_{int(best_epoch)}"
     curve_paths: dict[str, str] = {}
     for class_id, label in enumerate(labels):
         safe_label = _safe_artifact_label(label)
         curve = curves[label]
-        curve_path = curves_dir / f"validation_best_{artifact_label}_{safe_label}.csv"
+        curve_path = curves_dir / f"{split}_best_{artifact_label}_{safe_label}.csv"
         curve.to_csv(curve_path, index=False)
-        threshold = best_f1_threshold(curve)
-        threshold_payload["classes"][label] = {
+        split_payload["classes"][label] = {
             "class_id": int(class_id),
-            "threshold": float(threshold["threshold"]),
-            "precision": float(threshold["precision"]),
-            "recall": float(threshold["recall"]),
-            "f1": float(threshold["f1"]),
             "pr_ap": float(pr_ap_values[class_id]),
             "pr_auc": float(pr_auc_values[class_id]),
             "roc_auc": float(roc_auc_values[class_id]),
             "curve_csv": str(curve_path),
         }
         curve_paths[label] = str(curve_path)
+    return split_payload, curve_paths, curves
+
+
+def save_best_pr_artifacts(
+    validation_outputs: dict[str, Any],
+    *,
+    test_outputs: dict[str, Any] | None = None,
+    curves_dir: Path,
+    thresholds_path: Path,
+    config: ExperimentConfig,
+    best_epoch: int,
+    checkpoint_label: str | None = None,
+    fold: str = "single",
+) -> dict[str, Any]:
+    """Write PR curves for best epoch and select max-F1 thresholds on validation."""
+    labels = _ordered_class_labels(config)
+    curves_dir.mkdir(parents=True, exist_ok=True)
+    artifact_label = checkpoint_label or f"epoch_{int(best_epoch)}"
+    validation_payload, validation_curve_paths, validation_curves = _save_pr_curves_for_split(
+        validation_outputs,
+        curves_dir=curves_dir,
+        config=config,
+        split="validation",
+        artifact_label=artifact_label,
+        labels=labels,
+    )
+    split_payloads: dict[str, Any] = {"validation": validation_payload}
+    split_curve_paths: dict[str, dict[str, str]] = {"validation": validation_curve_paths}
+    if test_outputs is not None:
+        test_payload, test_curve_paths, _ = _save_pr_curves_for_split(
+            test_outputs,
+            curves_dir=curves_dir,
+            config=config,
+            split="test",
+            artifact_label=artifact_label,
+            labels=labels,
+        )
+        split_payloads["test"] = test_payload
+        split_curve_paths["test"] = test_curve_paths
+
+    threshold_payload: dict[str, Any] = {
+        "description": (
+            "One-vs-rest thresholds are selected on validation by maximizing F1. "
+            "Test PR curves are logged for held-out reporting only."
+        ),
+        "fold": fold,
+        "split": "validation",
+        "selection_split": "validation",
+        "evaluated_splits": list(split_payloads),
+        "best_epoch": int(best_epoch),
+        "checkpoint_label": checkpoint_label,
+        "selection_rule": "max_f1",
+        "classes": {},
+        "splits": split_payloads,
+    }
+    validation_classes = validation_payload["classes"]
+    for class_id, label in enumerate(labels):
+        curve_path = validation_classes[label]["curve_csv"]
+        threshold = best_f1_threshold(validation_curves[label])
+        threshold_payload["classes"][label] = {
+            "class_id": int(class_id),
+            "threshold": float(threshold["threshold"]),
+            "precision": float(threshold["precision"]),
+            "recall": float(threshold["recall"]),
+            "f1": float(threshold["f1"]),
+            "pr_ap": float(validation_classes[label]["pr_ap"]),
+            "pr_auc": float(validation_classes[label]["pr_auc"]),
+            "roc_auc": float(validation_classes[label]["roc_auc"]),
+            "curve_csv": str(curve_path),
+        }
 
     thresholds_path.parent.mkdir(parents=True, exist_ok=True)
     with thresholds_path.open("w", encoding="utf-8") as handle:
@@ -855,7 +929,8 @@ def save_best_pr_artifacts(
     return {
         "thresholds": threshold_payload,
         "thresholds_path": str(thresholds_path),
-        "curve_paths": curve_paths,
+        "curve_paths": validation_curve_paths,
+        "split_curve_paths": split_curve_paths,
     }
 
 
