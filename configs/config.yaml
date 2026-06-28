@@ -93,7 +93,12 @@ preprocessing:
   normalization:
     derivatives_stats_dir: ../data/derivatives_z_scores
     scope: train_only # allowed: train_only (used for readiness only)
-    derivative_scaling_method: quantile_scaling # allowed: zscore, robust_mad, quantile_scaling
+    derivative_scaling_method: quantile_scaling # allowed: zscore, quantile, robust_mad (quantile_scaling legacy alias)
+    position_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales *_kin_pos, fit on train only
+    size_log1p_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales message-level size_log1p, fit on train only
+    price_static_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales message-level price_static after opposite-best distance, fit on train only
+    delta_t_transform: log1p # applies log1p(delta_t) before scaling
+    delta_t_scaling_method: robust_mad # allowed: zscore, quantile, robust_mad; scales transformed delta_t, fit on train only
   kinematic_tokenization:
     method: fast # allowed: basis, fast
     chunk_size: 100000 # shared by fast price and volume tokenization
@@ -235,3 +240,14 @@ training:
     down_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
   sampling:
     neutral_to_directional_ratio: 10.0 # downsampling of neutral class
+
+tracking:
+  wandb:
+    enabled: false
+    project: lob-price-trend
+    entity: null
+    mode: auto # auto uses WANDB_MODE when set, otherwise online with offline fallback
+    dir: null # null writes W&B files inside the fold log directory
+    tags: []
+    log_best_checkpoint: true
+    log_top_k_checkpoints: false

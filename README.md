@@ -170,6 +170,33 @@ logs/<RUN_STEM>/<fold_id>/metrics.csv
 logs/<RUN_STEM>/<fold_id>/confusion_matrices.yaml
 logs/<RUN_STEM>/<fold_id>/probabilities/
 results/<RUN_STEM>/<fold_id>/best_lob_transformer.pth
+results/<RUN_STEM>/<fold_id>/training_state_latest.pth
+```
+
+Optional Weights & Biases tracking is configured under `tracking.wandb` and is
+disabled by default. To enable it on a machine with network access, set
+`tracking.wandb.enabled: true` in the config and provide credentials outside the
+repo:
+
+```bash
+export WANDB_API_KEY=<your_key>
+export WANDB_PROJECT=lob-price-trend
+export WANDB_DIR="$PROJECT_DIR/logs/wandb"
+```
+
+For compute nodes without outbound network access, run with offline mode and
+sync after the job:
+
+```bash
+export WANDB_MODE=offline
+wandb sync --sync-all <wandb_run_or_directory>
+```
+
+Training can resume from the complete state checkpoint with:
+
+```bash
+python scripts/run_training.py --config configs/pipeline_config.yaml --resume-latest
+python scripts/run_training.py --config configs/pipeline_config.yaml --fold-id <fold_id> --resume-from <path/to/training_state_latest.pth>
 ```
 
 ## Testing

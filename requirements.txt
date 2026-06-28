@@ -6,3 +6,4 @@ PyYAML
 scipy
 torch
 tqdm
+wandb

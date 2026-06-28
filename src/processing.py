@@ -38,6 +38,7 @@ try:
         fit_exp_scaling_parameters,
         fit_plgs_parameters,
         handle_abnormal_prices,
+        normalizable_feature_columns,
         price_kinematic_values,
         price_static_distance_frame,
     )
@@ -73,6 +74,7 @@ except ImportError:  # pragma: no cover
         fit_exp_scaling_parameters,
         fit_plgs_parameters,
         handle_abnormal_prices,
+        normalizable_feature_columns,
         price_kinematic_values,
         price_static_distance_frame,
     )
@@ -1299,6 +1301,11 @@ class LobProcessingPipeline:
         normalizer = DerivativeNormalizer(
             target_stats_path,
             method=self.config.preprocessing.normalization.derivative_scaling_method,
+            position_method=self.config.preprocessing.normalization.position_scaling_method,
+            size_log1p_method=self.config.preprocessing.normalization.size_log1p_scaling_method,
+            price_static_method=self.config.preprocessing.normalization.price_static_scaling_method,
+            delta_t_method=self.config.preprocessing.normalization.delta_t_scaling_method,
+            delta_t_transform=self.config.preprocessing.normalization.delta_t_transform,
         )
         normalizer.fit(processed_train_days)
         print("Derivative normalizer fitted.")
@@ -1432,8 +1439,13 @@ class LobProcessingPipeline:
         normalizer = DerivativeNormalizer(
             stats_path,
             method=self.config.preprocessing.normalization.derivative_scaling_method,
+            position_method=self.config.preprocessing.normalization.position_scaling_method,
+            size_log1p_method=self.config.preprocessing.normalization.size_log1p_scaling_method,
+            price_static_method=self.config.preprocessing.normalization.price_static_scaling_method,
+            delta_t_method=self.config.preprocessing.normalization.delta_t_scaling_method,
+            delta_t_transform=self.config.preprocessing.normalization.delta_t_transform,
         )
-        derivative_frames: list[pd.DataFrame] = []
+        normalizer_frames: list[pd.DataFrame] = []
         first_schema_day: ProcessedDay | None = None
         stats_metadata: dict[str, object] | None = None
 
@@ -1447,9 +1459,19 @@ class LobProcessingPipeline:
             )
 
             derivative_columns = derivative_feature_columns(processed)
+            normalization_columns = normalizable_feature_columns(processed)
             if stats_metadata is None:
                 stats_metadata = self._derivative_stats_metadata(message_features, derivative_columns)
-            derivative_frames.append(processed.loc[:, derivative_columns].copy())
+                stats_metadata["normalization_columns"] = normalization_columns
+                stats_metadata["normalization_methods"] = {
+                    "derivatives": self.config.preprocessing.normalization.derivative_scaling_method,
+                    "kinematic_positions": self.config.preprocessing.normalization.position_scaling_method,
+                    "size_log1p": self.config.preprocessing.normalization.size_log1p_scaling_method,
+                    "price_static": self.config.preprocessing.normalization.price_static_scaling_method,
+                    "delta_t": self.config.preprocessing.normalization.delta_t_scaling_method,
+                    "delta_t_transform": self.config.preprocessing.normalization.delta_t_transform,
+                }
+            normalizer_frames.append(processed.loc[:, normalization_columns].copy())
             if first_schema_day is None:
                 first_schema_day = day
             else:
@@ -1459,13 +1481,13 @@ class LobProcessingPipeline:
         if first_schema_day is None:
             raise ValueError("Cannot fit derivative normalizer: no training day is available.")
 
-        normalizer.fit(derivative_frames, metadata=stats_metadata)
+        normalizer.fit(normalizer_frames, metadata=stats_metadata)
         first_processed = self._require_frame(first_schema_day, "processed", "feature schema bootstrap")
         first_schema_day.normalized = normalizer.transform(first_processed)
         ordered_feature_columns = self._build_feature_schema_from_day(first_schema_day, schema_path)
         first_schema_day.processed = None
         first_schema_day.normalized = None
-        derivative_frames.clear()
+        normalizer_frames.clear()
         gc.collect()
 
         print("Derivative normalizer fitted.")

@@ -41,6 +41,7 @@ from kinematic_preprocessing import (
     fit_plgs_parameters,
     handle_abnormal_prices,
     min_max_norm,
+    normalizable_feature_columns,
     plgs_value,
     time_to_sincos,
 )
@@ -364,6 +365,82 @@ def test_derivative_normalizer_quantile_scaling_uses_std_floor_and_clips() -> No
     assert stats["scale_source"] == "std"
     np.testing.assert_allclose(float(stats["scale"]), expected_scale)
     np.testing.assert_allclose(normalized["price_kin_vel"], [-10.0, 0.0, 10.0])
+
+
+def test_derivative_normalizer_scales_positions_message_features_and_delta_t() -> None:
+    artifact_dir = Path(__file__).resolve().parent / ".test_artifacts" / "feature_family_normalizer"
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True)
+    stats_path = artifact_dir / "derivatives_stats.yaml"
+    train = pd.DataFrame(
+        {
+            "ask_price_1_kin_pos": [10.0, 20.0, 30.0],
+            "ask_price_1_kin_vel": [1.0, 2.0, 3.0],
+            "size_log1p": [2.0, 4.0, 6.0],
+            "price_static": [-1.0, 0.0, 1.0],
+            "delta_t": [0.0, 1.0, 3.0],
+            "trend_label": [0, 1, 0],
+        }
+    )
+    test = pd.DataFrame(
+        {
+            "ask_price_1_kin_pos": [40.0],
+            "ask_price_1_kin_vel": [4.0],
+            "size_log1p": [8.0],
+            "price_static": [2.0],
+            "delta_t": [7.0],
+            "trend_label": [1],
+        }
+    )
+
+    normalizer = DerivativeNormalizer(stats_path, method="zscore").fit([train])
+    normalized = normalizer.transform(test)
+    stats = DerivativeNormalizer.load_stats(stats_path)
+
+    expected_pos = (40.0 - train["ask_price_1_kin_pos"].mean()) / train["ask_price_1_kin_pos"].std(ddof=0)
+    expected_size = (8.0 - train["size_log1p"].mean()) / train["size_log1p"].std(ddof=0)
+    expected_price_static = (2.0 - train["price_static"].mean()) / train["price_static"].std(ddof=0)
+    transformed_delta = np.log1p(train["delta_t"])
+    delta_median = float(np.median(transformed_delta))
+    delta_mad = float(np.median(np.abs(transformed_delta - delta_median)))
+    expected_delta_t = (np.log1p(7.0) - delta_median) / (1.4826 * delta_mad)
+
+    assert normalizable_feature_columns(train) == [
+        "ask_price_1_kin_vel",
+        "ask_price_1_kin_pos",
+        "size_log1p",
+        "price_static",
+        "delta_t",
+    ]
+    assert stats["ask_price_1_kin_pos"]["family"] == "kinematic_position"
+    assert stats["size_log1p"]["family"] == "message_size_log1p"
+    assert stats["price_static"]["family"] == "message_price_static"
+    assert stats["delta_t"]["family"] == "delta_t"
+    assert stats["delta_t"]["transform"] == "log1p"
+    assert stats["delta_t"]["method"] == "robust_mad"
+    np.testing.assert_allclose(normalized["ask_price_1_kin_pos"], [expected_pos])
+    np.testing.assert_allclose(normalized["size_log1p"], [expected_size])
+    np.testing.assert_allclose(normalized["price_static"], [expected_price_static])
+    np.testing.assert_allclose(normalized["delta_t"], [expected_delta_t])
+    np.testing.assert_allclose(normalized["trend_label"], [1])
+
+
+def test_derivative_normalizer_accepts_quantile_alias_for_position_scaling() -> None:
+    artifact_dir = Path(__file__).resolve().parent / ".test_artifacts" / "position_quantile_alias"
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True)
+    stats_path = artifact_dir / "derivatives_stats.yaml"
+    train = pd.DataFrame({"ask_price_1_kin_pos": np.linspace(-1.0, 1.0, 1001)})
+    test = pd.DataFrame({"ask_price_1_kin_pos": [-100.0, 0.0, 100.0]})
+
+    normalizer = DerivativeNormalizer(stats_path, position_method="quantile").fit([train])
+    normalized = normalizer.transform(test)
+    stats = DerivativeNormalizer.load_stats(stats_path)["ask_price_1_kin_pos"]
+
+    assert stats["method"] == "quantile_scaling"
+    np.testing.assert_allclose(normalized["ask_price_1_kin_pos"], [-10.0, 0.0, 10.0])
 
 
 def test_static_centering_removes_touch_tick_symmetrically() -> None:

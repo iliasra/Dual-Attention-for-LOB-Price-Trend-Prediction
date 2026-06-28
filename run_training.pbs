@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N training
-#PBS -l walltime=24:00:00
+#PBS -l walltime=72:00:00
 #PBS -l select=1:ncpus=10:mem=48gb:ngpus=1
 
 # UNCOMMENT FOLLOWING TO ENABLE DETERMINISTIC BEHAVIOR
@@ -12,6 +12,7 @@ SCRIPT_START_EPOCH="$(date +%s)"
 PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
 WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
 TRAINING_CONFIG="${TRAINING_CONFIG:-configs/pipeline_config.yaml}"
+TRAINING_RESUME_ARGS="${TRAINING_RESUME_ARGS:-}"
 FOLDS_FILE="${FOLDS_FILE:-configs/folds.txt}"
 PROJECT_FOLDS_FILE="$PROJECT_DIR/$FOLDS_FILE"
 WORK_CONFIG_PATH="$WORK_DIR/$TRAINING_CONFIG"
@@ -217,6 +218,7 @@ echo "RUN_LAUNCH_TIMESTAMP=$RUN_LAUNCH_TIMESTAMP"
 echo "FOLDS_FILE=$FOLDS_FILE"
 echo "PROJECT_FOLDS_FILE=$PROJECT_FOLDS_FILE"
 echo "TRAINING_CONFIG=$TRAINING_CONFIG"
+echo "TRAINING_RESUME_ARGS=${TRAINING_RESUME_ARGS:-<none>}"
 echo "FOLD_COUNT=$FOLD_COUNT"
 echo "FOLDS=${FOLD_IDS[*]}"
 echo "HOSTNAME=$(hostname)"
@@ -275,6 +277,13 @@ done
 cd "$WORK_DIR"
 touch "$RUN_MARKER"
 
+TRAINING_RESUME_ARGV=()
+if [ -n "$TRAINING_RESUME_ARGS" ]; then
+  # Split optional resume flags such as "--resume-latest" or "--resume-from path".
+  # Keep this empty for fresh runs.
+  TRAINING_RESUME_ARGV=($TRAINING_RESUME_ARGS)
+fi
+
 for fold_id in "${FOLD_IDS[@]}"; do
   echo
   echo "===== RUNNING TRAINING FOR $fold_id ====="
@@ -282,7 +291,8 @@ for fold_id in "${FOLD_IDS[@]}"; do
   python scripts/run_training.py \
     --config "$WORK_CONFIG_PATH" \
     --fold-id "$fold_id" \
-    --run-stem "$RUN_STEM"
+    --run-stem "$RUN_STEM" \
+    "${TRAINING_RESUME_ARGV[@]}"
 done
 
 echo

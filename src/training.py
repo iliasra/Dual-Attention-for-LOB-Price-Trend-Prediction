@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import random
 from time import perf_counter
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 import torch
@@ -824,6 +825,32 @@ class CheckpointCandidate:
     checkpoint_label: str | None = None
 
 
+def checkpoint_candidate_to_dict(candidate: CheckpointCandidate) -> dict[str, Any]:
+    """Serialize checkpoint candidate metadata for training resume checkpoints."""
+    return {
+        "epoch": int(candidate.epoch),
+        "monitor_value": float(candidate.monitor_value),
+        "path": str(candidate.path),
+        "batch_in_epoch": candidate.batch_in_epoch,
+        "global_step": candidate.global_step,
+        "validation_index": candidate.validation_index,
+        "checkpoint_label": candidate.checkpoint_label,
+    }
+
+
+def checkpoint_candidate_from_dict(payload: dict[str, Any]) -> CheckpointCandidate:
+    """Restore checkpoint candidate metadata from a training resume checkpoint."""
+    return CheckpointCandidate(
+        epoch=int(payload["epoch"]),
+        monitor_value=float(payload["monitor_value"]),
+        path=Path(payload["path"]),
+        batch_in_epoch=None if payload.get("batch_in_epoch") is None else int(payload["batch_in_epoch"]),
+        global_step=None if payload.get("global_step") is None else int(payload["global_step"]),
+        validation_index=None if payload.get("validation_index") is None else int(payload["validation_index"]),
+        checkpoint_label=payload.get("checkpoint_label"),
+    )
+
+
 class MovementDirectionAuxiliaryLoss(nn.Module):
     def __init__(
         self,
@@ -1050,11 +1077,108 @@ class LobTrainer:
             weight_decay=self.config.weight_decay,
         )
 
+    def _rng_state(self) -> dict[str, Any]:
+        """Return Python, NumPy, and torch RNG state for exact training resume."""
+        payload: dict[str, Any] = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            payload["cuda"] = torch.cuda.get_rng_state_all()
+        return payload
+
+    def _restore_rng_state(self, payload: dict[str, Any] | None) -> None:
+        """Restore Python, NumPy, and torch RNG state when available."""
+        if not payload:
+            return
+        if "python" in payload:
+            random.setstate(payload["python"])
+        if "numpy" in payload:
+            np.random.set_state(payload["numpy"])
+        if "torch" in payload:
+            torch.set_rng_state(payload["torch"].cpu())
+        if "cuda" in payload and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(payload["cuda"])
+
+    def _save_training_state(
+        self,
+        path: Path,
+        *,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
+        history: list[EpochResult],
+        next_epoch: int,
+        next_batch_in_epoch: int,
+        global_step: int,
+        validation_index: int,
+        best_monitor_value: float,
+        best_epoch: int,
+        best_checkpoint_label: str,
+        validations_without_improvement: int,
+        wandb_run_id: str | None,
+    ) -> None:
+        """Persist a complete training state that can resume optimizer progress."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": self.scaler.state_dict(),
+                "history": history,
+                "next_epoch": int(next_epoch),
+                "next_batch_in_epoch": int(next_batch_in_epoch),
+                "global_step": int(global_step),
+                "validation_index": int(validation_index),
+                "best_monitor_value": float(best_monitor_value),
+                "best_epoch": int(best_epoch),
+                "best_checkpoint_label": best_checkpoint_label,
+                "validations_without_improvement": int(validations_without_improvement),
+                "top_checkpoint_candidates": [
+                    checkpoint_candidate_to_dict(candidate)
+                    for candidate in self.top_checkpoint_candidates
+                ],
+                "rng_state": self._rng_state(),
+                "wandb_run_id": wandb_run_id,
+            },
+            path,
+        )
+
+    def _load_training_state(
+        self,
+        path: Path,
+        *,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
+    ) -> dict[str, Any]:
+        """Load a complete training state and restore model/optimizer components."""
+        state = torch.load(path, map_location=self.device, weights_only=False)
+        model.load_state_dict(state["model_state_dict"])
+        optimizer.load_state_dict(state["optimizer_state_dict"])
+        scheduler.load_state_dict(state["scheduler_state_dict"])
+        scaler_state = state.get("scaler_state_dict")
+        if scaler_state is not None:
+            self.scaler.load_state_dict(scaler_state)
+        self.top_checkpoint_candidates = [
+            checkpoint_candidate_from_dict(candidate)
+            for candidate in state.get("top_checkpoint_candidates", [])
+        ]
+        self._restore_rng_state(state.get("rng_state"))
+        return state
+
     def fit(
         self,
         model: nn.Module,
         train_loader: Iterable,
         val_loader: Iterable,
+        *,
+        training_state_path: Path | None = None,
+        resume_checkpoint_path: Path | None = None,
+        wandb_run_id: str | None = None,
+        validation_callback: Callable[[EpochResult, float], None] | None = None,
     ) -> tuple[nn.Module, list[EpochResult]]:
         """Train using only train/validation data and reload the best validation model.
 
@@ -1078,12 +1202,44 @@ class LobTrainer:
         validate_by_epoch = bool(self.config.validates_by_epoch)
         validation_interval = None if validate_by_epoch else int(self.config.validate_every_n_batches)
         validation_unit = "epoch" if validate_by_epoch else "validation interval"
+        start_epoch_number = 1
+        resume_skip_batches = 0
+
+        if resume_checkpoint_path is not None:
+            resume_state = self._load_training_state(
+                resume_checkpoint_path,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+            )
+            history = list(resume_state.get("history", []))
+            best_monitor_value = float(resume_state.get("best_monitor_value", best_monitor_value))
+            best_epoch = int(resume_state.get("best_epoch", 0))
+            best_checkpoint_label = str(resume_state.get("best_checkpoint_label", "") or "")
+            validations_without_improvement = int(resume_state.get("validations_without_improvement", 0))
+            validation_index = int(resume_state.get("validation_index", 0))
+            global_step = int(resume_state.get("global_step", 0))
+            start_epoch_number = int(resume_state.get("next_epoch", 1))
+            resume_skip_batches = max(0, int(resume_state.get("next_batch_in_epoch", 1)) - 1)
+            if best_checkpoint_label:
+                best_checkpoint_path = self.config.checkpoint_path(
+                    best_epoch,
+                    global_step=None if validate_by_epoch else global_step,
+                )
+            print(
+                "Resuming training from "
+                f"{resume_checkpoint_path}: next_epoch={start_epoch_number}, "
+                f"next_batch_in_epoch={resume_skip_batches + 1}, "
+                f"global_step={global_step}, validation_index={validation_index}."
+            )
 
         def record_validation(
             *,
             epoch_number: int,
             batch_in_epoch: int | None,
             global_step_value: int | None,
+            next_epoch_number: int,
+            next_batch_in_epoch: int,
             train_result: EvaluationResult,
             val_result: EvaluationResult,
         ) -> bool:
@@ -1098,21 +1254,20 @@ class LobTrainer:
             checkpoint_global_step = None if validate_by_epoch else global_step_value
             checkpoint_label = self.config.checkpoint_label(epoch_number, global_step=checkpoint_global_step)
             checkpoint_path = self.config.checkpoint_path(epoch_number, global_step=checkpoint_global_step)
-            history.append(
-                EpochResult(
-                    train_loss=train_result.loss,
-                    val_loss=val_result.loss,
-                    train_metrics=train_result.metrics,
-                    val_metrics=val_result.metrics,
-                    train_expert_usage=train_result.expert_usage,
-                    val_expert_usage=val_result.expert_usage,
-                    epoch=epoch_number,
-                    batch_in_epoch=batch_in_epoch,
-                    global_step=global_step_value,
-                    validation_index=validation_index,
-                    checkpoint_label=checkpoint_label,
-                )
+            result = EpochResult(
+                train_loss=train_result.loss,
+                val_loss=val_result.loss,
+                train_metrics=train_result.metrics,
+                val_metrics=val_result.metrics,
+                train_expert_usage=train_result.expert_usage,
+                val_expert_usage=val_result.expert_usage,
+                epoch=epoch_number,
+                batch_in_epoch=batch_in_epoch,
+                global_step=global_step_value,
+                validation_index=validation_index,
+                checkpoint_label=checkpoint_label,
             )
+            history.append(result)
 
             monitor_value = self._monitor_value(val_result)
             self._save_top_checkpoint_candidate(
@@ -1140,6 +1295,25 @@ class LobTrainer:
             else:
                 if validation_index > self.config.early_stopping_warmup:
                     validations_without_improvement += 1
+            if validation_callback is not None:
+                validation_callback(result, monitor_value)
+            if training_state_path is not None:
+                self._save_training_state(
+                    training_state_path,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    history=history,
+                    next_epoch=next_epoch_number,
+                    next_batch_in_epoch=next_batch_in_epoch,
+                    global_step=global_step if global_step_value is None else int(global_step_value),
+                    validation_index=validation_index,
+                    best_monitor_value=best_monitor_value,
+                    best_epoch=best_epoch,
+                    best_checkpoint_label=best_checkpoint_label,
+                    validations_without_improvement=validations_without_improvement,
+                    wandb_run_id=wandb_run_id,
+                )
 
             if validate_by_epoch:
                 progress = f"Epoch {epoch_number}/{self.config.epochs}"
@@ -1182,8 +1356,8 @@ class LobTrainer:
             f"min_delta={self.config.early_stopping_min_delta:.6g}; "
             f"optimizer={self.config.optimizer}."
         )
-        for epoch in range(self.config.epochs):
-            epoch_number = epoch + 1
+        for epoch_number in range(start_epoch_number, self.config.epochs + 1):
+            epoch = epoch_number - 1
             self._set_epoch(train_loader, epoch)
             print(f"Starting epoch {epoch_number}/{self.config.epochs}.")
             if validate_by_epoch:
@@ -1206,6 +1380,8 @@ class LobTrainer:
                     epoch_number=epoch_number,
                     batch_in_epoch=None,
                     global_step_value=None,
+                    next_epoch_number=epoch_number + 1,
+                    next_batch_in_epoch=1,
                     train_result=train_result,
                     val_result=val_result,
                 ):
@@ -1220,6 +1396,8 @@ class LobTrainer:
             last_batch_in_epoch = 0
             progress = tqdm(train_loader, desc=f"Epoch {epoch_number}/{self.config.epochs} [Train]")
             for batch_in_epoch, (x_batch, t_batch, y_batch) in enumerate(progress, start=1):
+                if epoch_number == start_epoch_number and batch_in_epoch <= resume_skip_batches:
+                    continue
                 last_batch_in_epoch = batch_in_epoch
                 x_batch = x_batch.to(self.device, non_blocking=True)
                 t_batch = t_batch.to(self.device, non_blocking=True)
@@ -1272,6 +1450,8 @@ class LobTrainer:
                         epoch_number=epoch_number,
                         batch_in_epoch=batch_in_epoch,
                         global_step_value=global_step,
+                        next_epoch_number=epoch_number,
+                        next_batch_in_epoch=batch_in_epoch + 1,
                         train_result=train_result,
                         val_result=val_result,
                     )
@@ -1300,11 +1480,31 @@ class LobTrainer:
                     epoch_number=epoch_number,
                     batch_in_epoch=last_batch_in_epoch,
                     global_step_value=global_step,
+                    next_epoch_number=epoch_number + 1,
+                    next_batch_in_epoch=1,
                     train_result=train_result,
                     val_result=val_result,
                 ):
                     break
             scheduler.step()
+            if training_state_path is not None:
+                self._save_training_state(
+                    training_state_path,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    history=history,
+                    next_epoch=epoch_number + 1,
+                    next_batch_in_epoch=1,
+                    global_step=global_step,
+                    validation_index=validation_index,
+                    best_monitor_value=best_monitor_value,
+                    best_epoch=best_epoch,
+                    best_checkpoint_label=best_checkpoint_label,
+                    validations_without_improvement=validations_without_improvement,
+                    wandb_run_id=wandb_run_id,
+                )
+            resume_skip_batches = 0
 
         if best_epoch:
             best_path = Path(self.config.best_model_path)

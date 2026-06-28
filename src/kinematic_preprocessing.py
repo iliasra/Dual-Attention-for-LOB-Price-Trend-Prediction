@@ -30,7 +30,9 @@ except ImportError:  # pragma: no cover
     from .utils import save_yaml
 
 ArrayLike = Union[float, int, np.ndarray, pd.Series]
-DerivativeScalingMethod = Literal["zscore", "robust_mad", "quantile_scaling"]
+FeatureScalingMethod = Literal["zscore", "robust_mad", "quantile_scaling"]
+DerivativeScalingMethod = FeatureScalingMethod
+FEATURE_SCALING_METHODS = {"zscore", "robust_mad", "quantile_scaling"}
 DUMMY_PRICE_VALUES = [9999999999, -9999999999, 9999999999.0, -9999999999.0]
 DERIVATIVE_SCALING_EPS = 1e-8
 MAD_NORMAL_CONSISTENCY = 1.4826
@@ -236,17 +238,27 @@ def _derivative_stats(series: pd.Series, *, method: DerivativeScalingMethod = "r
     )
 
 
+def _normalize_scaling_method(method: str, *, context: str = "Scaling method") -> FeatureScalingMethod:
+    normalized = str(method).strip().lower()
+    if normalized == "quantile":
+        normalized = "quantile_scaling"
+    if normalized not in FEATURE_SCALING_METHODS:
+        raise ValueError(
+            f"{context} must be 'zscore', 'robust_mad', 'quantile', "
+            "or legacy alias 'quantile_scaling'."
+        )
+    return normalized  # type: ignore[return-value]
+
+
 def _validate_derivative_scaling_method(method: str) -> DerivativeScalingMethod:
-    if method not in {"zscore", "robust_mad", "quantile_scaling"}:
-        raise ValueError("Derivative scaling method must be 'zscore', 'robust_mad', or 'quantile_scaling'.")
-    return method  # type: ignore[return-value]
+    return _normalize_scaling_method(method, context="Derivative scaling method")
 
 
 def _scale_derivative_series(
     series: pd.Series,
     stats: dict[str, float | int | str],
     *,
-    method: DerivativeScalingMethod,
+    method: FeatureScalingMethod,
     column: str,
 ) -> pd.Series:
     if method == "zscore":
@@ -262,6 +274,15 @@ def _scale_derivative_series(
     if method == "quantile_scaling":
         return scaled.clip(-10.0, 10.0)
     return scaled
+
+
+def _log1p_nonnegative_series(series: pd.Series, *, column: str) -> pd.Series:
+    values = pd.to_numeric(series, errors="coerce")
+    finite_values = values[np.isfinite(values)]
+    if (finite_values < 0.0).any():
+        raise ValueError(f"Column '{column}' contains negative values; cannot apply log1p normalization.")
+    return pd.Series(np.log1p(values), index=series.index)
+
 
 def _log1p(x: ArrayLike) -> pd.Series:
     return np.log1p(x)
@@ -1270,6 +1291,40 @@ def derivative_feature_columns(df: pd.DataFrame) -> list[str]:
     ]
 
 
+def kinematic_position_feature_columns(df: pd.DataFrame) -> list[str]:
+    return [column for column in df.columns if column.lower().endswith("_kin_pos")]
+
+
+def message_size_feature_columns(df: pd.DataFrame) -> list[str]:
+    return [column for column in df.columns if column.lower() == "size_log1p"]
+
+
+def message_price_static_feature_columns(df: pd.DataFrame) -> list[str]:
+    return [column for column in df.columns if column.lower() == "price_static"]
+
+
+def delta_t_feature_columns(df: pd.DataFrame) -> list[str]:
+    return [column for column in df.columns if column.lower() == "delta_t"]
+
+
+def normalizable_feature_columns(df: pd.DataFrame) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for selector in (
+        derivative_feature_columns,
+        kinematic_position_feature_columns,
+        message_size_feature_columns,
+        message_price_static_feature_columns,
+        delta_t_feature_columns,
+    ):
+        for column in selector(df):
+            if column in seen:
+                continue
+            seen.add(column)
+            ordered.append(column)
+    return ordered
+
+
 @dataclass(slots=True)
 class TradingSessionFilter:
     time_column: str
@@ -1299,11 +1354,69 @@ class TradingSessionFilter:
 @dataclass(slots=True)
 class DerivativeNormalizer:
     output_path: str | Path
-    method: DerivativeScalingMethod = "zscore"
+    method: str = "zscore"
+    position_method: str = "zscore"
+    size_log1p_method: str = "zscore"
+    price_static_method: str = "zscore"
+    delta_t_method: str = "robust_mad"
+    delta_t_transform: str = "log1p"
     stats_: dict[str, dict[str, float | int | str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.method = _validate_derivative_scaling_method(self.method)
+        self.position_method = _normalize_scaling_method(
+            self.position_method,
+            context="Kinematic position scaling method",
+        )
+        self.size_log1p_method = _normalize_scaling_method(
+            self.size_log1p_method,
+            context="size_log1p scaling method",
+        )
+        self.price_static_method = _normalize_scaling_method(
+            self.price_static_method,
+            context="price_static scaling method",
+        )
+        self.delta_t_method = _normalize_scaling_method(
+            self.delta_t_method,
+            context="delta_t scaling method",
+        )
+        self.delta_t_transform = str(self.delta_t_transform).strip().lower()
+        if self.delta_t_transform != "log1p":
+            raise ValueError("delta_t transform must be 'log1p'.")
+
+    def _column_specs(self, df: pd.DataFrame) -> dict[str, dict[str, str]]:
+        specs: dict[str, dict[str, str]] = {}
+
+        def add(columns: list[str], *, family: str, method: str, transform: str | None = None) -> None:
+            for column in columns:
+                specs.setdefault(
+                    column,
+                    {
+                        "family": family,
+                        "method": method,
+                        **({"transform": transform} if transform is not None else {}),
+                    },
+                )
+
+        add(derivative_feature_columns(df), family="derivative", method=self.method)
+        add(kinematic_position_feature_columns(df), family="kinematic_position", method=self.position_method)
+        add(message_size_feature_columns(df), family="message_size_log1p", method=self.size_log1p_method)
+        add(message_price_static_feature_columns(df), family="message_price_static", method=self.price_static_method)
+        add(
+            delta_t_feature_columns(df),
+            family="delta_t",
+            method=self.delta_t_method,
+            transform=self.delta_t_transform,
+        )
+        return specs
+
+    @staticmethod
+    def _apply_transform(series: pd.Series, *, column: str, transform: str | None) -> pd.Series:
+        if transform is None:
+            return pd.to_numeric(series, errors="coerce")
+        if transform == "log1p":
+            return _log1p_nonnegative_series(series, column=column)
+        raise ValueError(f"Unsupported normalization transform '{transform}' for column '{column}'.")
 
     def fit(
         self,
@@ -1311,18 +1424,30 @@ class DerivativeNormalizer:
         *,
         metadata: dict[str, object] | None = None,
     ) -> "DerivativeNormalizer":
-        """Fit exact train-only derivative stats for the selected scaling method."""
+        """Fit exact train-only normalization stats for selected feature families."""
         if not dataframes:
             raise ValueError("Cannot fit derivative normalizer on an empty list of dataframes.")
 
-        derivative_frames = [
-            dataframe.loc[:, derivative_feature_columns(dataframe)]
-            for dataframe in dataframes
-        ]
-        concatenated = pd.concat(derivative_frames, axis=0, ignore_index=True)
+        column_specs: dict[str, dict[str, str]] = {}
+        for dataframe in dataframes:
+            for column, spec in self._column_specs(dataframe).items():
+                column_specs.setdefault(column, spec)
+
         self.stats_ = {}
-        for column in derivative_feature_columns(concatenated):
-            stats = _derivative_stats(concatenated[column], method=self.method)
+        for column, spec in column_specs.items():
+            series_parts = [
+                dataframe[column]
+                if column in dataframe.columns
+                else pd.Series(np.nan, index=dataframe.index)
+                for dataframe in dataframes
+            ]
+            if not series_parts:
+                continue
+            concatenated = pd.concat(series_parts, axis=0, ignore_index=True)
+            transform = spec.get("transform")
+            values = self._apply_transform(concatenated, column=column, transform=transform)
+            method = _normalize_scaling_method(spec["method"], context=f"Scaling method for column '{column}'")
+            stats = _derivative_stats(values, method=method)
             self.stats_[column] = {
                 "mean": stats.mean,
                 "std": stats.std,
@@ -1334,7 +1459,11 @@ class DerivativeNormalizer:
                 "q999": stats.q999,
                 "n_nan": stats.n_nan,
                 "n_inf": stats.n_inf,
+                "method": method,
+                "family": spec["family"],
             }
+            if transform is not None:
+                self.stats_[column]["transform"] = transform
 
         payload: dict[str, object] = dict(self.stats_)
         if metadata is not None:
@@ -1343,11 +1472,11 @@ class DerivativeNormalizer:
         return self
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply fitted derivative scaling to a processed dataframe."""
+        """Apply fitted train-only scaling to a processed dataframe."""
         if not self.stats_:
             self.stats_ = self.load_stats(self.output_path)
         if not self.stats_:
-            if not derivative_feature_columns(df):
+            if not normalizable_feature_columns(df):
                 return df.copy()
             raise ValueError("Derivative normalizer has no fitted statistics to apply.")
 
@@ -1355,10 +1484,20 @@ class DerivativeNormalizer:
         for column, stats in self.stats_.items():
             if column not in normalized.columns:
                 continue
-            normalized[column] = _scale_derivative_series(
+            method = _normalize_scaling_method(
+                str(stats.get("method", self.method)),
+                context=f"Scaling method for column '{column}'",
+            )
+            transform = stats.get("transform")
+            values = self._apply_transform(
                 normalized[column],
+                column=column,
+                transform=str(transform) if transform is not None else None,
+            )
+            normalized[column] = _scale_derivative_series(
+                values,
                 stats,
-                method=self.method,
+                method=method,
                 column=column,
             )
         return normalized
@@ -1384,8 +1523,9 @@ class DerivativeNormalizer:
             for optional_float in ("median", "mad", "scale", "q001", "q999"):
                 if optional_float in values:
                     loaded[str(column)][optional_float] = float(values[optional_float])
-            if "scale_source" in values:
-                loaded[str(column)]["scale_source"] = str(values["scale_source"])
+            for optional_text in ("scale_source", "method", "family", "transform"):
+                if optional_text in values:
+                    loaded[str(column)][optional_text] = str(values[optional_text])
             for optional_count in ("n_nan", "n_inf"):
                 if optional_count in values:
                     loaded[str(column)][optional_count] = int(values[optional_count])
@@ -1395,7 +1535,7 @@ class DerivativeNormalizer:
 @dataclass(slots=True)
 class FittedDerivativeNormalizer:
     stats: dict[str, dict[str, float | int | str]]
-    method: DerivativeScalingMethod = "zscore"
+    method: str = "zscore"
 
     def __post_init__(self) -> None:
         self.method = _validate_derivative_scaling_method(self.method)
@@ -1405,10 +1545,20 @@ class FittedDerivativeNormalizer:
         for column, values in self.stats.items():
             if column not in normalized.columns:
                 continue
-            normalized[column] = _scale_derivative_series(
+            method = _normalize_scaling_method(
+                str(values.get("method", self.method)),
+                context=f"Scaling method for column '{column}'",
+            )
+            transform = values.get("transform")
+            series = DerivativeNormalizer._apply_transform(
                 normalized[column],
+                column=column,
+                transform=str(transform) if transform is not None else None,
+            )
+            normalized[column] = _scale_derivative_series(
+                series,
                 values,
-                method=self.method,
+                method=method,
                 column=column,
             )
         return normalized

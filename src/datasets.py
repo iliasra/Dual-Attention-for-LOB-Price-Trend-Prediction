@@ -165,6 +165,28 @@ def sequence_window_labels(dataset: LOBDataset) -> np.ndarray:
     return np.concatenate(labels_by_day) if labels_by_day else np.asarray([], dtype=np.int64)
 
 
+class EpochShuffledSampler(Sampler[int]):
+    """Globally shuffle dataset indices with a deterministic epoch-specific seed."""
+
+    def __init__(self, dataset: Dataset, *, base_seed: int) -> None:
+        self.dataset = dataset
+        self.base_seed = int(base_seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set the epoch used to seed deterministic shuffling."""
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.base_seed + self.epoch)
+        indices = np.arange(len(self.dataset), dtype=np.int64)
+        rng.shuffle(indices)
+        return iter(indices.astype(int).tolist())
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+
 class EpochNeutralDownsamplingSampler(Sampler[int]):
     """Keep all directional windows and resample neutral windows each epoch."""
 

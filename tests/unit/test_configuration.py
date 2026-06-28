@@ -49,6 +49,11 @@ def test_tick_size_is_inherited_from_data_config() -> None:
     assert config.data.tick_size == 100.0
     assert config.data.logs_dir == "../logs"
     assert config.preprocessing.normalization.derivative_scaling_method == "quantile_scaling"
+    assert config.preprocessing.normalization.position_scaling_method == "zscore"
+    assert config.preprocessing.normalization.size_log1p_scaling_method == "zscore"
+    assert config.preprocessing.normalization.price_static_scaling_method == "zscore"
+    assert config.preprocessing.normalization.delta_t_transform == "log1p"
+    assert config.preprocessing.normalization.delta_t_scaling_method == "robust_mad"
     assert config.preprocessing.message.tick_size == config.data.tick_size
     assert config.preprocessing.price_kinematic.tick_size == config.data.tick_size
     assert config.preprocessing.price_static.tick_size == config.data.tick_size
@@ -90,6 +95,23 @@ def test_config_loader_accepts_quantile_derivative_scaling(artifact_dir: Path) -
     assert loaded.preprocessing.normalization.derivative_scaling_method == "quantile_scaling"
 
 
+def test_config_loader_accepts_quantile_alias_for_normalization_scalers(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    normalization = payload["preprocessing"]["normalization"]
+    normalization["position_scaling_method"] = "quantile"
+    normalization["size_log1p_scaling_method"] = "quantile"
+    normalization["price_static_scaling_method"] = "quantile"
+
+    config_path = artifact_dir / "quantile_feature_scaling.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.preprocessing.normalization.position_scaling_method == "quantile_scaling"
+    assert loaded.preprocessing.normalization.size_log1p_scaling_method == "quantile_scaling"
+    assert loaded.preprocessing.normalization.price_static_scaling_method == "quantile_scaling"
+
+
 def test_config_loader_rejects_unknown_derivative_scaling(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
@@ -99,6 +121,18 @@ def test_config_loader_rejects_unknown_derivative_scaling(artifact_dir: Path) ->
     broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="preprocessing\\.normalization\\.derivative_scaling_method"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+
+def test_config_loader_rejects_unknown_delta_t_scaling(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["normalization"]["delta_t_scaling_method"] = "made_up"
+
+    broken_config_path = artifact_dir / "bad_delta_t_scaling.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="preprocessing\\.normalization\\.delta_t_scaling_method"):
         ExperimentConfig.from_yaml(broken_config_path)
 
 
@@ -198,6 +232,47 @@ def test_training_sampling_null_disables_sampler(artifact_dir: Path) -> None:
 
     assert not loaded.training.sampling.enabled
     assert loaded.training.sampling.neutral_to_directional_ratio is None
+
+
+def test_wandb_tracking_defaults_are_loaded() -> None:
+    config = load_config()
+
+    assert config.tracking.wandb.enabled is False
+    assert config.tracking.wandb.project == "lob-price-trend"
+    assert config.tracking.wandb.mode == "auto"
+    assert config.tracking.wandb.tags == []
+    assert config.tracking.wandb.log_best_checkpoint is True
+    assert config.tracking.wandb.log_top_k_checkpoints is False
+
+
+def test_wandb_tracking_settings_are_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["tracking"]["wandb"]["mode"] = "made_up"
+
+    broken_config_path = artifact_dir / "bad_wandb_mode.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="tracking\\.wandb\\.mode"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+    payload["tracking"]["wandb"]["mode"] = "offline"
+    payload["tracking"]["wandb"]["log_best_checkpoint"] = "maybe"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="tracking\\.wandb\\.log_best_checkpoint"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+    payload["tracking"]["wandb"]["log_best_checkpoint"] = True
+    payload["tracking"]["wandb"]["enabled"] = True
+    payload["tracking"]["wandb"]["tags"] = "hpc"
+    config_path = artifact_dir / "wandb_enabled.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.tracking.wandb.enabled is True
+    assert loaded.tracking.wandb.mode == "offline"
+    assert loaded.tracking.wandb.tags == ["hpc"]
 
 
 def test_fast_kinematic_config_values_are_loaded() -> None:

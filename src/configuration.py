@@ -81,6 +81,11 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "derivatives_stats_dir": None,
             "scope": None,
             "derivative_scaling_method": None,
+            "position_scaling_method": None,
+            "size_log1p_scaling_method": None,
+            "price_static_scaling_method": None,
+            "delta_t_transform": None,
+            "delta_t_scaling_method": None,
         },
         "kinematic_tokenization": {
             "method": None,
@@ -234,7 +239,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
     },
 }
 
-OPTIONAL_TOP_LEVEL_KEYS = {"experiment", "folds", "run_metadata"}
+OPTIONAL_TOP_LEVEL_KEYS = {"experiment", "folds", "run_metadata", "tracking"}
 OPTIONAL_CONFIG_KEYS = {
     "preprocessing.labels.smoothing.adaptive_threshold",
     "preprocessing.labels.smoothing.fit_scope",
@@ -272,6 +277,11 @@ OPTIONAL_CONFIG_KEYS = {
     "preprocessing.microprice",
     "preprocessing.microprice.enabled",
     "preprocessing.microprice.levels",
+    "preprocessing.normalization.position_scaling_method",
+    "preprocessing.normalization.size_log1p_scaling_method",
+    "preprocessing.normalization.price_static_scaling_method",
+    "preprocessing.normalization.delta_t_transform",
+    "preprocessing.normalization.delta_t_scaling_method",
     "training.early_stopping_warmup",
     "training.early_stopping_min_delta",
     "training.optimizer",
@@ -297,11 +307,19 @@ LEGACY_IGNORED_CONFIG_KEYS = {
 }
 
 
+NORMALIZATION_SCALING_METHODS = {"zscore", "robust_mad", "quantile", "quantile_scaling"}
+
+
 ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.labels.strategy": {"smoothing", "triple_barrier"},
     "preprocessing.labels.smoothing.method": {"A", "B", "C"},
     "preprocessing.normalization.scope": {"train_only"},
-    "preprocessing.normalization.derivative_scaling_method": {"zscore", "robust_mad", "quantile_scaling"},
+    "preprocessing.normalization.derivative_scaling_method": NORMALIZATION_SCALING_METHODS,
+    "preprocessing.normalization.position_scaling_method": NORMALIZATION_SCALING_METHODS,
+    "preprocessing.normalization.size_log1p_scaling_method": NORMALIZATION_SCALING_METHODS,
+    "preprocessing.normalization.price_static_scaling_method": NORMALIZATION_SCALING_METHODS,
+    "preprocessing.normalization.delta_t_transform": {"log1p"},
+    "preprocessing.normalization.delta_t_scaling_method": NORMALIZATION_SCALING_METHODS,
     "preprocessing.kinematic_tokenization.method": {"basis", "fast"},
     "preprocessing.price_kinematic.reference": {"tick", "time"},
     "preprocessing.volume_kinematic.reference": {"tick", "time"},
@@ -535,7 +553,12 @@ def _validate_allowed_values(payload: dict[str, Any]) -> None:
     invalid: list[str] = []
 
     for path, allowed_values in ALLOWED_CONFIG_VALUES.items():
-        value = _get_nested(payload, path)
+        try:
+            value = _get_nested(payload, path)
+        except KeyError:
+            if path in OPTIONAL_CONFIG_KEYS:
+                continue
+            raise
         if isinstance(value, str):
             comparable = value.lower()
             allowed = {str(item).lower() for item in allowed_values}
@@ -1083,11 +1106,23 @@ class TemporalFeaturesConfig:
         )
 
 
+def _normalization_scaling_value(payload: dict[str, Any], key: str, default: str) -> str:
+    value = str(payload.get(key, default)).strip().lower()
+    if value == "quantile":
+        return "quantile_scaling"
+    return value
+
+
 @dataclass(slots=True)
 class NormalizationConfig:
     derivatives_stats_dir: str
     scope: str
     derivative_scaling_method: str = "zscore"
+    position_scaling_method: str = "zscore"
+    size_log1p_scaling_method: str = "zscore"
+    price_static_scaling_method: str = "zscore"
+    delta_t_transform: str = "log1p"
+    delta_t_scaling_method: str = "robust_mad"
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "NormalizationConfig":
@@ -1095,7 +1130,32 @@ class NormalizationConfig:
         return cls(
             derivatives_stats_dir=str(payload["derivatives_stats_dir"]),
             scope=str(payload["scope"]),
-            derivative_scaling_method=str(payload["derivative_scaling_method"]),
+            derivative_scaling_method=_normalization_scaling_value(
+                payload,
+                "derivative_scaling_method",
+                "zscore",
+            ),
+            position_scaling_method=_normalization_scaling_value(
+                payload,
+                "position_scaling_method",
+                "zscore",
+            ),
+            size_log1p_scaling_method=_normalization_scaling_value(
+                payload,
+                "size_log1p_scaling_method",
+                "zscore",
+            ),
+            price_static_scaling_method=_normalization_scaling_value(
+                payload,
+                "price_static_scaling_method",
+                "zscore",
+            ),
+            delta_t_transform=str(payload.get("delta_t_transform", "log1p")).strip().lower(),
+            delta_t_scaling_method=_normalization_scaling_value(
+                payload,
+                "delta_t_scaling_method",
+                "robust_mad",
+            ),
         )
 
 
@@ -1976,6 +2036,67 @@ class TrainingConfig:
 
 
 @dataclass(slots=True)
+class WandbTrackingConfig:
+    enabled: bool = False
+    project: str = "lob-price-trend"
+    entity: str | None = None
+    mode: str = "auto"
+    dir: str | None = None
+    tags: list[str] = field(default_factory=list)
+    log_best_checkpoint: bool = True
+    log_top_k_checkpoints: bool = False
+
+    def __post_init__(self) -> None:
+        self.mode = self.mode.lower()
+        if self.mode not in {"auto", "online", "offline", "disabled"}:
+            raise ValueError("tracking.wandb.mode must be one of auto, online, offline, disabled.")
+        if not self.project:
+            raise ValueError("tracking.wandb.project must be a non-empty string.")
+        self.tags = [str(tag) for tag in self.tags]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "WandbTrackingConfig":
+        payload = payload or {}
+        if not isinstance(payload, dict):
+            raise ValueError("tracking.wandb must be a mapping.")
+        tags = payload.get("tags", [])
+        if tags is None:
+            tags = []
+        if isinstance(tags, str):
+            tags = [tags]
+        return cls(
+            enabled=_optional_bool(payload.get("enabled"), "tracking.wandb.enabled", default=False),
+            project=str(payload.get("project", "lob-price-trend")),
+            entity=None if payload.get("entity") is None else str(payload.get("entity")),
+            mode=str(payload.get("mode", "auto")),
+            dir=None if payload.get("dir") is None else str(payload.get("dir")),
+            tags=list(tags),
+            log_best_checkpoint=_optional_bool(
+                payload.get("log_best_checkpoint"),
+                "tracking.wandb.log_best_checkpoint",
+                default=True,
+            ),
+            log_top_k_checkpoints=_optional_bool(
+                payload.get("log_top_k_checkpoints"),
+                "tracking.wandb.log_top_k_checkpoints",
+                default=False,
+            ),
+        )
+
+
+@dataclass(slots=True)
+class TrackingConfig:
+    wandb: WandbTrackingConfig = field(default_factory=WandbTrackingConfig)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "TrackingConfig":
+        payload = payload or {}
+        if not isinstance(payload, dict):
+            raise ValueError("tracking must be a mapping.")
+        return cls(wandb=WandbTrackingConfig.from_dict(payload.get("wandb")))
+
+
+@dataclass(slots=True)
 class ExperimentConfig:
     path: Path
     experiment: ExperimentMetadataConfig
@@ -1986,6 +2107,7 @@ class ExperimentConfig:
     preprocessing: PreprocessingConfig
     model: ModelConfig
     training: TrainingConfig
+    tracking: TrackingConfig
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ExperimentConfig":
@@ -2029,6 +2151,7 @@ class ExperimentConfig:
             preprocessing=PreprocessingConfig.from_dict(payload["preprocessing"], tick_size=data_config.tick_size),
             model=ModelConfig.from_dict(payload["model"]),
             training=TrainingConfig.from_dict(payload["training"]),
+            tracking=TrackingConfig.from_dict(payload.get("tracking")),
         )
 
 

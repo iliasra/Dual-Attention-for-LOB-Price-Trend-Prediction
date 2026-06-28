@@ -24,7 +24,7 @@ from calibration import (
     fit_logit_calibration,
     save_temperature_scaling_artifact,
 )
-from datasets import EpochNeutralDownsamplingSampler, LOBDataset, sequence_window_labels
+from datasets import EpochNeutralDownsamplingSampler, EpochShuffledSampler, LOBDataset, sequence_window_labels
 from model import build_model
 from monitoring import epoch_monitor_value as configured_epoch_monitor_value
 from run_logging import (
@@ -62,7 +62,11 @@ from training import (
     class_weights_from_sequence_labels,
     classification_metrics_from_predictions,
 )
-from utils import seed_torch_worker, set_global_seed, torch_generator_from_seed
+from utils import load_yaml, seed_torch_worker, set_global_seed
+from wandb_tracking import WandbTracker
+
+
+TRAINING_STATE_FILENAME = "training_state_latest.pth"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train LOB model on one or more folds.")
@@ -74,6 +78,17 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Shared run directory name. Useful for PBS array jobs.",
+    )
+    parser.add_argument(
+        "--resume-latest",
+        action="store_true",
+        help=f"Resume each selected fold from {TRAINING_STATE_FILENAME} when it exists.",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help="Resume a single selected fold from an explicit complete training-state checkpoint.",
     )
     return parser.parse_args()
 
@@ -1251,6 +1266,32 @@ def fold_artifact_paths(
     }
 
 
+def resolve_resume_checkpoint(
+    *,
+    fold_result_dir: Path,
+    resume_latest: bool,
+    resume_from: Path | None,
+) -> Path | None:
+    """Return the complete training-state checkpoint selected for resume."""
+    if resume_from is not None:
+        if not resume_from.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_from}")
+        return resume_from
+    latest_path = fold_result_dir / TRAINING_STATE_FILENAME
+    if resume_latest and latest_path.exists():
+        return latest_path
+    return None
+
+
+def resume_wandb_run_id(resume_checkpoint_path: Path | None) -> str | None:
+    """Read the W&B run id from a complete training-state checkpoint if present."""
+    if resume_checkpoint_path is None or not resume_checkpoint_path.exists():
+        return None
+    state = torch.load(resume_checkpoint_path, map_location="cpu", weights_only=False)
+    run_id = state.get("wandb_run_id") if isinstance(state, dict) else None
+    return None if run_id is None else str(run_id)
+
+
 def train_fold(
     *,
     config: ExperimentConfig,
@@ -1261,6 +1302,8 @@ def train_fold(
     run_stem: str,
     seed: int | None = None,
     fold_has_test_split: bool | None = None,
+    resume_latest: bool = False,
+    resume_from: Path | None = None,
 ) -> dict:
     fold_start = perf_counter()
     fold_seed = config.seed if seed is None else int(seed)
@@ -1286,6 +1329,27 @@ def train_fold(
     run_pr_curves_dir = fold_log_dir / "pr_curves"
     run_probabilities_dir = fold_log_dir / "probabilities"
     config.training.model_dir = str(fold_result_dir)
+    training_state_path = fold_result_dir / TRAINING_STATE_FILENAME
+    resume_checkpoint_path = resolve_resume_checkpoint(
+        fold_result_dir=fold_result_dir,
+        resume_latest=resume_latest,
+        resume_from=resume_from,
+    )
+    if resume_checkpoint_path is not None:
+        print(f"Fold '{fold_id}' will resume from training state: {resume_checkpoint_path}")
+    wandb_tracker = WandbTracker.init(
+        config.tracking.wandb,
+        run_stem=run_stem,
+        fold_id=fold_id,
+        fold_log_dir=fold_log_dir,
+        resume_run_id=resume_wandb_run_id(resume_checkpoint_path),
+        config_payload={
+            "run_stem": run_stem,
+            "fold_id": fold_id,
+            "seed": fold_seed,
+            "config_path": str(config.path),
+        },
+    )
     preprocessing_metadata = load_preprocessing_metadata(fold_sequence_dir)
 
     train_dataset = build_dataset(fold_sequence_dir, "train", config.data.sequence_window)
@@ -1368,11 +1432,12 @@ def train_fold(
     loader_kwargs = config.training.data_loader_kwargs()
     loader_kwargs["worker_init_fn"] = seed_torch_worker
     if train_sampler is None:
+        train_shuffle_sampler = EpochShuffledSampler(train_dataset, base_seed=fold_seed)
         train_loader = DataLoader(
             train_dataset,
             batch_size=config.training.batch_size,
-            shuffle=True,
-            generator=torch_generator_from_seed(fold_seed),
+            sampler=train_shuffle_sampler,
+            shuffle=False,  # globally shuffled by an epoch-aware sampler for resumability
             **loader_kwargs,
         )
     else:
@@ -1381,7 +1446,6 @@ def train_fold(
             batch_size=config.training.batch_size,
             sampler=train_sampler,
             shuffle=False,  # already shuffled during sampling
-            generator=torch_generator_from_seed(fold_seed),
             **loader_kwargs,
         )
     train_eval_loader = DataLoader(
@@ -1440,9 +1504,21 @@ def train_fold(
         sampling_summary=sampling_summary,
         auxiliary_loss_summary=auxiliary_loss_summary,
     )
+    wandb_tracker.update_config(load_yaml(run_config_path))
     trainer = LobTrainer(config.training, auxiliary_criterion=auxiliary_criterion)
     fit_start = perf_counter()
-    model, history = trainer.fit(model, train_loader, validation_loader)
+    model, history = trainer.fit(
+        model,
+        train_loader,
+        validation_loader,
+        training_state_path=training_state_path,
+        resume_checkpoint_path=resume_checkpoint_path,
+        wandb_run_id=wandb_tracker.run_id,
+        validation_callback=lambda result, monitor_value: wandb_tracker.log_validation(
+            result,
+            monitor_value=monitor_value,
+        ),
+    )
     fit_duration_seconds = perf_counter() - fit_start
     checkpoint_selection = select_checkpoint_after_validation_postprocessing(
         trainer=trainer,
@@ -1689,6 +1765,10 @@ def train_fold(
         "pr_curves_dir": str(run_pr_curves_dir),
     }
     save_run_summary(checkpoint_selection_summary, run_checkpoint_selection_path)
+    wandb_tracker.log_validation(
+        best_history,
+        monitor_value=float(final_postprocessed_monitor_value),
+    )
     fold_duration_seconds = perf_counter() - fold_start
     timing = {
         "fold_training_seconds": round(fold_duration_seconds, 6),
@@ -1821,11 +1901,45 @@ def train_fold(
             f"val_loss={result.val_loss:.6f}{test_suffix}{metric_suffix}"
         )
 
+    wandb_artifact_paths = [
+        run_config_path,
+        run_losses_path,
+        run_checkpoint_selection_path,
+        run_log_path,
+        run_confusion_matrices_path,
+        run_expert_usage_path,
+        run_pr_thresholds_path,
+    ]
+    if temperature_scaling_summary.get("enabled"):
+        wandb_artifact_paths.append(run_temperature_scaling_path)
+    if directional_threshold_summary.get("enabled"):
+        wandb_artifact_paths.append(run_directional_thresholds_path)
+    wandb_tracker.log_artifact_files(
+        name=f"{run_stem}-{fold_id}-training-artifacts",
+        artifact_type="training-artifacts",
+        paths=wandb_artifact_paths,
+    )
+    if config.tracking.wandb.log_best_checkpoint:
+        wandb_tracker.log_artifact_files(
+            name=f"{run_stem}-{fold_id}-best-model",
+            artifact_type="model",
+            paths=[config.training.best_model_path],
+        )
+    if config.tracking.wandb.log_top_k_checkpoints:
+        wandb_tracker.log_artifact_files(
+            name=f"{run_stem}-{fold_id}-top-k-checkpoints",
+            artifact_type="model",
+            paths=[candidate.path for candidate in trainer.top_checkpoint_candidates],
+        )
+    wandb_tracker.finish()
+
     return {
         "sequence_dir": str(fold_sequence_dir),
         "log_dir": str(fold_log_dir),
         "result_dir": str(fold_result_dir),
         "best_model_path": str(config.training.best_model_path),
+        "training_state_path": str(training_state_path),
+        "wandb_run_id": wandb_tracker.run_id,
         "model_max_dt": max_dt_summary,
         "class_weights": class_weight_summary,
         "auxiliary_losses": auxiliary_loss_summary,
@@ -1861,6 +1975,8 @@ def main() -> None:
     args = parse_args()
     if args.fold_id is not None and args.fold_index is not None:
         raise ValueError("Use either --fold-id or --fold-index, not both.")
+    if args.resume_latest and args.resume_from is not None:
+        raise ValueError("Use either --resume-latest or --resume-from, not both.")
 
     training_start = perf_counter()
     config = load_config(args.config)
@@ -1876,6 +1992,8 @@ def main() -> None:
         if args.fold_index < 1 or args.fold_index > len(config.folds):
             raise ValueError(f"--fold-index must be in [1, {len(config.folds)}].")
         selected_folds = [config.folds[args.fold_index - 1]]
+    if args.resume_from is not None and len(selected_folds) != 1:
+        raise ValueError("--resume-from requires selecting exactly one fold with --fold-id or --fold-index.")
 
     sequence_dir = resolve_config_path(config, config.data.sequence_data_dir)
     logs_dir = resolve_config_path(config, config.data.logs_dir)
@@ -1920,6 +2038,8 @@ def main() -> None:
             run_stem=run_stem,
             seed=fold_config.seed,
             fold_has_test_split=fold.has_test_dates,
+            resume_latest=bool(args.resume_latest),
+            resume_from=args.resume_from,
         )
         summary["folds"][fold.id] = fold_summary
 

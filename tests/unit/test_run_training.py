@@ -18,6 +18,8 @@ from run_training import (
     build_auxiliary_criterion,
     build_train_sampler,
     monitor_value_after_postprocessing,
+    resolve_resume_checkpoint,
+    resume_wandb_run_id,
     select_checkpoint_after_validation_postprocessing,
     evaluate_best_model_on_validation_and_test_splits,
     fold_artifact_paths,
@@ -50,6 +52,39 @@ def test_fold_artifact_paths_are_scoped_by_fold() -> None:
     assert paths["sequence_dir"] == Path("data/sequences/fold_003")
     assert paths["log_dir"] == Path("logs/run_7/fold_003")
     assert paths["result_dir"] == Path("results/run_7/fold_003")
+
+
+def test_resolve_resume_checkpoint_prefers_explicit_path(artifact_dir: Path) -> None:
+    latest = artifact_dir / "fold" / "training_state_latest.pth"
+    explicit = artifact_dir / "manual_resume.pth"
+    latest.parent.mkdir(parents=True)
+    latest.write_bytes(b"latest")
+    explicit.write_bytes(b"explicit")
+
+    assert resolve_resume_checkpoint(
+        fold_result_dir=latest.parent,
+        resume_latest=True,
+        resume_from=explicit,
+    ) == explicit
+    assert resolve_resume_checkpoint(
+        fold_result_dir=latest.parent,
+        resume_latest=True,
+        resume_from=None,
+    ) == latest
+    assert resolve_resume_checkpoint(
+        fold_result_dir=artifact_dir / "missing",
+        resume_latest=True,
+        resume_from=None,
+    ) is None
+
+
+def test_resume_wandb_run_id_reads_complete_training_state(artifact_dir: Path) -> None:
+    import torch
+
+    checkpoint_path = artifact_dir / "training_state_latest.pth"
+    torch.save({"wandb_run_id": "abc123"}, checkpoint_path)
+
+    assert resume_wandb_run_id(checkpoint_path) == "abc123"
 
 
 def test_build_auxiliary_criterion_uses_auto_clipped_weights() -> None:
@@ -129,6 +164,22 @@ def test_build_train_sampler_uses_configured_sampling_ratio(artifact_dir: Path) 
     assert sampler is not None
     assert summary["enabled"] is True
     assert sampler.sampled_class_counts(config.model.num_classes) == [1, 4, 1]
+
+
+def test_epoch_shuffled_sampler_is_epoch_deterministic() -> None:
+    from datasets import EpochShuffledSampler
+
+    sampler = EpochShuffledSampler(list(range(10)), base_seed=7)
+    sampler.set_epoch(3)
+    first = list(iter(sampler))
+    sampler.set_epoch(3)
+    second = list(iter(sampler))
+    sampler.set_epoch(4)
+    third = list(iter(sampler))
+
+    assert first == second
+    assert sorted(first) == list(range(10))
+    assert third != first
 
 
 def test_resolve_class_weights_can_use_sampled_class_counts() -> None:
