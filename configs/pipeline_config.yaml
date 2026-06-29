@@ -199,10 +199,10 @@ preprocessing:
     volume_source: traded # allowed: traded, message_size
     trade_type_values: [4, 5] # LOBSTER visible/hidden executions for traded-shares volume clock
   microprice:
-    enabled: false # adds a price-like kinematic microprice stream only
+    enabled: true # adds a price-like kinematic microprice stream only
     levels: 5 # number of LOB levels used to compute microprice
   price_kinematic:
-    enabled: false
+    enabled: true
     columns: auto
     reference: tick # allowed: tick, time
     basis:
@@ -218,7 +218,7 @@ preprocessing:
     columns: auto
     tau_start: 2.0
   volume_kinematic:
-    enabled: false
+    enabled: true
     columns: auto
     reference: tick # allowed: tick, time
     basis:
