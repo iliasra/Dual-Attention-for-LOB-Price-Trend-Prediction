@@ -64,6 +64,9 @@ def _metrics() -> ClassificationMetrics:
         per_class_f1=[1.0, 1.0, 1.0],
         confusion_matrix=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
         normalized_confusion_matrix=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        directional_precision_at_fixed_rate=0.66,
+        directional_precision_at_fixed_rate_k=10,
+        directional_precision_at_fixed_rate_actual_rate=0.01,
     )
 
 
@@ -86,6 +89,9 @@ def test_epoch_result_to_wandb_metrics_uses_validation_step_fields() -> None:
     assert payload["global_step"] == 1500
     assert payload["val_macro_f1"] == 0.75
     assert payload["val_directional_macro_f1"] == 0.6
+    assert payload["val_directional_precision_at_fixed_rate"] == 0.66
+    assert payload["val_directional_precision_at_fixed_rate_k"] == 10.0
+    assert payload["val_directional_precision_at_fixed_rate_actual_rate"] == 0.01
     assert payload["monitor_value"] == 0.75
 
 

@@ -1056,7 +1056,12 @@ def test_training_data_loader_settings_are_loaded() -> None:
     assert isinstance(config.training.temperature_scaling.enabled, bool)
     assert config.training.directional_thresholds.enabled is True
     assert config.training.directional_thresholds.method == "joint_up_down"
-    assert config.training.directional_thresholds.score in {"macro_f1", "directional_macro_f1", "tailored_score"}
+    assert config.training.directional_thresholds.score in {
+        "macro_f1",
+        "directional_macro_f1",
+        "tailored_score",
+        "precision_at_fixed_rate",
+    }
     assert config.training.directional_thresholds.min_threshold == 0.05
     assert config.training.directional_thresholds.max_threshold == 0.95
     assert config.training.directional_thresholds.step == 0.05
@@ -1208,6 +1213,41 @@ def test_training_tailored_monitor_requires_params_and_max_mode(artifact_dir: Pa
     assert loaded.training.monitor_params.base_metric == "val_macro_f1"
 
 
+def test_training_precision_at_fixed_rate_monitor_requires_fixed_rate_and_max_mode(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["monitor"] = "precision_at_fixed_rate"
+    payload["training"]["monitor_mode"] = "min"
+    payload["training"]["monitor_params"] = {"fixed_rate": 0.01}
+    payload["training"]["directional_thresholds"]["enabled"] = False
+
+    config_path = artifact_dir / "bad_precision_fixed_rate_mode.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="monitor_mode"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["monitor_mode"] = "max"
+    payload["training"].pop("monitor_params", None)
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixed_rate"):
+        ExperimentConfig.from_yaml(config_path)
+
+    for bad_rate in (0.0, -0.1, 1.1):
+        payload["training"]["monitor_params"] = {"fixed_rate": bad_rate}
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="fixed_rate"):
+            ExperimentConfig.from_yaml(config_path)
+
+    for fixed_rate in (0.005, 0.01, 0.02):
+        payload["training"]["monitor_params"] = {"fixed_rate": fixed_rate}
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        loaded = ExperimentConfig.from_yaml(config_path)
+        assert loaded.training.monitor == "precision_at_fixed_rate"
+        assert loaded.training.monitor_params.fixed_rate == pytest.approx(fixed_rate)
+
+
 def test_legacy_monitors_do_not_require_monitor_params(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
@@ -1345,6 +1385,12 @@ def test_directional_threshold_config_validates_score(artifact_dir: Path) -> Non
 
     assert loaded.training.directional_thresholds.score == "tailored_score"
 
+    payload["training"]["directional_thresholds"]["score"] = "precision_at_fixed_rate"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.directional_thresholds.score == "precision_at_fixed_rate"
+
     payload["training"]["directional_thresholds"]["score"] = "not_a_score"
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
@@ -1372,6 +1418,35 @@ def test_directional_threshold_tailored_score_requires_monitor_params(artifact_d
 
     with pytest.raises(ValueError, match="directional_thresholds\\.score"):
         ExperimentConfig.from_yaml(config_path)
+
+
+def test_directional_threshold_precision_at_fixed_rate_requires_fixed_rate(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["monitor"] = "val_macro_f1"
+    payload["training"]["monitor_mode"] = "max"
+    payload["training"].pop("monitor_params", None)
+    payload["training"]["directional_thresholds"] = {
+        "enabled": True,
+        "method": "joint_up_down",
+        "score": "precision_at_fixed_rate",
+        "min": 0.05,
+        "max": 0.95,
+        "step": 0.05,
+    }
+
+    config_path = artifact_dir / "precision_fixed_rate_threshold_without_fixed_rate.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixed_rate"):
+        ExperimentConfig.from_yaml(config_path)
+
+    payload["training"]["monitor_params"] = {"fixed_rate": 0.01}
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.directional_thresholds.score == "precision_at_fixed_rate"
+    assert loaded.training.monitor_params.fixed_rate == pytest.approx(0.01)
 
 
 def test_training_top_k_checkpoints_defaults_to_one_and_validates(artifact_dir: Path) -> None:

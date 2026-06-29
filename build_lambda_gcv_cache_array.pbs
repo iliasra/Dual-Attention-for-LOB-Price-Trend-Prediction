@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N lob_lambda_gcv_cache
-#PBS -l walltime=10:00:00
+#PBS -l walltime=12:00:00
 #PBS -l select=1:ncpus=4:mem=24gb:ompthreads=4
 
 set -euo pipefail

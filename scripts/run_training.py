@@ -454,6 +454,7 @@ def metrics_from_prediction_outputs(
         np.asarray(predictions, dtype=np.int64),
         num_classes=config.model.num_classes,
         probabilities=np.asarray(outputs["probabilities"], dtype=np.float32),
+        directional_precision_fixed_rate=config.training.monitor_params.fixed_rate,
     )
 
 
@@ -1027,6 +1028,25 @@ def compact_directional_threshold_summary(summary: dict[str, Any], artifact_path
         "tailored_rate_penalty",
         "tailored_lambda_ece",
         "tailored_lambda_rate",
+        "precision_at_fixed_rate",
+        "precision_at_fixed_rate_observed_precision",
+        "precision_at_fixed_rate_fixed_rate",
+        "precision_at_fixed_rate_per_side_count",
+        "precision_at_fixed_rate_required_count",
+        "precision_at_fixed_rate_available_count",
+        "precision_at_fixed_rate_evaluated_count",
+        "precision_at_fixed_rate_missing_count",
+        "precision_at_fixed_rate_correct_count",
+        "precision_at_fixed_rate_down_available_count",
+        "precision_at_fixed_rate_down_evaluated_count",
+        "precision_at_fixed_rate_down_correct_count",
+        "precision_at_fixed_rate_down_precision",
+        "precision_at_fixed_rate_up_available_count",
+        "precision_at_fixed_rate_up_evaluated_count",
+        "precision_at_fixed_rate_up_correct_count",
+        "precision_at_fixed_rate_up_precision",
+        "precision_at_fixed_rate_actual_rate",
+        "precision_at_fixed_rate_decision_rate",
         "min_directional_precision",
         "n_candidates",
     ):

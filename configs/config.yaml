@@ -196,13 +196,14 @@ training:
   early_stopping_patience: 8 # counts validation intervals when validate_every_n_batches is an int
   early_stopping_warmup: 3 # counts validation intervals when validate_every_n_batches is an int
   early_stopping_min_delta: 0.002
-  monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score
-  monitor_mode: max # allowed: min, max; tailored_score requires max
+  monitor: tailored_score # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score, precision_at_fixed_rate
+  monitor_mode: max # allowed: min, max; tailored_score and precision_at_fixed_rate require max
   top_k_checkpoints: 5 # keep the best k raw-monitor checkpoints, then select after calibration/thresholding
   monitor_params:
     base_metric: val_macro_f1 # used by tailored_score monitor/thresholds; allowed: val_macro_f1, val_directional_macro_f1
     lambda_ece: 0.0
     lambda_rate: 0.1
+    fixed_rate: 0.01 # used by precision_at_fixed_rate; selects top 1% P(down) and top 1% P(up) separately
   persistent_workers: true
   optimizer: adamw # allowed: adam, adamw
   learning_rate: 1.0e-5
@@ -229,7 +230,7 @@ training:
   directional_thresholds:
     enabled: true
     method: joint_up_down # allowed: joint_up_down, precision_floor, top_x_quantile
-    score: tailored_score # allowed: directional_macro_f1, macro_f1, tailored_score; tailored_score uses training.monitor_params
+    score: tailored_score # allowed: directional_macro_f1, macro_f1, tailored_score, precision_at_fixed_rate; custom scores use training.monitor_params
     min: 0.1 # lower bound for candidate probability thresholds
     max: 0.95 # upper bound for candidate probability thresholds
     step: 0.05 # coarse grid step; joint_up_down also refines around the best region

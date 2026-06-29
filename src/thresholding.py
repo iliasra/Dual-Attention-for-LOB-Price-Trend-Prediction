@@ -25,7 +25,12 @@ class DirectionalThresholdSelection:
 
 _TIE_TOLERANCE = 1e-12
 _PROBABILITY_EPS = 1e-7
-_SUPPORTED_SELECTION_SCORES = {"macro_f1", "directional_macro_f1", "tailored_score"}
+_SUPPORTED_SELECTION_SCORES = {
+    "macro_f1",
+    "directional_macro_f1",
+    "tailored_score",
+    "precision_at_fixed_rate",
+}
 _TAILORED_BASE_METRICS = {"val_macro_f1", "val_directional_macro_f1"}
 _CALIBRATION_BINS = 15
 
@@ -160,6 +165,19 @@ def _monitor_param_value(params: Any, name: str) -> float:
     return float(value)
 
 
+def _fixed_rate_param(params: Any) -> float:
+    if isinstance(params, Mapping):
+        value = params.get("fixed_rate")
+    else:
+        value = getattr(params, "fixed_rate", None)
+    if value is None:
+        raise ValueError("precision_at_fixed_rate threshold score requires training.monitor_params.fixed_rate.")
+    fixed_rate = float(value)
+    if not 0.0 < fixed_rate <= 1.0:
+        raise ValueError("training.monitor_params.fixed_rate must be in (0, 1].")
+    return fixed_rate
+
+
 def _monitor_param_string(params: Any, name: str, default: str) -> str:
     if isinstance(params, Mapping):
         value = params.get(name, default)
@@ -210,6 +228,120 @@ def _score_base_value(
     raise ValueError("tailored_score base_metric must be 'val_macro_f1' or 'val_directional_macro_f1'.")
 
 
+def _precision_at_fixed_rate_from_thresholded_decisions(
+    targets: np.ndarray,
+    predictions: np.ndarray,
+    probabilities: np.ndarray,
+    *,
+    down_id: int,
+    up_id: int,
+    fixed_rate: float,
+) -> tuple[float, dict[str, Any]]:
+    """Score post-threshold down/up decisions against per-side fixed signal budgets."""
+    target_array = np.asarray(targets, dtype=np.int64).reshape(-1)
+    prediction_array = np.asarray(predictions, dtype=np.int64).reshape(-1)
+    probability_array = np.asarray(probabilities, dtype=np.float32)
+    if probability_array.ndim != 2:
+        raise ValueError("probabilities must be a 2D array.")
+    if target_array.shape[0] != prediction_array.shape[0]:
+        raise ValueError("targets and predictions must have the same length.")
+    if probability_array.shape[0] != target_array.shape[0]:
+        raise ValueError("probabilities and targets must have the same number of rows.")
+    max_id = max(int(down_id), int(up_id))
+    if probability_array.shape[1] <= max_id:
+        raise ValueError("probabilities has fewer columns than the requested class ids.")
+    if not 0.0 < float(fixed_rate) <= 1.0:
+        raise ValueError("fixed_rate must be in (0, 1].")
+
+    n_samples = int(target_array.shape[0])
+    if n_samples == 0:
+        return 0.0, {
+            "precision_at_fixed_rate": 0.0,
+            "precision_at_fixed_rate_observed_precision": 0.0,
+            "precision_at_fixed_rate_fixed_rate": float(fixed_rate),
+            "precision_at_fixed_rate_per_side_count": 0,
+            "precision_at_fixed_rate_required_count": 0,
+            "precision_at_fixed_rate_available_count": 0,
+            "precision_at_fixed_rate_evaluated_count": 0,
+            "precision_at_fixed_rate_missing_count": 0,
+            "precision_at_fixed_rate_correct_count": 0,
+            "precision_at_fixed_rate_down_available_count": 0,
+            "precision_at_fixed_rate_down_evaluated_count": 0,
+            "precision_at_fixed_rate_down_correct_count": 0,
+            "precision_at_fixed_rate_down_precision": 0.0,
+            "precision_at_fixed_rate_up_available_count": 0,
+            "precision_at_fixed_rate_up_evaluated_count": 0,
+            "precision_at_fixed_rate_up_correct_count": 0,
+            "precision_at_fixed_rate_up_precision": 0.0,
+            "precision_at_fixed_rate_actual_rate": 0.0,
+            "precision_at_fixed_rate_decision_rate": 0.0,
+            "precision_at_fixed_rate_selection_rule": (
+                "post_threshold_down_up_decisions_ranked_separately_by_side_probability"
+            ),
+        }
+
+    per_side_count = max(1, int(np.ceil(float(fixed_rate) * n_samples)))
+
+    def side_counts(class_id: int) -> dict[str, Any]:
+        side_indices = np.flatnonzero(prediction_array == int(class_id))
+        available = int(side_indices.size)
+        evaluated = min(per_side_count, available)
+        if evaluated == 0:
+            return {
+                "available": available,
+                "evaluated": 0,
+                "correct": 0,
+                "missing": int(per_side_count),
+                "precision": 0.0,
+            }
+        side_scores = probability_array[side_indices, int(class_id)]
+        ranked_offsets = np.argsort(-side_scores, kind="mergesort")
+        selected_indices = side_indices[ranked_offsets[:evaluated]]
+        correct = int(np.sum(target_array[selected_indices] == int(class_id)))
+        return {
+            "available": available,
+            "evaluated": int(evaluated),
+            "correct": correct,
+            "missing": int(per_side_count - evaluated),
+            "precision": float(correct / evaluated),
+        }
+
+    down_counts = side_counts(int(down_id))
+    up_counts = side_counts(int(up_id))
+    required_count = int(2 * per_side_count)
+    available_count = int(down_counts["available"] + up_counts["available"])
+    evaluated_count = int(down_counts["evaluated"] + up_counts["evaluated"])
+    correct_count = int(down_counts["correct"] + up_counts["correct"])
+    missing_count = int(down_counts["missing"] + up_counts["missing"])
+    score = float(correct_count / required_count)
+    observed_precision = 0.0 if evaluated_count == 0 else float(correct_count / evaluated_count)
+    return score, {
+        "precision_at_fixed_rate": score,
+        "precision_at_fixed_rate_observed_precision": observed_precision,
+        "precision_at_fixed_rate_fixed_rate": float(fixed_rate),
+        "precision_at_fixed_rate_per_side_count": int(per_side_count),
+        "precision_at_fixed_rate_required_count": int(required_count),
+        "precision_at_fixed_rate_available_count": int(available_count),
+        "precision_at_fixed_rate_evaluated_count": int(evaluated_count),
+        "precision_at_fixed_rate_missing_count": int(missing_count),
+        "precision_at_fixed_rate_correct_count": int(correct_count),
+        "precision_at_fixed_rate_down_available_count": int(down_counts["available"]),
+        "precision_at_fixed_rate_down_evaluated_count": int(down_counts["evaluated"]),
+        "precision_at_fixed_rate_down_correct_count": int(down_counts["correct"]),
+        "precision_at_fixed_rate_down_precision": float(down_counts["precision"]),
+        "precision_at_fixed_rate_up_available_count": int(up_counts["available"]),
+        "precision_at_fixed_rate_up_evaluated_count": int(up_counts["evaluated"]),
+        "precision_at_fixed_rate_up_correct_count": int(up_counts["correct"]),
+        "precision_at_fixed_rate_up_precision": float(up_counts["precision"]),
+        "precision_at_fixed_rate_actual_rate": float(evaluated_count / max(2 * n_samples, 1)),
+        "precision_at_fixed_rate_decision_rate": float(available_count / n_samples),
+        "precision_at_fixed_rate_selection_rule": (
+            "post_threshold_down_up_decisions_ranked_separately_by_side_probability; "
+            "missing required side signals count as incorrect"
+        ),
+    }
+
+
 def _selection_metrics(
     targets: np.ndarray,
     predictions: np.ndarray,
@@ -229,7 +361,10 @@ def _selection_metrics(
 
     score_name = str(score).strip().lower()
     if score_name not in _SUPPORTED_SELECTION_SCORES:
-        raise ValueError("threshold score must be 'macro_f1', 'directional_macro_f1', or 'tailored_score'.")
+        raise ValueError(
+            "threshold score must be 'macro_f1', 'directional_macro_f1', "
+            "'tailored_score', or 'precision_at_fixed_rate'."
+        )
     down_precision, _down_recall, down_f1 = _precision_recall_f1(target_array, prediction_array, int(down_id))
     _neutral_precision, _neutral_recall, neutral_f1 = _precision_recall_f1(
         target_array,
@@ -249,7 +384,7 @@ def _selection_metrics(
     elif score_name == "directional_macro_f1":
         selection_score = float((down_f1 + up_f1) / 2.0)
         score_details = {}
-    else:
+    elif score_name == "tailored_score":
         if probabilities is None:
             raise ValueError("tailored_score threshold score requires probability scores.")
         probability_array = np.asarray(probabilities, dtype=np.float32)
@@ -293,6 +428,18 @@ def _selection_metrics(
             "tailored_lambda_ece": float(lambda_ece),
             "tailored_lambda_rate": float(lambda_rate),
         }
+    else:
+        if probabilities is None:
+            raise ValueError("precision_at_fixed_rate threshold score requires probability scores.")
+        fixed_rate = _fixed_rate_param(monitor_params)
+        selection_score, score_details = _precision_at_fixed_rate_from_thresholded_decisions(
+            target_array,
+            prediction_array,
+            np.asarray(probabilities, dtype=np.float32),
+            down_id=int(down_id),
+            up_id=int(up_id),
+            fixed_rate=fixed_rate,
+        )
     return selection_score, float(rate_penalty), float(min(down_precision, up_precision)), score_details
 
 

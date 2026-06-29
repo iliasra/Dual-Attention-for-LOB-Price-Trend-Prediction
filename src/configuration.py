@@ -194,6 +194,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "base_metric": None,
             "lambda_ece": None,
             "lambda_rate": None,
+            "fixed_rate": None,
         },
         "persistent_workers": None,
         "optimizer": None,
@@ -257,6 +258,9 @@ OPTIONAL_CONFIG_KEYS = {
     "model.auxiliary_heads.hidden_dim",
     "training.monitor_params",
     "training.monitor_params.base_metric",
+    "training.monitor_params.lambda_ece",
+    "training.monitor_params.lambda_rate",
+    "training.monitor_params.fixed_rate",
     "training.top_k_checkpoints",
     "training.validate_every_n_batches",
     "training.auxiliary_losses",
@@ -324,7 +328,13 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.price_kinematic.reference": {"tick", "time"},
     "preprocessing.volume_kinematic.reference": {"tick", "time"},
     "model.rope_type": {"rope", "crope", "hybrid_crope", "hybrid-crope", "hybrid"},
-    "training.monitor": {"val_loss", "val_macro_f1", "val_directional_macro_f1", "tailored_score"},
+    "training.monitor": {
+        "val_loss",
+        "val_macro_f1",
+        "val_directional_macro_f1",
+        "tailored_score",
+        "precision_at_fixed_rate",
+    },
     "training.monitor_mode": {"min", "max"},
 }
 
@@ -1590,6 +1600,7 @@ class TrainingMonitorParamsConfig:
     base_metric: str = "val_directional_macro_f1"
     lambda_ece: float | None = None
     lambda_rate: float | None = None
+    fixed_rate: float | None = None
 
     def __post_init__(self) -> None:
         """Check optional custom monitor parameters."""
@@ -1605,11 +1616,20 @@ class TrainingMonitorParamsConfig:
             raise ValueError("training.monitor_params.lambda_ece must be >= 0.")
         if self.lambda_rate is not None and self.lambda_rate < 0.0:
             raise ValueError("training.monitor_params.lambda_rate must be >= 0.")
+        if self.fixed_rate is not None:
+            self.fixed_rate = float(self.fixed_rate)
+            if not 0.0 < self.fixed_rate <= 1.0:
+                raise ValueError("training.monitor_params.fixed_rate must be in (0, 1].")
 
     @property
     def complete(self) -> bool:
         """Whether all tailored_score parameters are present."""
         return self.lambda_ece is not None and self.lambda_rate is not None
+
+    @property
+    def has_fixed_rate(self) -> bool:
+        """Whether precision_at_fixed_rate has its required parameter."""
+        return self.fixed_rate is not None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingMonitorParamsConfig":
@@ -1620,6 +1640,7 @@ class TrainingMonitorParamsConfig:
             base_metric=payload.get("base_metric", "val_directional_macro_f1"),
             lambda_ece=_optional_float(payload.get("lambda_ece")),
             lambda_rate=_optional_float(payload.get("lambda_rate")),
+            fixed_rate=_optional_float(payload.get("fixed_rate")),
         )
 
 
@@ -1646,10 +1667,15 @@ class TrainingDirectionalThresholdConfig:
                 "'precision_floor', or 'top_x_quantile'."
             )
         self.score = self.score.lower()
-        if self.score not in {"macro_f1", "directional_macro_f1", "tailored_score"}:
+        if self.score not in {
+            "macro_f1",
+            "directional_macro_f1",
+            "tailored_score",
+            "precision_at_fixed_rate",
+        }:
             raise ValueError(
                 "training.directional_thresholds.score must be 'macro_f1', "
-                "'directional_macro_f1', or 'tailored_score'."
+                "'directional_macro_f1', 'tailored_score', or 'precision_at_fixed_rate'."
             )
         if not 0.0 <= self.min_threshold <= 1.0:
             raise ValueError("training.directional_thresholds.min must be in [0, 1].")
@@ -1900,10 +1926,16 @@ class TrainingConfig:
         self.optimizer = self.optimizer.lower()
         if self.optimizer not in {"adam", "adamw"}:
             raise ValueError("training.optimizer must be 'adam' or 'adamw'.")
-        if self.monitor not in {"val_loss", "val_macro_f1", "val_directional_macro_f1", "tailored_score"}:
+        if self.monitor not in {
+            "val_loss",
+            "val_macro_f1",
+            "val_directional_macro_f1",
+            "tailored_score",
+            "precision_at_fixed_rate",
+        }:
             raise ValueError(
                 "training.monitor must be one of val_loss, val_macro_f1, "
-                "val_directional_macro_f1, tailored_score."
+                "val_directional_macro_f1, tailored_score, precision_at_fixed_rate."
             )
         if self.monitor_mode not in {"min", "max"}:
             raise ValueError("training.monitor_mode must be 'min' or 'max'.")
@@ -1917,6 +1949,15 @@ class TrainingConfig:
                     "training.monitor_params.lambda_ece and training.monitor_params.lambda_rate "
                     "must be set for tailored_score."
                 )
+        if self.monitor == "precision_at_fixed_rate":
+            if self.monitor_mode != "max":
+                raise ValueError(
+                    "training.monitor_mode must be 'max' when training.monitor is precision_at_fixed_rate."
+                )
+            if not self.monitor_params.has_fixed_rate:
+                raise ValueError(
+                    "training.monitor_params.fixed_rate must be set for precision_at_fixed_rate."
+                )
         if (
             self.directional_thresholds.enabled
             and self.directional_thresholds.score == "tailored_score"
@@ -1925,6 +1966,15 @@ class TrainingConfig:
             raise ValueError(
                 "training.monitor_params.lambda_ece and training.monitor_params.lambda_rate "
                 "must be set when training.directional_thresholds.score is tailored_score."
+            )
+        if (
+            self.directional_thresholds.enabled
+            and self.directional_thresholds.score == "precision_at_fixed_rate"
+            and not self.monitor_params.has_fixed_rate
+        ):
+            raise ValueError(
+                "training.monitor_params.fixed_rate must be set when "
+                "training.directional_thresholds.score is precision_at_fixed_rate."
             )
         if self.persistent_workers and self.num_workers == 0:
             raise ValueError("training.persistent_workers requires training.num_workers > 0.")

@@ -294,6 +294,7 @@ def apply_directional_thresholds_to_result(
         thresholded_predictions,
         num_classes=config.model.num_classes,
         probabilities=probabilities,
+        directional_precision_fixed_rate=config.training.monitor_params.fixed_rate,
     )
 
 
@@ -309,6 +310,11 @@ def evaluation_metrics_row(result: Any, config: ExperimentConfig, split: str, nu
         "macro_recall": float(metrics.macro_recall),
         "macro_f1": float(metrics.macro_f1),
         "directional_macro_f1": float(metrics.directional_macro_f1),
+        "directional_precision_at_fixed_rate": metrics.directional_precision_at_fixed_rate,
+        "directional_precision_at_fixed_rate_k": int(metrics.directional_precision_at_fixed_rate_k),
+        "directional_precision_at_fixed_rate_actual_rate": float(
+            metrics.directional_precision_at_fixed_rate_actual_rate
+        ),
         "weighted_f1": float(metrics.weighted_f1),
         "balanced_accuracy": float(metrics.balanced_accuracy),
         "ece": float(metrics.expected_calibration_error),

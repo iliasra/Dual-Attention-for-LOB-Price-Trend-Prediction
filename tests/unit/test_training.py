@@ -511,6 +511,51 @@ def test_lob_trainer_can_monitor_tailored_score(
     assert config.best_model_path.exists()
 
 
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_can_monitor_precision_at_fixed_rate(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _training_config()
+    config.epochs = 3
+    config.early_stopping_patience = 0
+    config.monitor = "precision_at_fixed_rate"
+    config.monitor_mode = "max"
+    config.monitor_params.fixed_rate = 0.01
+    config.device = "cpu"
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    train_metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_scores = iter([0.2, 0.9, 0.4])
+
+    def fake_train_epoch(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=0.25, metrics=train_metrics)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        model = kwargs["model"]
+        metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+        score = next(validation_scores)
+        with torch.no_grad():
+            model.bias.fill_(score)
+        metrics.directional_precision_at_fixed_rate = score
+        metrics.directional_precision_at_fixed_rate_k = 1
+        metrics.directional_precision_at_fixed_rate_actual_rate = 0.01
+        return EvaluationResult(loss=1.0, metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_run_epoch", fake_train_epoch)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    model, history = trainer.fit(nn.Linear(1, 3), train_loader=[], val_loader=[])
+
+    assert [
+        result.val_metrics.directional_precision_at_fixed_rate
+        for result in history
+        if result.val_metrics
+    ] == [0.2, 0.9, 0.4]
+    assert model.bias[0].item() == pytest.approx(0.9)
+    assert config.best_model_path.exists()
+
+
 def test_lob_trainer_uses_configured_adam_optimizer() -> None:
     config = _training_config()
     config.device = "cpu"
@@ -597,6 +642,31 @@ def test_directional_macro_f1_averages_down_and_up_only() -> None:
     up_f1 = metrics.per_class_f1[2]
     assert metrics.directional_macro_f1 == pytest.approx((down_f1 + up_f1) / 2.0)
     assert metrics.directional_macro_f1 != pytest.approx(metrics.macro_f1)
+
+
+def test_metric_accumulator_computes_directional_precision_at_fixed_rate() -> None:
+    accumulator = ClassificationMetricAccumulator(
+        device=torch.device("cpu"),
+        track_pr_metrics=True,
+        directional_precision_fixed_rate=0.5,
+    )
+    logits = torch.tensor(
+        [
+            [5.0, 0.0, 0.0],
+            [0.0, 0.2, 4.0],
+            [4.5, 0.0, 0.0],
+            [0.0, 0.1, 4.3],
+        ],
+        dtype=torch.float32,
+    )
+    targets = torch.tensor([0, 1, 2, 2])
+
+    accumulator.update(logits, targets)
+    metrics = accumulator.compute()
+
+    assert metrics.directional_precision_at_fixed_rate_k == 2
+    assert metrics.directional_precision_at_fixed_rate_actual_rate == pytest.approx(0.5)
+    assert metrics.directional_precision_at_fixed_rate == pytest.approx(0.5)
 
 
 def test_metric_accumulator_skips_non_finite_logits_and_invalid_targets() -> None:
@@ -890,6 +960,7 @@ def test_lob_trainer_evaluate_can_collect_probability_outputs() -> None:
     config = _training_config()
     config.device = "cpu"
     config.class_weights = None
+    config.monitor_params.fixed_rate = 1.0
     trainer = LobTrainer(config)
     data_loader = [
         (
@@ -916,6 +987,9 @@ def test_lob_trainer_evaluate_can_collect_probability_outputs() -> None:
     assert result.metrics.per_class_pr_ap == pytest.approx([1.0, 1.0, 1.0])
     assert result.metrics.per_class_pr_auc == pytest.approx([1.0, 1.0, 1.0])
     assert result.metrics.per_class_roc_auc == pytest.approx([1.0, 1.0, 1.0])
+    assert result.metrics.directional_precision_at_fixed_rate == pytest.approx(1 / 3)
+    assert result.metrics.directional_precision_at_fixed_rate_k == 3
+    assert result.metrics.directional_precision_at_fixed_rate_actual_rate == pytest.approx(1.0)
 
 
 def test_lob_trainer_evaluate_skips_optional_expensive_tracking_by_default() -> None:

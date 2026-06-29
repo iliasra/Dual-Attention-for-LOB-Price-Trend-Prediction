@@ -7,6 +7,7 @@ import numpy as np
 
 
 TAILORED_SCORE = "tailored_score"
+PRECISION_AT_FIXED_RATE = "precision_at_fixed_rate"
 TAILORED_BASE_METRICS = {"val_macro_f1", "val_directional_macro_f1"}
 
 
@@ -39,6 +40,25 @@ class TailoredScoreComponents:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class DirectionalPrecisionAtFixedRate:
+    """Store precision over per-side top down/up probability scores."""
+
+    precision: float
+    fixed_rate: float
+    actual_rate: float
+    k: int
+    n: int
+
+    def prefixed(self, prefix: str) -> dict[str, float | int]:
+        """Return fields named for CSV/logging output."""
+        return {
+            f"{prefix}_directional_precision_at_fixed_rate": self.precision,
+            f"{prefix}_directional_precision_at_fixed_rate_k": self.k,
+            f"{prefix}_directional_precision_at_fixed_rate_actual_rate": self.actual_rate,
+        }
+
+
 def _param_value(params: Any, name: str) -> float:
     """Read one monitor parameter from a config object or mapping."""
     if isinstance(params, Mapping):
@@ -59,6 +79,20 @@ def _param_string(params: Any, name: str, default: str) -> str:
     if value is None:
         value = default
     return str(value).strip().lower()
+
+
+def _fixed_rate_param(params: Any) -> float:
+    """Read and validate the fixed-rate precision monitor parameter."""
+    if isinstance(params, Mapping):
+        value = params.get("fixed_rate")
+    else:
+        value = getattr(params, "fixed_rate", None)
+    if value is None:
+        raise ValueError("precision_at_fixed_rate requires training.monitor_params.fixed_rate.")
+    fixed_rate = float(value)
+    if not 0.0 < fixed_rate <= 1.0:
+        raise ValueError("training.monitor_params.fixed_rate must be in (0, 1].")
+    return fixed_rate
 
 
 def tailored_base_value(metrics: Any, base_metric: str) -> float:
@@ -90,6 +124,64 @@ def directional_class_ids(
             if class_id < 0 or class_id >= num_classes:
                 raise ValueError(f"tailored_score {label} class id {class_id} is outside [0, {num_classes}).")
     return down_id, up_id
+
+
+def directional_precision_at_fixed_rate(
+    probabilities: np.ndarray,
+    targets: np.ndarray,
+    *,
+    fixed_rate: float,
+    down_id: int = 0,
+    up_id: int = 2,
+) -> DirectionalPrecisionAtFixedRate:
+    """Compute precision on top fixed-rate down scores and top fixed-rate up scores."""
+    fixed_rate = float(fixed_rate)
+    if not 0.0 < fixed_rate <= 1.0:
+        raise ValueError("fixed_rate must be in (0, 1].")
+
+    probability_array = np.asarray(probabilities, dtype=np.float64)
+    target_array = np.asarray(targets, dtype=np.int64).reshape(-1)
+    if probability_array.ndim != 2:
+        raise ValueError("probabilities must be a 2D array.")
+    if probability_array.shape[0] != target_array.shape[0]:
+        raise ValueError("probabilities and targets must have the same number of rows.")
+
+    num_classes = int(probability_array.shape[1])
+    for label, class_id in (("down", int(down_id)), ("up", int(up_id))):
+        if class_id < 0 or class_id >= num_classes:
+            raise ValueError(f"{label} class id {class_id} is outside [0, {num_classes}).")
+
+    finite_mask = np.isfinite(probability_array).all(axis=1)
+    valid_target_mask = (target_array >= 0) & (target_array < num_classes)
+    valid_mask = finite_mask & valid_target_mask
+    if not bool(np.any(valid_mask)):
+        return DirectionalPrecisionAtFixedRate(
+            precision=0.0,
+            fixed_rate=fixed_rate,
+            actual_rate=0.0,
+            k=0,
+            n=0,
+        )
+
+    valid_probabilities = probability_array[valid_mask]
+    valid_targets = target_array[valid_mask]
+    down_scores = valid_probabilities[:, int(down_id)]
+    up_scores = valid_probabilities[:, int(up_id)]
+
+    n_samples = int(valid_targets.shape[0])
+    k = min(n_samples, max(1, int(np.ceil(fixed_rate * n_samples))))
+    top_down_indices = np.argsort(-down_scores, kind="mergesort")[:k]
+    top_up_indices = np.argsort(-up_scores, kind="mergesort")[:k]
+    correct_down = int(np.sum(valid_targets[top_down_indices] == int(down_id)))
+    correct_up = int(np.sum(valid_targets[top_up_indices] == int(up_id)))
+    precision = float((correct_down + correct_up) / max(2 * k, 1))
+    return DirectionalPrecisionAtFixedRate(
+        precision=precision,
+        fixed_rate=fixed_rate,
+        actual_rate=float(k / n_samples),
+        k=int(k),
+        n=n_samples,
+    )
 
 
 def tailored_score_components(
@@ -171,6 +263,15 @@ def monitor_value(
         return float(metrics.macro_f1)
     if monitor_name == "val_directional_macro_f1":
         return float(metrics.directional_macro_f1)
+    if monitor_name == PRECISION_AT_FIXED_RATE:
+        value = getattr(metrics, "directional_precision_at_fixed_rate", None)
+        if value is None:
+            raise ValueError(
+                "precision_at_fixed_rate requires validation metrics computed with "
+                "training.monitor_params.fixed_rate."
+            )
+        _fixed_rate_param(monitor_params)
+        return float(value)
     if monitor_name == TAILORED_SCORE:
         return tailored_score_from_params(
             metrics,

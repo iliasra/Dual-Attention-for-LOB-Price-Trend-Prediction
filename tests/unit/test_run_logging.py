@@ -36,6 +36,9 @@ def test_epoch_history_contains_pr_columns(artifact_dir: Path) -> None:
     metrics.per_class_pr_ap = [0.1, 0.2, 0.3]
     metrics.per_class_pr_auc = [0.4, 0.5, 0.6]
     metrics.per_class_roc_auc = [0.7, 0.8, 0.9]
+    metrics.directional_precision_at_fixed_rate = 0.75
+    metrics.directional_precision_at_fixed_rate_k = 12
+    metrics.directional_precision_at_fixed_rate_actual_rate = 0.012
     metrics.confusion_matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
     target = artifact_dir / "metrics.csv"
 
@@ -58,6 +61,9 @@ def test_epoch_history_contains_pr_columns(artifact_dir: Path) -> None:
     assert row["val_roc_auc_down"] == "0.7"
     assert row["val_roc_auc_neutral"] == "0.8"
     assert row["val_roc_auc_up"] == "0.9"
+    assert row["val_directional_precision_at_fixed_rate"] == "0.75"
+    assert row["val_directional_precision_at_fixed_rate_k"] == "12"
+    assert row["val_directional_precision_at_fixed_rate_actual_rate"] == "0.012"
     assert float(row["val_pred_directional_rate"]) == pytest.approx(30 / 45)
     assert "val_tailored_score" in row
 

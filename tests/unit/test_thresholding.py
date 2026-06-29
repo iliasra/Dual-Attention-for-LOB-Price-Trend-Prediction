@@ -197,6 +197,41 @@ def test_optimize_directional_thresholds_can_use_tailored_score() -> None:
     assert selection.score == pytest.approx(0.6 - 0.5 * 0.25)
 
 
+def test_optimize_directional_thresholds_can_use_precision_at_fixed_rate() -> None:
+    probabilities = np.asarray(
+        [
+            [0.95, 0.03, 0.02],
+            [0.88, 0.08, 0.04],
+            [0.05, 0.09, 0.86],
+            [0.06, 0.10, 0.84],
+            [0.60, 0.30, 0.10],
+        ],
+        dtype=np.float32,
+    )
+    targets = np.asarray([0, 1, 2, 2, 0])
+
+    selection = optimize_directional_thresholds(
+        probabilities,
+        targets,
+        down_candidates=np.asarray([0.5, 0.9]),
+        up_candidates=np.asarray([0.5]),
+        down_id=0,
+        neutral_id=1,
+        up_id=2,
+        score="precision_at_fixed_rate",
+        monitor_params={"fixed_rate": 0.6},
+    )
+
+    assert selection.threshold_down == pytest.approx(0.5)
+    assert selection.threshold_up == pytest.approx(0.5)
+    assert selection.score == pytest.approx(4 / 6)
+    assert selection.score_details["precision_at_fixed_rate_per_side_count"] == 3
+    assert selection.score_details["precision_at_fixed_rate_required_count"] == 6
+    assert selection.score_details["precision_at_fixed_rate_down_correct_count"] == 2
+    assert selection.score_details["precision_at_fixed_rate_up_correct_count"] == 2
+    assert selection.score_details["precision_at_fixed_rate_missing_count"] == 1
+
+
 def test_tailored_threshold_score_can_change_selected_pair() -> None:
     probabilities = np.asarray(
         [

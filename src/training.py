@@ -14,12 +14,12 @@ from tqdm import tqdm
 
 try:
     from configuration import TrainingConfig, load_config
-    from monitoring import monitor_value
+    from monitoring import directional_precision_at_fixed_rate, monitor_value
     from pr_metrics import per_class_ranking_metrics
     from run_logging import format_duration
 except ImportError:  # pragma: no cover
     from .configuration import TrainingConfig, load_config
-    from .monitoring import monitor_value
+    from .monitoring import directional_precision_at_fixed_rate, monitor_value
     from .pr_metrics import per_class_ranking_metrics
     from .run_logging import format_duration
 
@@ -113,6 +113,9 @@ class ClassificationMetrics:
     per_class_f1: list[float]
     confusion_matrix: list[list[int]]
     normalized_confusion_matrix: list[list[float]]
+    directional_precision_at_fixed_rate: float | None = None
+    directional_precision_at_fixed_rate_k: int = 0
+    directional_precision_at_fixed_rate_actual_rate: float = 0.0
 
 
 def classification_metrics_from_predictions(
@@ -122,6 +125,7 @@ def classification_metrics_from_predictions(
     num_classes: int,
     probabilities: np.ndarray | None = None,
     num_calibration_bins: int = 15,
+    directional_precision_fixed_rate: float | None = None,
 ) -> ClassificationMetrics:
     """Compute metrics from fixed predictions and optional class probabilities."""
     target_array = np.asarray(targets, dtype=np.int64).reshape(-1)
@@ -186,6 +190,9 @@ def classification_metrics_from_predictions(
     per_class_pr_ap = None
     per_class_pr_auc = None
     per_class_roc_auc = None
+    directional_precision_value: float | None = None
+    directional_precision_k = 0
+    directional_precision_actual_rate = 0.0
     if probability_array is not None:
         valid_probabilities = probability_array[valid_mask, :num_classes]
         chosen_confidences = valid_probabilities[np.arange(valid_predictions.shape[0]), valid_predictions]
@@ -242,6 +249,15 @@ def classification_metrics_from_predictions(
         per_class_pr_ap = ranking_metrics["pr_ap"]  # type: ignore[assignment]
         per_class_pr_auc = ranking_metrics["pr_auc"]  # type: ignore[assignment]
         per_class_roc_auc = ranking_metrics["roc_auc"]  # type: ignore[assignment]
+        if directional_precision_fixed_rate is not None:
+            fixed_rate_components = directional_precision_at_fixed_rate(
+                valid_probabilities,
+                valid_targets,
+                fixed_rate=float(directional_precision_fixed_rate),
+            )
+            directional_precision_value = fixed_rate_components.precision
+            directional_precision_k = fixed_rate_components.k
+            directional_precision_actual_rate = fixed_rate_components.actual_rate
 
     return ClassificationMetrics(
         accuracy=float(true_positives.sum() / max(total, 1.0)),
@@ -264,6 +280,9 @@ def classification_metrics_from_predictions(
             [float(value) for value in row]
             for row in normalized_confusion.tolist()
         ],
+        directional_precision_at_fixed_rate=directional_precision_value,
+        directional_precision_at_fixed_rate_k=directional_precision_k,
+        directional_precision_at_fixed_rate_actual_rate=directional_precision_actual_rate,
     )
 
 
@@ -482,10 +501,14 @@ class ClassificationMetricAccumulator:
         num_calibration_bins: int = 15,
         *,
         track_pr_metrics: bool = False,
+        directional_precision_fixed_rate: float | None = None,
     ) -> None:
         self.device = device
         self.num_calibration_bins = num_calibration_bins
         self.track_pr_metrics = bool(track_pr_metrics)
+        self.directional_precision_fixed_rate = (
+            None if directional_precision_fixed_rate is None else float(directional_precision_fixed_rate)
+        )
         self.num_classes: int | None = None
         self.confusion_matrix: torch.Tensor | None = None
         self.calibration_bin_counts: torch.Tensor | None = None
@@ -713,6 +736,9 @@ class ClassificationMetricAccumulator:
         per_class_pr_ap = None
         per_class_pr_auc_values = None
         per_class_roc_auc_values = None
+        directional_precision_value: float | None = None
+        directional_precision_k = 0
+        directional_precision_actual_rate = 0.0
         if self.track_pr_metrics and self.pr_probability_chunks and self.pr_target_chunks:
             pr_probabilities = np.concatenate(self.pr_probability_chunks, axis=0)
             pr_targets = np.concatenate(self.pr_target_chunks, axis=0)
@@ -720,6 +746,15 @@ class ClassificationMetricAccumulator:
             per_class_pr_ap = ranking_metrics["pr_ap"]  # type: ignore[assignment]
             per_class_pr_auc_values = ranking_metrics["pr_auc"]  # type: ignore[assignment]
             per_class_roc_auc_values = ranking_metrics["roc_auc"]  # type: ignore[assignment]
+            if self.directional_precision_fixed_rate is not None:
+                fixed_rate_components = directional_precision_at_fixed_rate(
+                    pr_probabilities,
+                    pr_targets,
+                    fixed_rate=self.directional_precision_fixed_rate,
+                )
+                directional_precision_value = fixed_rate_components.precision
+                directional_precision_k = fixed_rate_components.k
+                directional_precision_actual_rate = fixed_rate_components.actual_rate
 
         return ClassificationMetrics(
             accuracy=float(accuracy.item()),
@@ -747,6 +782,9 @@ class ClassificationMetricAccumulator:
                 [float(value) for value in row]
                 for row in normalized_confusion.detach().cpu().tolist()
             ],
+            directional_precision_at_fixed_rate=directional_precision_value,
+            directional_precision_at_fixed_rate_k=directional_precision_k,
+            directional_precision_at_fixed_rate_actual_rate=directional_precision_actual_rate,
         )
 
 
@@ -1322,6 +1360,16 @@ class LobTrainer:
                     f"Validation {validation_index} at epoch {epoch_number}/{self.config.epochs}, "
                     f"batch {batch_in_epoch}, global_step={global_step_value}"
                 )
+            precision_at_fixed_rate = getattr(
+                val_result.metrics,
+                "directional_precision_at_fixed_rate",
+                None,
+            )
+            precision_at_fixed_rate_text = (
+                ""
+                if precision_at_fixed_rate is None
+                else f", val_directional_precision_at_fixed_rate={float(precision_at_fixed_rate):.4f}"
+            )
             print(
                 f"{progress} completed: "
                 f"train_loss={train_result.loss:.6f}, val_loss={val_result.loss:.6f}, "
@@ -1329,7 +1377,8 @@ class LobTrainer:
                 f"val_acc={val_result.metrics.accuracy:.4f}, "
                 f"val_macro_f1={val_result.metrics.macro_f1:.4f}, "
                 f"val_directional_macro_f1={val_result.metrics.directional_macro_f1:.4f}, "
-                f"val_ece={val_result.metrics.expected_calibration_error:.4f}."
+                f"val_ece={val_result.metrics.expected_calibration_error:.4f}"
+                f"{precision_at_fixed_rate_text}."
             )
             if (
                 self.config.early_stopping_patience > 0
@@ -1617,7 +1666,12 @@ class LobTrainer:
         criterion = criterion or self._criterion()
         total_loss = 0.0
         batch_count = 0
-        metrics = ClassificationMetricAccumulator(device=self.device, track_pr_metrics=track_pr_metrics)
+        fixed_rate = getattr(self.config.monitor_params, "fixed_rate", None)
+        metrics = ClassificationMetricAccumulator(
+            device=self.device,
+            track_pr_metrics=track_pr_metrics,
+            directional_precision_fixed_rate=fixed_rate if track_pr_metrics else None,
+        )
         expert_usage = ExpertUsageAccumulator() if track_expert_usage else None
         prediction_outputs = PredictionOutputAccumulator() if collect_outputs else None
 

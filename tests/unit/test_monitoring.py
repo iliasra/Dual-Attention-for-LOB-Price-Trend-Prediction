@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from monitoring import (
+    directional_precision_at_fixed_rate,
     directional_class_ids,
     epoch_monitor_value,
     tailored_score_components,
@@ -83,3 +85,42 @@ def test_epoch_monitor_value_supports_tailored_score() -> None:
     )
 
     assert value == pytest.approx(0.64375)
+
+
+def test_directional_precision_at_fixed_rate_uses_top_down_and_up_scores_separately() -> None:
+    probabilities = np.asarray(
+        [
+            [0.99, 0.00, 0.01],
+            [0.98, 0.00, 0.02],
+            [0.97, 0.00, 0.03],
+            [0.01, 0.03, 0.96],
+            [0.02, 0.03, 0.95],
+        ],
+        dtype=np.float32,
+    )
+    targets = np.asarray([0, 0, 0, 1, 2], dtype=np.int64)
+
+    components = directional_precision_at_fixed_rate(
+        probabilities,
+        targets,
+        fixed_rate=0.4,
+    )
+
+    assert components.k == 2
+    assert components.actual_rate == pytest.approx(0.4)
+    assert components.precision == pytest.approx(0.75)
+
+
+def test_epoch_monitor_value_supports_precision_at_fixed_rate() -> None:
+    result = SimpleNamespace(
+        val_loss=0.3,
+        val_metrics=SimpleNamespace(directional_precision_at_fixed_rate=0.75),
+    )
+
+    value = epoch_monitor_value(
+        result,
+        monitor="precision_at_fixed_rate",
+        monitor_params=SimpleNamespace(fixed_rate=0.01),
+    )
+
+    assert value == pytest.approx(0.75)
