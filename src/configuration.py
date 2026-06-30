@@ -184,6 +184,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "eval_batch_size": None,
         "num_workers": None,
         "prefetch_factor": None,
+        "preload_data_to_memory": None,
         "early_stopping_patience": None,
         "early_stopping_warmup": None,
         "early_stopping_min_delta": None,
@@ -1871,6 +1872,7 @@ class TrainingConfig:
     eval_batch_size: int
     num_workers: int
     prefetch_factor: int | None
+    preload_data_to_memory: bool
     early_stopping_patience: int
     early_stopping_warmup: int
     early_stopping_min_delta: float
@@ -2064,6 +2066,7 @@ class TrainingConfig:
             prefetch_factor=None
             if payload.get("prefetch_factor") is None
             else int(payload["prefetch_factor"]),
+            preload_data_to_memory=bool(payload.get("preload_data_to_memory", False)),
             early_stopping_patience=int(payload["early_stopping_patience"]),
             early_stopping_warmup=int(payload.get("early_stopping_warmup", 0)),
             early_stopping_min_delta=float(payload.get("early_stopping_min_delta", 0.0)),

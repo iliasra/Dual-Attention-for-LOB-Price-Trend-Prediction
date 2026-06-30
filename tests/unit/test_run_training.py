@@ -452,7 +452,12 @@ def test_train_fold_rejects_missing_validation_sequences(
         def __len__(self) -> int:
             return self.length
 
-    def fake_build_dataset(_sequence_dir: Path, split: str, _sequence_window: int) -> FakeDataset:
+    def fake_build_dataset(
+        _sequence_dir: Path,
+        split: str,
+        _sequence_window: int,
+        **_kwargs,
+    ) -> FakeDataset:
         return FakeDataset(1 if split == "train" else 0)
 
     monkeypatch.setattr("run_training.build_dataset", fake_build_dataset)

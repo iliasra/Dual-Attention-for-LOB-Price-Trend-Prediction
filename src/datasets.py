@@ -88,20 +88,33 @@ class LOBDataset(Dataset):
         t_paths: list[str],
         y_paths: list[str],
         sequence_window: int | None = None,
+        *,
+        preload_to_memory: bool = False,
     ):
         if sequence_window is None:
             raise ValueError("sequence_window is required to reconstruct compact feature arrays.")
         if sequence_window <= 0:
             raise ValueError("sequence_window must be > 0.")
 
-        self.X_data = [np.load(path, mmap_mode="r") for path in x_paths] #mmap_mode="r" allows to partially load 
-        self.T_data = [np.load(path, mmap_mode="r") for path in t_paths] #the files in the RAM, not the full array.
-        self.y_data = [np.load(path, mmap_mode="r") for path in y_paths]
+        self.preload_to_memory = bool(preload_to_memory)
+        mmap_mode = None if self.preload_to_memory else "r"
+        self.X_data = [np.load(path, mmap_mode=mmap_mode) for path in x_paths]
+        self.T_data = [np.load(path, mmap_mode=mmap_mode) for path in t_paths]
+        self.y_data = [np.load(path, mmap_mode=mmap_mode) for path in y_paths]
         self.sequence_window = int(sequence_window)
         self._validate_arrays()
 
         self.lengths = [len(labels) - self.sequence_window + 1 for labels in self.y_data]
         self.cumulative_lengths = np.cumsum(self.lengths)
+
+    @property
+    def arrays_nbytes(self) -> int:
+        """Return bytes held by compact feature/time/label arrays."""
+        return int(
+            sum(array.nbytes for array in self.X_data)
+            + sum(array.nbytes for array in self.T_data)
+            + sum(array.nbytes for array in self.y_data)
+        )
 
     def _validate_arrays(self) -> None:
         """Check consistency across files length/dimensions."""
@@ -147,7 +160,7 @@ class LOBDataset(Dataset):
         local_idx = idx if day_idx == 0 else idx - int(self.cumulative_lengths[day_idx - 1])
         end_idx = local_idx + self.sequence_window
 
-        # To leverage on mmap_mode="r", we access sequences through slicing.
+        # Access compact arrays by slicing, then copy into a tensor-owned batch sample.
         x_seq = torch.from_numpy(np.array(self.X_data[day_idx][local_idx:end_idx], dtype=np.float32, copy=True))
         t_seq = torch.from_numpy(np.array(self.T_data[day_idx][local_idx:end_idx], dtype=np.float32, copy=True))
         y_label = torch.tensor(int(self.y_data[day_idx][end_idx - 1]), dtype=torch.long)

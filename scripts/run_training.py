@@ -111,9 +111,25 @@ def sequence_paths(sequence_dir: Path, split: str) -> tuple[list[str], list[str]
     return x_paths, t_paths, y_paths
 
 
-def build_dataset(sequence_dir: Path, split: str, sequence_window: int) -> LOBDataset:
+def build_dataset(
+    sequence_dir: Path,
+    split: str,
+    sequence_window: int,
+    *,
+    preload_to_memory: bool = False,
+) -> LOBDataset:
     x_paths, t_paths, y_paths = sequence_paths(sequence_dir, split)
-    return LOBDataset(x_paths, t_paths, y_paths, sequence_window=sequence_window)
+    dataset = LOBDataset(
+        x_paths,
+        t_paths,
+        y_paths,
+        sequence_window=sequence_window,
+        preload_to_memory=preload_to_memory,
+    )
+    if preload_to_memory:
+        size_gib = dataset.arrays_nbytes / (1024**3)
+        print(f"Preloaded {split} sequence arrays into RAM: {size_gib:.2f} GiB across {len(x_paths)} shard(s).")
+    return dataset
 
 
 def sequence_time_span_quantile(
@@ -1372,14 +1388,24 @@ def train_fold(
     )
     preprocessing_metadata = load_preprocessing_metadata(fold_sequence_dir)
 
-    train_dataset = build_dataset(fold_sequence_dir, "train", config.data.sequence_window)
+    train_dataset = build_dataset(
+        fold_sequence_dir,
+        "train",
+        config.data.sequence_window,
+        preload_to_memory=config.training.preload_data_to_memory,
+    )
     if len(train_dataset) == 0:
         raise ValueError(
             f"No training sequences found in {fold_sequence_dir / 'train'}. "
             "Run scripts/process_data.py first."
         )
 
-    validation_dataset = build_dataset(fold_sequence_dir, "validation", config.data.sequence_window)
+    validation_dataset = build_dataset(
+        fold_sequence_dir,
+        "validation",
+        config.data.sequence_window,
+        preload_to_memory=config.training.preload_data_to_memory,
+    )
     if len(validation_dataset) == 0:
         raise ValueError(
             f"No validation sequences found in {fold_sequence_dir / 'validation'}. "
@@ -1391,7 +1417,12 @@ def train_fold(
         has_test_split = False
         print(f"Fold '{fold_id}' has no configured test split; test evaluation will be skipped.")
     else:
-        test_dataset = build_dataset(fold_sequence_dir, "test", config.data.sequence_window)
+        test_dataset = build_dataset(
+            fold_sequence_dir,
+            "test",
+            config.data.sequence_window,
+            preload_to_memory=config.training.preload_data_to_memory,
+        )
         has_test_split = len(test_dataset) > 0 if fold_has_test_split is None else bool(fold_has_test_split)
         if has_test_split and len(test_dataset) == 0:
             raise ValueError(

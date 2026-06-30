@@ -1096,12 +1096,14 @@ def test_training_prefetch_factor_is_optional_and_validated(artifact_dir: Path) 
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
     payload["training"]["prefetch_factor"] = 8
+    payload["training"]["preload_data_to_memory"] = True
 
     config_path = artifact_dir / "prefetch_factor.yaml"
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     loaded = ExperimentConfig.from_yaml(config_path)
 
     assert loaded.training.prefetch_factor == 8
+    assert loaded.training.preload_data_to_memory is True
     assert loaded.training.data_loader_kwargs()["prefetch_factor"] == 8
 
     payload["training"]["prefetch_factor"] = 0

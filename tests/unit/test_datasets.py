@@ -102,6 +102,28 @@ def test_lob_dataset_getitem_returns_sequence_window_starting_at_idx(artifact_di
     assert y_label.item() == 0
 
 
+def test_lob_dataset_can_preload_compact_arrays_to_memory(artifact_dir: Path) -> None:
+    labels = [0, 1, 2, 1]
+    x_path, t_path, y_path = save_compact_arrays(artifact_dir, labels)
+
+    mmap_dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=1)
+    preloaded_dataset = LOBDataset(
+        [str(x_path)],
+        [str(t_path)],
+        [str(y_path)],
+        sequence_window=1,
+        preload_to_memory=True,
+    )
+
+    assert isinstance(mmap_dataset.X_data[0], np.memmap)
+    assert not isinstance(preloaded_dataset.X_data[0], np.memmap)
+    assert preloaded_dataset.arrays_nbytes == (
+        preloaded_dataset.X_data[0].nbytes
+        + preloaded_dataset.T_data[0].nbytes
+        + preloaded_dataset.y_data[0].nbytes
+    )
+
+
 def test_lob_dataset_rejects_inconsistent_feature_widths(artifact_dir: Path) -> None:
     x_path_1 = artifact_dir / "day_1_features.npy"
     x_path_2 = artifact_dir / "day_2_features.npy"
