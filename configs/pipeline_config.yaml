@@ -281,6 +281,7 @@ training:
   batch_size: 128 # larger A100 batch; reduces DataLoader iterations per epoch
   eval_batch_size: 256 # evaluation only; no backward pass
   num_workers: 32
+  prefetch_factor: 32 # DataLoader batches prefetched per worker; 32 workers * 8 = up to 256 queued batches
   validate_every_n_batches: 5000 # allowed: positive int or "epoch"; int validates/checkpoints intra-epoch
   early_stopping_patience: 12 # counts validation intervals when validate_every_n_batches is an int
   early_stopping_warmup: 3 # counts validation intervals when validate_every_n_batches is an int

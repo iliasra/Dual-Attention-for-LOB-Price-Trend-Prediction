@@ -183,6 +183,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "batch_size": None,
         "eval_batch_size": None,
         "num_workers": None,
+        "prefetch_factor": None,
         "early_stopping_patience": None,
         "early_stopping_warmup": None,
         "early_stopping_min_delta": None,
@@ -1869,6 +1870,7 @@ class TrainingConfig:
     batch_size: int
     eval_batch_size: int
     num_workers: int
+    prefetch_factor: int | None
     early_stopping_patience: int
     early_stopping_warmup: int
     early_stopping_min_delta: float
@@ -1903,6 +1905,8 @@ class TrainingConfig:
             raise ValueError("training.eval_batch_size must be > 0.")
         if self.num_workers < 0:
             raise ValueError("training.num_workers must be >= 0.")
+        if self.prefetch_factor is not None and self.prefetch_factor <= 0:
+            raise ValueError("training.prefetch_factor must be > 0 when set.")
         if self.early_stopping_patience < 0:
             raise ValueError("training.early_stopping_patience must be >= 0.")
         if self.early_stopping_warmup < 0:
@@ -2039,11 +2043,14 @@ class TrainingConfig:
         Returns:
             Keyword arguments for ``DataLoader`` construction.
         """
-        return {
+        kwargs = {
             "num_workers": self.num_workers,
             "persistent_workers": self.persistent_workers,
             "pin_memory": self.pin_memory,
         }
+        if self.num_workers > 0 and self.prefetch_factor is not None:
+            kwargs["prefetch_factor"] = self.prefetch_factor
+        return kwargs
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TrainingConfig":
@@ -2054,6 +2061,9 @@ class TrainingConfig:
             batch_size=int(payload["batch_size"]),
             eval_batch_size=int(payload["eval_batch_size"]),
             num_workers=int(payload["num_workers"]),
+            prefetch_factor=None
+            if payload.get("prefetch_factor") is None
+            else int(payload["prefetch_factor"]),
             early_stopping_patience=int(payload["early_stopping_patience"]),
             early_stopping_warmup=int(payload.get("early_stopping_warmup", 0)),
             early_stopping_min_delta=float(payload.get("early_stopping_min_delta", 0.0)),

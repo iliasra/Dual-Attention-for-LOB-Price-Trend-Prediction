@@ -1092,6 +1092,25 @@ def test_training_eval_batch_size_rejects_non_positive_value(artifact_dir: Path)
         ExperimentConfig.from_yaml(broken_config_path)
 
 
+def test_training_prefetch_factor_is_optional_and_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["prefetch_factor"] = 8
+
+    config_path = artifact_dir / "prefetch_factor.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.prefetch_factor == 8
+    assert loaded.training.data_loader_kwargs()["prefetch_factor"] == 8
+
+    payload["training"]["prefetch_factor"] = 0
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="prefetch_factor"):
+        ExperimentConfig.from_yaml(config_path)
+
+
 def test_training_class_weights_yaml_parameter_is_rejected(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
