@@ -278,9 +278,9 @@ model:
 training:
   device: cuda # allowed: cpu, cuda
   epochs: 30
-  batch_size: 128 # tuned with the dry-run
+  batch_size: 128 # larger A100 batch; reduces DataLoader iterations per epoch
   eval_batch_size: 256 # evaluation only; no backward pass
-  num_workers: 8
+  num_workers: 32
   validate_every_n_batches: 5000 # allowed: positive int or "epoch"; int validates/checkpoints intra-epoch
   early_stopping_patience: 12 # counts validation intervals when validate_every_n_batches is an int
   early_stopping_warmup: 3 # counts validation intervals when validate_every_n_batches is an int
@@ -295,7 +295,7 @@ training:
     fixed_rate: 0.005 # used by precision_at_fixed_rate; selects top 1% P(down) and top 1% P(up) separately
   persistent_workers: true
   optimizer: adamw # allowed: adam, adamw
-  learning_rate: 3.0e-5
+  learning_rate: 5.0e-6
   weight_decay: 1.0e-4
   focal_gamma: 0.0
   class_weight_beta: 0.25
@@ -329,7 +329,7 @@ training:
     up_quantile: 0.01 # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
     down_quantile: 0.01 # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
   sampling:
-    neutral_to_directional_ratio: 20 # downsampling of neutral class
+    neutral_to_directional_ratio: 20 # faster training: keep all directional samples, sample 2x as many neutrals
 
 tracking:
   wandb:
