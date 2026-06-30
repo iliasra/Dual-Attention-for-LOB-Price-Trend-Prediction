@@ -174,11 +174,20 @@ class WandbTracker:
         if not self.enabled:
             return
         payload = epoch_result_to_wandb_metrics(result, monitor_value=monitor_value)
-        step = payload.get("validation_index")
+        step = payload.get("global_step") or payload.get("validation_index")
         try:
             self.run.log(payload, step=None if step is None else int(step))
         except Exception as exc:  # pragma: no cover - defensive against W&B runtime state.
             print(f"W&B metric logging failed ({exc}); continuing.")
+
+    def log_training_step(self, payload: dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+        step = payload.get("global_step")
+        try:
+            self.run.log(payload, step=None if step is None else int(step))
+        except Exception as exc:  # pragma: no cover - defensive against W&B runtime state.
+            print(f"W&B training-step logging failed ({exc}); continuing.")
 
     def log_artifact_files(self, *, name: str, artifact_type: str, paths: list[Path]) -> None:
         if not self.enabled:

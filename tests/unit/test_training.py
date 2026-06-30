@@ -367,6 +367,42 @@ def test_lob_trainer_validates_every_n_batches_and_at_epoch_end(
 
 
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_logs_training_step_callback_for_each_batch(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _training_config()
+    config.epochs = 1
+    config.validate_every_n_batches = 10
+    config.early_stopping_patience = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.device = "cpu"
+    config.use_amp = False
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=1.0, metrics=metrics)
+
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+    logged_steps: list[dict[str, object]] = []
+
+    trainer.fit(
+        TinySequenceClassifier(),
+        train_loader=_tiny_batches(3),
+        val_loader=[],
+        training_step_callback=logged_steps.append,
+    )
+
+    assert [item["global_step"] for item in logged_steps] == [1, 2, 3]
+    assert [item["batch_in_epoch"] for item in logged_steps] == [1, 2, 3]
+    assert all("train_loss_step" in item for item in logged_steps)
+    assert all("learning_rate" in item for item in logged_steps)
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
 def test_lob_trainer_early_stopping_counts_validation_intervals(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import random
 from time import perf_counter
@@ -22,6 +23,151 @@ except ImportError:  # pragma: no cover
     from .monitoring import directional_precision_at_fixed_rate, monitor_value
     from .pr_metrics import per_class_ranking_metrics
     from .run_logging import format_duration
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_positive_int(name: str, *, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        print(f"Ignoring invalid {name}={value!r}; expected a positive integer.")
+        return default
+    if parsed <= 0:
+        print(f"Ignoring invalid {name}={value!r}; expected a positive integer.")
+        return default
+    return parsed
+
+
+class TrainingStepProfiler:
+    """Lightweight wall-clock profiler for diagnosing slow HPC training steps."""
+
+    STAGES = (
+        "data_wait",
+        "h2d",
+        "zero_grad",
+        "forward_loss",
+        "finite_checks",
+        "backward",
+        "optimizer_step",
+        "metrics_update",
+        "step_logging",
+        "total_step",
+    )
+
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        device: torch.device,
+        every_n_steps: int,
+        warmup_steps: int,
+        cuda_sync: bool,
+    ) -> None:
+        self.enabled = bool(enabled)
+        self.device = device
+        self.every_n_steps = int(every_n_steps)
+        self.warmup_steps = int(warmup_steps)
+        self.cuda_sync = bool(cuda_sync and device.type == "cuda" and torch.cuda.is_available())
+        self._window_sums = {stage: 0.0 for stage in self.STAGES}
+        self._window_steps = 0
+        self._window_samples = 0
+
+    @classmethod
+    def from_env(cls, device: torch.device) -> "TrainingStepProfiler":
+        enabled = _env_flag("LOB_PROFILE_TRAINING", default=False)
+        every_n_steps = _env_positive_int("LOB_PROFILE_EVERY_N_STEPS", default=100)
+        warmup_steps = max(0, _env_positive_int("LOB_PROFILE_WARMUP_STEPS", default=5))
+        cuda_sync = _env_flag("LOB_PROFILE_CUDA_SYNC", default=True)
+        profiler = cls(
+            enabled=enabled,
+            device=device,
+            every_n_steps=every_n_steps,
+            warmup_steps=warmup_steps,
+            cuda_sync=cuda_sync,
+        )
+        if profiler.enabled:
+            sync_text = "enabled" if profiler.cuda_sync else "disabled"
+            print(
+                "Training step profiling enabled: "
+                f"every_n_steps={profiler.every_n_steps}, "
+                f"warmup_steps={profiler.warmup_steps}, cuda_sync={sync_text}. "
+                "Set LOB_PROFILE_TRAINING=0 to disable."
+            )
+        return profiler
+
+    def sync(self) -> None:
+        if self.cuda_sync:
+            torch.cuda.synchronize(self.device)
+
+    def now(self) -> float:
+        self.sync()
+        return perf_counter()
+
+    def record(
+        self,
+        *,
+        epoch: int,
+        batch_in_epoch: int,
+        global_step: int,
+        batch_size: int,
+        timings: dict[str, float],
+    ) -> dict[str, float] | None:
+        if not self.enabled or global_step <= self.warmup_steps:
+            return None
+
+        for stage in self.STAGES:
+            self._window_sums[stage] += max(0.0, float(timings.get(stage, 0.0)))
+        self._window_steps += 1
+        self._window_samples += int(batch_size)
+
+        if self._window_steps < self.every_n_steps:
+            return None
+
+        denominator = max(self._window_steps, 1)
+        averages = {stage: self._window_sums[stage] / denominator for stage in self.STAGES}
+        measured = sum(averages[stage] for stage in self.STAGES if stage != "total_step")
+        averages["unaccounted"] = max(0.0, averages["total_step"] - measured)
+        averages["samples_per_second"] = self._window_samples / max(sum_total := self._window_sums["total_step"], 1e-12)
+
+        total = max(averages["total_step"], 1e-12)
+        pieces = ", ".join(
+            f"{stage}={averages[stage]:.4f}s ({100.0 * averages[stage] / total:.1f}%)"
+            for stage in (
+                "data_wait",
+                "h2d",
+                "forward_loss",
+                "finite_checks",
+                "backward",
+                "optimizer_step",
+                "metrics_update",
+                "step_logging",
+                "unaccounted",
+            )
+        )
+        print(
+            "[train-profile] "
+            f"epoch={epoch}, batch={batch_in_epoch}, global_step={global_step}, "
+            f"window_steps={self._window_steps}, avg_total={averages['total_step']:.4f}s, "
+            f"samples_per_s={averages['samples_per_second']:.2f}, {pieces}"
+        )
+
+        payload = {f"profile_{stage}_seconds": value for stage, value in averages.items()}
+        payload["profile_window_steps"] = float(self._window_steps)
+        payload["profile_window_samples"] = float(self._window_samples)
+
+        self._window_sums = {stage: 0.0 for stage in self.STAGES}
+        self._window_steps = 0
+        self._window_samples = 0
+        return payload
 
 
 class FocalLoss(nn.Module):
@@ -292,6 +438,7 @@ class EvaluationResult:
     metrics: ClassificationMetrics
     expert_usage: dict[str, Any] | None = None
     prediction_outputs: dict[str, Any] | None = None
+    batch_count: int = 0
 
 
 class ExpertUsageAccumulator:
@@ -1217,6 +1364,7 @@ class LobTrainer:
         resume_checkpoint_path: Path | None = None,
         wandb_run_id: str | None = None,
         validation_callback: Callable[[EpochResult, float], None] | None = None,
+        training_step_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> tuple[nn.Module, list[EpochResult]]:
         """Train using only train/validation data and reload the best validation model.
 
@@ -1242,6 +1390,7 @@ class LobTrainer:
         validation_unit = "epoch" if validate_by_epoch else "validation interval"
         start_epoch_number = 1
         resume_skip_batches = 0
+        profiler = TrainingStepProfiler.from_env(self.device)
 
         if resume_checkpoint_path is not None:
             resume_state = self._load_training_state(
@@ -1416,7 +1565,12 @@ class LobTrainer:
                     criterion=criterion,
                     optimizer=optimizer,
                     description=f"Epoch {epoch_number}/{self.config.epochs} [Train]",
+                    epoch_number=epoch_number,
+                    start_global_step=global_step,
+                    training_step_callback=training_step_callback,
+                    profiler=profiler,
                 )
+                global_step += int(train_result.batch_count)
                 val_result = self.evaluate(
                     model=model,
                     data_loader=val_loader,
@@ -1428,7 +1582,7 @@ class LobTrainer:
                 if record_validation(
                     epoch_number=epoch_number,
                     batch_in_epoch=None,
-                    global_step_value=None,
+                    global_step_value=global_step,
                     next_epoch_number=epoch_number + 1,
                     next_batch_in_epoch=1,
                     train_result=train_result,
@@ -1444,23 +1598,48 @@ class LobTrainer:
             stopped = False
             last_batch_in_epoch = 0
             progress = tqdm(train_loader, desc=f"Epoch {epoch_number}/{self.config.epochs} [Train]")
+            last_step_end = profiler.now() if profiler.enabled else perf_counter()
             for batch_in_epoch, (x_batch, t_batch, y_batch) in enumerate(progress, start=1):
                 if epoch_number == start_epoch_number and batch_in_epoch <= resume_skip_batches:
+                    last_step_end = profiler.now() if profiler.enabled else perf_counter()
                     continue
+                if profiler.enabled:
+                    batch_ready = profiler.now()
+                    timings = {
+                        "data_wait": batch_ready - last_step_end,
+                    }
+                    step_start = last_step_end
+                    stage_start = batch_ready
+                else:
+                    timings = {}
+                    step_start = 0.0
+                    stage_start = 0.0
                 last_batch_in_epoch = batch_in_epoch
                 x_batch = x_batch.to(self.device, non_blocking=True)
                 t_batch = t_batch.to(self.device, non_blocking=True)
                 y_batch = y_batch.to(self.device, non_blocking=True)
+                if profiler.enabled:
+                    stage_end = profiler.now()
+                    timings["h2d"] = stage_end - stage_start
+                    stage_start = stage_end
                 optimizer.zero_grad(set_to_none=True)
+                if profiler.enabled:
+                    stage_end = profiler.now()
+                    timings["zero_grad"] = stage_end - stage_start
+                    stage_start = stage_end
 
                 with self._amp_context():
                     logits = model(x_batch, t_batch)
-                    loss = criterion(logits, y_batch)
+                    base_loss = criterion(logits, y_batch)
                     aux_loss = self._auxiliary_loss(model, logits, y_batch)
-                    loss = loss + aux_loss
+                    loss = base_loss + aux_loss
                     moe_loss = getattr(model, "moe_load_balancing_loss", None)
                     if moe_loss is not None:
                         loss = loss + moe_loss
+                if profiler.enabled:
+                    stage_end = profiler.now()
+                    timings["forward_loss"] = stage_end - stage_start
+                    stage_start = stage_end
 
                 if not bool(torch.isfinite(logits).all()):
                     finite_summary = logits.detach().float().nan_to_num()
@@ -1471,17 +1650,72 @@ class LobTrainer:
                     )
                 if not bool(torch.isfinite(loss)):
                     raise FloatingPointError(f"Non-finite loss at batch {batch_in_epoch}: {loss.item()}")
+                if profiler.enabled:
+                    stage_end = profiler.now()
+                    timings["finite_checks"] = stage_end - stage_start
+                    stage_start = stage_end
 
                 self.scaler.scale(loss).backward()
+                if profiler.enabled:
+                    stage_end = profiler.now()
+                    timings["backward"] = stage_end - stage_start
+                    stage_start = stage_end
                 self.scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
                 self.scaler.step(optimizer)
                 self.scaler.update()
+                if profiler.enabled:
+                    stage_end = profiler.now()
+                    timings["optimizer_step"] = stage_end - stage_start
+                    stage_start = stage_end
 
                 interval_metrics.update(logits, y_batch)
-                interval_loss += float(loss.item())
+                step_loss = float(loss.item())
+                interval_loss += step_loss
                 interval_batches += 1
                 global_step += 1
+                batch_size = int(y_batch.shape[0])
+                if profiler.enabled:
+                    stage_end = profiler.now()
+                    timings["metrics_update"] = stage_end - stage_start
+                    stage_start = stage_end
+                if training_step_callback is not None:
+                    step_payload = {
+                        "epoch": int(epoch_number),
+                        "batch_in_epoch": int(batch_in_epoch),
+                        "global_step": int(global_step),
+                        "train_loss_step": step_loss,
+                        "train_base_loss_step": float(base_loss.item()),
+                        "train_auxiliary_loss_step": float(aux_loss.item()),
+                        "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                        "gradient_norm": float(grad_norm.item()),
+                    }
+                    if moe_loss is not None:
+                        step_payload["train_moe_loss_step"] = float(moe_loss.item())
+                    training_step_callback(step_payload)
+                if profiler.enabled:
+                    stage_end = profiler.now()
+                    timings["step_logging"] = stage_end - stage_start
+                    timings["total_step"] = stage_end - step_start
+                    profile_payload = profiler.record(
+                        epoch=epoch_number,
+                        batch_in_epoch=batch_in_epoch,
+                        global_step=global_step,
+                        batch_size=batch_size,
+                        timings=timings,
+                    )
+                    if profile_payload is not None and training_step_callback is not None:
+                        profile_payload.update(
+                            {
+                                "epoch": int(epoch_number),
+                                "batch_in_epoch": int(batch_in_epoch),
+                                "global_step": int(global_step),
+                            }
+                        )
+                        training_step_callback(profile_payload)
+                    last_step_end = profiler.now()
+                else:
+                    last_step_end = perf_counter()
 
                 if validation_interval is not None and global_step % validation_interval == 0:
                     train_result = EvaluationResult(
@@ -1607,26 +1841,56 @@ class LobTrainer:
         criterion: nn.Module,
         optimizer: torch.optim.Optimizer,
         description: str,
+        *,
+        epoch_number: int | None = None,
+        start_global_step: int = 0,
+        training_step_callback: Callable[[dict[str, Any]], None] | None = None,
+        profiler: TrainingStepProfiler | None = None,
     ) -> EvaluationResult:
         model.train()
         total_loss = 0.0
         batch_count = 0
         metrics = ClassificationMetricAccumulator(device=self.device)
+        profile_enabled = profiler is not None and profiler.enabled
+        last_step_end = profiler.now() if profile_enabled else perf_counter()
 
         for x_batch, t_batch, y_batch in tqdm(data_loader, desc=description):
+            if profile_enabled and profiler is not None:
+                batch_ready = profiler.now()
+                timings = {
+                    "data_wait": batch_ready - last_step_end,
+                }
+                step_start = last_step_end
+                stage_start = batch_ready
+            else:
+                timings = {}
+                step_start = 0.0
+                stage_start = 0.0
             x_batch = x_batch.to(self.device, non_blocking=True)
             t_batch = t_batch.to(self.device, non_blocking=True)
             y_batch = y_batch.to(self.device, non_blocking=True)
+            if profile_enabled and profiler is not None:
+                stage_end = profiler.now()
+                timings["h2d"] = stage_end - stage_start
+                stage_start = stage_end
             optimizer.zero_grad(set_to_none=True)
+            if profile_enabled and profiler is not None:
+                stage_end = profiler.now()
+                timings["zero_grad"] = stage_end - stage_start
+                stage_start = stage_end
 
             with self._amp_context():
                 logits = model(x_batch, t_batch)
-                loss = criterion(logits, y_batch)
+                base_loss = criterion(logits, y_batch)
                 aux_loss = self._auxiliary_loss(model, logits, y_batch)
-                loss = loss + aux_loss
+                loss = base_loss + aux_loss
                 moe_loss = getattr(model, "moe_load_balancing_loss", None)  # load-balancing for MoE training
                 if moe_loss is not None:  # add MoE auxiliary loss only when the model exposes it
                     loss = loss + moe_loss
+            if profile_enabled and profiler is not None:
+                stage_end = profiler.now()
+                timings["forward_loss"] = stage_end - stage_start
+                stage_start = stage_end
 
             current_batch = batch_count + 1
             if not bool(torch.isfinite(logits).all()):
@@ -1638,18 +1902,78 @@ class LobTrainer:
                 )
             if not bool(torch.isfinite(loss)):
                 raise FloatingPointError(f"Non-finite loss at batch {current_batch}: {loss.item()}")
+            if profile_enabled and profiler is not None:
+                stage_end = profiler.now()
+                timings["finite_checks"] = stage_end - stage_start
+                stage_start = stage_end
 
             self.scaler.scale(loss).backward()
+            if profile_enabled and profiler is not None:
+                stage_end = profiler.now()
+                timings["backward"] = stage_end - stage_start
+                stage_start = stage_end
             self.scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
             self.scaler.step(optimizer)
             self.scaler.update()
+            if profile_enabled and profiler is not None:
+                stage_end = profiler.now()
+                timings["optimizer_step"] = stage_end - stage_start
+                stage_start = stage_end
 
             metrics.update(logits, y_batch)
-            total_loss += float(loss.item())
+            step_loss = float(loss.item())
+            total_loss += step_loss
             batch_count += 1
+            batch_size = int(y_batch.shape[0])
+            if profile_enabled and profiler is not None:
+                stage_end = profiler.now()
+                timings["metrics_update"] = stage_end - stage_start
+                stage_start = stage_end
+            if training_step_callback is not None:
+                step_payload = {
+                    "epoch": int(epoch_number or 0),
+                    "batch_in_epoch": int(current_batch),
+                    "global_step": int(start_global_step + batch_count),
+                    "train_loss_step": step_loss,
+                    "train_base_loss_step": float(base_loss.item()),
+                    "train_auxiliary_loss_step": float(aux_loss.item()),
+                    "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                    "gradient_norm": float(grad_norm.item()),
+                }
+                if moe_loss is not None:
+                    step_payload["train_moe_loss_step"] = float(moe_loss.item())
+                training_step_callback(step_payload)
+            if profile_enabled and profiler is not None:
+                stage_end = profiler.now()
+                global_step = int(start_global_step + batch_count)
+                timings["step_logging"] = stage_end - stage_start
+                timings["total_step"] = stage_end - step_start
+                profile_payload = profiler.record(
+                    epoch=int(epoch_number or 0),
+                    batch_in_epoch=current_batch,
+                    global_step=global_step,
+                    batch_size=batch_size,
+                    timings=timings,
+                )
+                if profile_payload is not None and training_step_callback is not None:
+                    profile_payload.update(
+                        {
+                            "epoch": int(epoch_number or 0),
+                            "batch_in_epoch": int(current_batch),
+                            "global_step": global_step,
+                        }
+                    )
+                    training_step_callback(profile_payload)
+                last_step_end = profiler.now()
+            else:
+                last_step_end = perf_counter()
 
-        return EvaluationResult(loss=total_loss / max(batch_count, 1), metrics=metrics.compute())
+        return EvaluationResult(
+            loss=total_loss / max(batch_count, 1),
+            metrics=metrics.compute(),
+            batch_count=batch_count,
+        )
 
     def evaluate(
         self,
@@ -1699,6 +2023,7 @@ class LobTrainer:
             metrics=metrics.compute(),
             expert_usage=None if expert_usage is None else expert_usage.compute(),
             prediction_outputs=None if prediction_outputs is None else prediction_outputs.compute(),
+            batch_count=batch_count,
         )
 
 

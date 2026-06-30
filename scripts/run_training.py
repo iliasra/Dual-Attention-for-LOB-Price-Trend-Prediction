@@ -1538,6 +1538,7 @@ def train_fold(
             result,
             monitor_value=monitor_value,
         ),
+        training_step_callback=wandb_tracker.log_training_step if wandb_tracker.enabled else None,
     )
     fit_duration_seconds = perf_counter() - fit_start
     checkpoint_selection = select_checkpoint_after_validation_postprocessing(

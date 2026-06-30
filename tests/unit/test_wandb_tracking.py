@@ -131,6 +131,29 @@ def test_wandb_tracker_initializes_and_logs_with_fake_module(
     assert fake_run.logged[0][1] == 4
     assert fake_run.logged[0][0]["val_macro_f1"] == 0.75
 
+    stepped_result = EpochResult(
+        train_loss=0.9,
+        val_loss=0.4,
+        val_metrics=_metrics(),
+        validation_index=5,
+        global_step=128,
+    )
+    tracker.log_validation(stepped_result, monitor_value=0.4)
+    assert fake_run.logged[1][1] == 128
+    assert fake_run.logged[1][0]["val_loss"] == 0.4
+
+    tracker.log_training_step(
+        {
+            "epoch": 1,
+            "batch_in_epoch": 8,
+            "global_step": 129,
+            "train_loss_step": 0.123,
+            "learning_rate": 1e-4,
+        }
+    )
+    assert fake_run.logged[2][1] == 129
+    assert fake_run.logged[2][0]["train_loss_step"] == 0.123
+
     artifact_file = tmp_path / "metrics.csv"
     artifact_file.write_text("epoch,val_loss\n1,0.5\n", encoding="utf-8")
     tracker.log_artifact_files(name="files", artifact_type="training-artifacts", paths=[artifact_file])
