@@ -280,8 +280,8 @@ training:
   epochs: 30
   batch_size: 128 # larger A100 batch; reduces DataLoader iterations per epoch
   eval_batch_size: 256 # evaluation only; no backward pass
-  num_workers: 32
-  prefetch_factor: 32 # DataLoader batches prefetched per worker; 32 workers * 32 = up to 1024 queued batches
+  num_workers: 16
+  prefetch_factor: 4 # DataLoader batches prefetched per worker; 16 workers * 4 = up to 64 queued batches
   preload_data_to_memory: true # load compact .npy shards into host RAM before DataLoader workers fork
   validate_every_n_batches: 5000 # allowed: positive int or "epoch"; int validates/checkpoints intra-epoch
   early_stopping_patience: 12 # counts validation intervals when validate_every_n_batches is an int
