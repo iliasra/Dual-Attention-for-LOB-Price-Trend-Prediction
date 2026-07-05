@@ -159,6 +159,7 @@ class ContinuousTimeAttention(nn.Module):
                 "scripts/run_training.py derives it from train sequence time spans."
             )
         self.max_dt = float(config.max_dt)
+        self.local_context_tokens = config.local_attention_context_tokens
 
         self.qkv = nn.Linear(config.d_model, 3 * config.d_model)
         self.out = nn.Linear(config.d_model, config.d_model)
@@ -188,6 +189,11 @@ class ContinuousTimeAttention(nn.Module):
             torch.ones((sequence_length, sequence_length), device=x.device, dtype=torch.bool)
         ).reshape(1, 1, sequence_length, sequence_length)  # reshape avoids contiguous-memory assumptions
         attention_mask = time_mask & causal_mask
+        if self.local_context_tokens is not None and self.local_context_tokens < sequence_length:
+            positions = torch.arange(sequence_length, device=x.device)
+            local_distance = positions.reshape(sequence_length, 1) - positions.reshape(1, sequence_length)
+            local_mask = (local_distance >= 0) & (local_distance < int(self.local_context_tokens))
+            attention_mask = attention_mask & local_mask.reshape(1, 1, sequence_length, sequence_length)
 
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, dropout_p=self.dropout if self.training else 0.0, is_causal=False,)
         out = out.transpose(1, 2).reshape(batch_size, sequence_length, hidden_size)
@@ -455,8 +461,50 @@ class TrendClassifier(nn.Module):
                 raise RuntimeError(f"Unsupported classifier pooling method: {method}")
         return pooled_outputs[0] if len(pooled_outputs) == 1 else torch.cat(pooled_outputs, dim=-1)
 
+    def _pool_tokenwise(self, transformer_output: torch.Tensor) -> torch.Tensor:
+        if transformer_output.ndim != 3:
+            raise ValueError(
+                "transformer_output must have shape [batch, sequence, d_model], "
+                f"got {tuple(transformer_output.shape)}."
+            )
+        sequence_length = transformer_output.shape[1]
+        if sequence_length < 1:
+            raise ValueError("transformer_output sequence length must be >= 1.")
+        effective_k = min(self.last_k, sequence_length)
+
+        pooled_outputs: list[torch.Tensor] = []
+        for method in self.pooling_methods:
+            if method == "last":
+                pooled_outputs.append(transformer_output)
+            elif method == "mean":
+                padded = F.pad(transformer_output.transpose(1, 2), (effective_k - 1, 0), value=0.0)
+                windows = padded.unfold(dimension=-1, size=effective_k, step=1)
+                counts = torch.arange(1, sequence_length + 1, device=transformer_output.device)
+                counts = counts.clamp_max(effective_k).to(dtype=transformer_output.dtype)
+                pooled_outputs.append(windows.sum(dim=-1).transpose(1, 2) / counts.reshape(1, sequence_length, 1))
+            elif method == "max":
+                padded = F.pad(transformer_output.transpose(1, 2), (effective_k - 1, 0), value=-float("inf"))
+                windows = padded.unfold(dimension=-1, size=effective_k, step=1)
+                pooled_outputs.append(windows.max(dim=-1).values.transpose(1, 2))
+            else:
+                raise RuntimeError(f"Unsupported classifier pooling method: {method}")
+        return pooled_outputs[0] if len(pooled_outputs) == 1 else torch.cat(pooled_outputs, dim=-1)
+
     def forward(self, transformer_output: torch.Tensor) -> torch.Tensor:
         pooled = self._pool(transformer_output)
+        hidden = self.trunk(pooled)
+        class_logits = self.class_head(hidden)
+
+        self.last_auxiliary_outputs = {}
+        if self.movement_head is not None:
+            self.last_auxiliary_outputs["movement_logit"] = self.movement_head(hidden).squeeze(-1)
+        if self.direction_head is not None:
+            self.last_auxiliary_outputs["direction_logits"] = self.direction_head(hidden)
+
+        return class_logits
+
+    def forward_tokenwise(self, transformer_output: torch.Tensor) -> torch.Tensor:
+        pooled = self._pool_tokenwise(transformer_output)
         hidden = self.trunk(pooled)
         class_logits = self.class_head(hidden)
 
@@ -514,9 +562,9 @@ class LobTrendTransformer(nn.Module):
         self.moe_routing: dict[str, torch.Tensor | int] | None = None
         self.auxiliary_outputs: dict[str, torch.Tensor] = {}
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, *, tokenwise: bool = False) -> torch.Tensor:
         encoded = self.encoder(x, t)
-        logits = self.classifier(encoded)
+        logits = self.classifier.forward_tokenwise(encoded) if tokenwise else self.classifier(encoded)
         self.auxiliary_outputs = self.classifier.last_auxiliary_outputs
         if self.encoder.moe is None:
             self.moe_load_balancing_loss = None

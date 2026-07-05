@@ -34,6 +34,11 @@ def artifact_dir(request: pytest.FixtureRequest) -> Path:
 def _training_config():
     config = load_config().training
     config.validate_every_n_batches = "epoch"
+    config.sequence_supervision.mode = "last_window"
+    config.sequence_supervision.loss_warmup_tokens = None
+    config.sequence_supervision.chunk_stride = None
+    config.sequence_supervision.neutral_sampling = "none"
+    config.sequence_supervision.neutral_keep_probability = None
     return config
 
 
@@ -1057,6 +1062,59 @@ def test_lob_trainer_evaluate_skips_optional_expensive_tracking_by_default() -> 
     assert result.metrics.per_class_pr_ap is None
     assert result.metrics.per_class_pr_auc is None
     assert result.metrics.per_class_roc_auc is None
+
+
+def test_lob_trainer_evaluate_token_chunk_uses_loss_mask() -> None:
+    class TokenModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = nn.Parameter(torch.zeros(()))
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor, *, tokenwise: bool = False) -> torch.Tensor:
+            del x, t
+            assert tokenwise
+            return torch.tensor(
+                [
+                    [
+                        [4.0, 0.0, 0.0],
+                        [0.0, 4.0, 0.0],
+                        [0.0, 0.0, 4.0],
+                        [4.0, 0.0, 0.0],
+                    ]
+                ],
+                device=self.dummy.device,
+            )
+
+    config = _training_config()
+    config.device = "cpu"
+    config.class_weights = None
+    config.focal_gamma = 0.0
+    config.sequence_supervision.mode = "token_chunk"
+    config.sequence_supervision.loss_warmup_tokens = 2
+    config.sequence_supervision.chunk_stride = 2
+    config.sequence_supervision.neutral_sampling = "token_mask"
+    trainer = LobTrainer(config)
+    data_loader = [
+        (
+            torch.zeros((1, 4, 1)),
+            torch.zeros((1, 4)),
+            torch.tensor([[0, 1, 2, 0]]),
+            torch.tensor([[False, False, True, True]]),
+            torch.arange(4).reshape(1, 4),
+        )
+    ]
+
+    result = trainer.evaluate(
+        TokenModel(),
+        data_loader,
+        description="Token chunk eval",
+        collect_outputs=True,
+    )
+
+    assert result.metrics.accuracy == pytest.approx(1.0)
+    assert result.prediction_outputs is not None
+    assert result.prediction_outputs["targets"].tolist() == [2, 0]
+    assert result.prediction_outputs["predictions"].tolist() == [2, 0]
 
 
 def test_classification_metrics_from_predictions_uses_fixed_decisions() -> None:

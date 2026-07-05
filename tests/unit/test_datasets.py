@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from configuration import DataConfig
-from datasets import DailySequenceBuilder, EpochNeutralDownsamplingSampler, LOBDataset
+from datasets import DailySequenceBuilder, EpochNeutralDownsamplingSampler, LOBDataset, LOBTokenChunkDataset
 
 
 def make_data_config(
@@ -122,6 +122,36 @@ def test_lob_dataset_can_preload_compact_arrays_to_memory(artifact_dir: Path) ->
         + preloaded_dataset.T_data[0].nbytes
         + preloaded_dataset.y_data[0].nbytes
     )
+
+
+def test_lob_token_chunk_dataset_supervises_tail_tokens_once(artifact_dir: Path) -> None:
+    labels = list(range(10))
+    x_path, t_path, y_path = save_compact_arrays(artifact_dir, labels)
+    dataset = LOBTokenChunkDataset(
+        [str(x_path)],
+        [str(t_path)],
+        [str(y_path)],
+        sequence_window=6,
+        loss_warmup_tokens=3,
+        chunk_stride=3,
+    )
+
+    assert len(dataset) == 3
+    assert dataset.supervised_labels().tolist() == labels[3:]
+
+    _, _, y_0, mask_0, ids_0 = dataset[0]
+    _, _, y_1, mask_1, ids_1 = dataset[1]
+    _, _, y_2, mask_2, ids_2 = dataset[2]
+
+    assert y_0[mask_0].tolist() == [3, 4, 5]
+    assert y_1[mask_1].tolist() == [6, 7, 8]
+    assert y_2[mask_2].tolist() == [9]
+    supervised_ids = [
+        *ids_0[mask_0].tolist(),
+        *ids_1[mask_1].tolist(),
+        *ids_2[mask_2].tolist(),
+    ]
+    assert supervised_ids == list(range(3, 10))
 
 
 def test_lob_dataset_rejects_inconsistent_feature_widths(artifact_dir: Path) -> None:

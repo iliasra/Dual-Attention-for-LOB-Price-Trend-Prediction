@@ -168,8 +168,142 @@ class LOBDataset(Dataset):
         return x_seq, t_seq, y_label
 
 
-def sequence_window_labels(dataset: LOBDataset) -> np.ndarray:
+class LOBTokenChunkDataset(Dataset):
+    """Return non-overlapping supervised tails inside longer causal chunks."""
+
+    def __init__(
+        self,
+        x_paths: list[str],
+        t_paths: list[str],
+        y_paths: list[str],
+        sequence_window: int | None = None,
+        *,
+        loss_warmup_tokens: int,
+        chunk_stride: int,
+        preload_to_memory: bool = False,
+    ) -> None:
+        if sequence_window is None:
+            raise ValueError("sequence_window is required to reconstruct compact feature arrays.")
+        if sequence_window <= 0:
+            raise ValueError("sequence_window must be > 0.")
+        if loss_warmup_tokens < 0 or loss_warmup_tokens >= sequence_window:
+            raise ValueError("loss_warmup_tokens must be in [0, sequence_window).")
+        if chunk_stride <= 0:
+            raise ValueError("chunk_stride must be > 0.")
+
+        self.preload_to_memory = bool(preload_to_memory)
+        mmap_mode = None if self.preload_to_memory else "r"
+        self.X_data = [np.load(path, mmap_mode=mmap_mode) for path in x_paths]
+        self.T_data = [np.load(path, mmap_mode=mmap_mode) for path in t_paths]
+        self.y_data = [np.load(path, mmap_mode=mmap_mode) for path in y_paths]
+        self.sequence_window = int(sequence_window)
+        self.loss_warmup_tokens = int(loss_warmup_tokens)
+        self.chunk_stride = int(chunk_stride)
+        self._validate_arrays()
+
+        self.day_row_offsets = np.cumsum([0, *[len(labels) for labels in self.y_data[:-1]]]).astype(np.int64)
+        self.chunks: list[tuple[int, int, int]] = []
+        for day_idx, labels in enumerate(self.y_data):
+            self.chunks.extend(self._day_chunks(day_idx, len(labels)))
+
+    @property
+    def arrays_nbytes(self) -> int:
+        """Return bytes held by compact feature/time/label arrays."""
+        return int(
+            sum(array.nbytes for array in self.X_data)
+            + sum(array.nbytes for array in self.T_data)
+            + sum(array.nbytes for array in self.y_data)
+        )
+
+    def _validate_arrays(self) -> None:
+        """Check consistency across files length/dimensions."""
+        if not (len(self.X_data) == len(self.T_data) == len(self.y_data)):
+            raise ValueError("x_paths, t_paths, and y_paths must contain the same number of files.")
+
+        expected_num_features: int | None = None
+        for day_idx, (features, times, labels) in enumerate(zip(self.X_data, self.T_data, self.y_data)):
+            if features.ndim != 2:
+                raise ValueError(
+                    f"Feature file at index {day_idx} must contain compact features with shape "
+                    "[num_rows, num_features]."
+                )
+            num_features = int(features.shape[1])
+            if expected_num_features is None:
+                expected_num_features = num_features
+            elif num_features != expected_num_features:
+                raise ValueError(
+                    f"Feature file at index {day_idx} has {num_features} feature columns, "
+                    f"expected {expected_num_features}. All features.npy files must share shape[1]."
+                )
+            if times.ndim != 1:
+                raise ValueError(
+                    f"Time file at index {day_idx} must contain compact times with shape [num_rows]."
+                )
+            if len(features) != len(times) or len(features) != len(labels):
+                raise ValueError(f"Feature, time, and label files at index {day_idx} must contain the same rows.")
+
+    def _day_chunks(self, day_idx: int, num_rows: int) -> list[tuple[int, int, int]]:
+        if num_rows < self.sequence_window:
+            return []
+        last_start = num_rows - self.sequence_window
+        starts = list(range(0, last_start + 1, self.chunk_stride))
+        if not starts or starts[-1] != last_start:
+            starts.append(last_start)
+        unique_starts = sorted(set(starts))
+
+        chunks: list[tuple[int, int, int]] = []
+        covered_until = self.loss_warmup_tokens
+        for start in unique_starts:
+            supervise_from = max(start + self.loss_warmup_tokens, covered_until)
+            supervise_to = start + self.sequence_window
+            if supervise_from >= supervise_to:
+                continue
+            chunks.append((int(day_idx), int(start), int(supervise_from)))
+            covered_until = supervise_to
+        return chunks
+
+    def __len__(self) -> int:
+        return len(self.chunks)
+
+    def __getitem__(
+        self,
+        idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return one chunk, all labels in the chunk, a supervised-token mask, and token ids."""
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index {idx} is out of bounds for dataset of length {len(self)}.")
+
+        day_idx, start, supervise_from = self.chunks[idx]
+        end = start + self.sequence_window
+        row_positions = np.arange(start, end, dtype=np.int64)
+        token_indices = row_positions + int(self.day_row_offsets[day_idx])
+        loss_mask = row_positions >= supervise_from
+
+        x_seq = torch.from_numpy(np.array(self.X_data[day_idx][start:end], dtype=np.float32, copy=True))
+        t_seq = torch.from_numpy(np.array(self.T_data[day_idx][start:end], dtype=np.float32, copy=True))
+        y_seq = torch.from_numpy(np.array(self.y_data[day_idx][start:end], dtype=np.int64, copy=True))
+        mask = torch.from_numpy(loss_mask.astype(np.bool_, copy=False))
+        ids = torch.from_numpy(token_indices.astype(np.int64, copy=False))
+        return x_seq, t_seq, y_seq, mask, ids
+
+    def supervised_labels(self) -> np.ndarray:
+        """Return labels for tokens that are supervised exactly once."""
+        labels_by_day = [
+            np.asarray(labels, dtype=np.int64)[self.loss_warmup_tokens :]
+            for labels in self.y_data
+            if len(labels) >= self.sequence_window
+        ]
+        return np.concatenate(labels_by_day) if labels_by_day else np.asarray([], dtype=np.int64)
+
+    def supervised_class_counts(self, num_classes: int) -> list[int]:
+        labels = self.supervised_labels()
+        return np.bincount(labels, minlength=num_classes)[:num_classes].astype(int).tolist()
+
+
+def sequence_window_labels(dataset: Dataset) -> np.ndarray:
     """Return one label per sliding sequence window."""
+    if hasattr(dataset, "supervised_labels"):
+        return dataset.supervised_labels()  # type: ignore[no-any-return]
     labels_by_day = [
         np.asarray(labels, dtype=np.int64)[dataset.sequence_window - 1 :]
         for labels in dataset.y_data

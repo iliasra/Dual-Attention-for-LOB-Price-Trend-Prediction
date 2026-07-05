@@ -158,6 +158,7 @@ def test_build_train_sampler_uses_configured_sampling_ratio(artifact_dir: Path) 
     np.save(y_path, labels)
     dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=1)
     config = load_config()
+    config.training.sampling.neutral_to_directional_ratio = 2.0
 
     sampler, summary = build_train_sampler(config, dataset, seed=123)
 

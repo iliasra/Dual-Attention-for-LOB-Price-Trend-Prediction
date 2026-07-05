@@ -234,6 +234,44 @@ def test_training_sampling_null_disables_sampler(artifact_dir: Path) -> None:
     assert loaded.training.sampling.neutral_to_directional_ratio is None
 
 
+def test_training_sequence_supervision_token_chunk_settings_are_loaded(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["data"]["sequence_window"] = 256
+    payload["model"]["local_attention_context_tokens"] = 128
+    payload["training"]["sequence_supervision"] = {
+        "mode": "token_chunk",
+        "loss_warmup_tokens": 128,
+        "chunk_stride": 128,
+        "neutral_sampling": "token_mask",
+    }
+
+    config_path = artifact_dir / "token_chunk.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.model.local_attention_context_tokens == 128
+    assert loaded.training.sequence_supervision.token_chunk_enabled
+    assert loaded.training.sequence_supervision.resolved_chunk_stride(loaded.data.sequence_window) == 128
+
+
+def test_training_sequence_supervision_rejects_invalid_values(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"]["sequence_supervision"] = {
+        "mode": "token_chunk",
+        "loss_warmup_tokens": None,
+        "chunk_stride": 128,
+        "neutral_sampling": "token_mask",
+    }
+
+    broken_config_path = artifact_dir / "bad_token_chunk.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="loss_warmup_tokens"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+
 def test_wandb_tracking_defaults_are_loaded() -> None:
     config = load_config()
 

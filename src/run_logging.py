@@ -215,6 +215,9 @@ def model_parameter_summary(model: Any) -> dict[str, int]:
 
 
 def _effective_labels(dataset: Any) -> np.ndarray:
+    if hasattr(dataset, "supervised_labels"):
+        return np.asarray(dataset.supervised_labels(), dtype=np.int64)
+
     if hasattr(dataset, "dataset") and hasattr(dataset, "indices"):
         base_labels = _effective_labels(dataset.dataset)
         indices = np.asarray(list(dataset.indices), dtype=np.int64)

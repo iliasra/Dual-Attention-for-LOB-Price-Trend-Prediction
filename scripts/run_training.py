@@ -6,6 +6,7 @@ from time import perf_counter
 from typing import Any
 import argparse
 import copy
+import math
 import os
 import shutil
 
@@ -24,7 +25,13 @@ from calibration import (
     fit_logit_calibration,
     save_temperature_scaling_artifact,
 )
-from datasets import EpochNeutralDownsamplingSampler, EpochShuffledSampler, LOBDataset, sequence_window_labels
+from datasets import (
+    EpochNeutralDownsamplingSampler,
+    EpochShuffledSampler,
+    LOBDataset,
+    LOBTokenChunkDataset,
+    sequence_window_labels,
+)
 from model import build_model
 from monitoring import epoch_monitor_value as configured_epoch_monitor_value
 from run_logging import (
@@ -114,18 +121,30 @@ def sequence_paths(sequence_dir: Path, split: str) -> tuple[list[str], list[str]
 def build_dataset(
     sequence_dir: Path,
     split: str,
-    sequence_window: int,
+    config: ExperimentConfig,
     *,
     preload_to_memory: bool = False,
-) -> LOBDataset:
+) -> LOBDataset | LOBTokenChunkDataset:
     x_paths, t_paths, y_paths = sequence_paths(sequence_dir, split)
-    dataset = LOBDataset(
-        x_paths,
-        t_paths,
-        y_paths,
-        sequence_window=sequence_window,
-        preload_to_memory=preload_to_memory,
-    )
+    if config.training.sequence_supervision.token_chunk_enabled:
+        stride = config.training.sequence_supervision.resolved_chunk_stride(config.data.sequence_window)
+        dataset = LOBTokenChunkDataset(
+            x_paths,
+            t_paths,
+            y_paths,
+            sequence_window=config.data.sequence_window,
+            loss_warmup_tokens=int(config.training.sequence_supervision.loss_warmup_tokens or 0),
+            chunk_stride=stride,
+            preload_to_memory=preload_to_memory,
+        )
+    else:
+        dataset = LOBDataset(
+            x_paths,
+            t_paths,
+            y_paths,
+            sequence_window=config.data.sequence_window,
+            preload_to_memory=preload_to_memory,
+        )
     if preload_to_memory:
         size_gib = dataset.arrays_nbytes / (1024**3)
         print(f"Preloaded {split} sequence arrays into RAM: {size_gib:.2f} GiB across {len(x_paths)} shard(s).")
@@ -173,17 +192,18 @@ def sequence_time_span_quantile(
     }
 
 
-def resolve_model_max_dt(config: ExperimentConfig, train_dataset: LOBDataset) -> dict[str, float | int]:
+def resolve_model_max_dt(config: ExperimentConfig, train_dataset: LOBDataset | LOBTokenChunkDataset) -> dict[str, float | int]:
+    context_window = config.model.local_attention_context_tokens or config.data.sequence_window
     summary = sequence_time_span_quantile(
         train_dataset.T_data,
-        sequence_window=config.data.sequence_window,
+        sequence_window=context_window,
         quantile=config.model.max_dt_quantile,
     )
     config.model.max_dt = float(summary["max_dt"])
     return summary
 
 
-def sequence_label_values(dataset: LOBDataset) -> np.ndarray:
+def sequence_label_values(dataset: LOBDataset | LOBTokenChunkDataset) -> np.ndarray:
     """Return the label attached to each sequence window in a compact LOBDataset."""
     return sequence_window_labels(dataset)
 
@@ -206,7 +226,7 @@ def class_distribution_from_counts(counts: list[int]) -> dict[str, Any]:
 
 def build_train_sampler(
     config: ExperimentConfig,
-    train_dataset: LOBDataset,
+    train_dataset: LOBDataset | LOBTokenChunkDataset,
     *,
     seed: int,
 ) -> tuple[EpochNeutralDownsamplingSampler | None, dict[str, Any]]:
@@ -214,6 +234,8 @@ def build_train_sampler(
     ratio = config.training.sampling.neutral_to_directional_ratio
     if ratio is None:
         return None, {"enabled": False, "neutral_to_directional_ratio": None}
+    if config.training.sequence_supervision.token_chunk_enabled and isinstance(train_dataset, LOBTokenChunkDataset):
+        return None, {"enabled": False, "neutral_to_directional_ratio": ratio, "mode": "token_mask"}
 
     sampler = EpochNeutralDownsamplingSampler(
         train_dataset,
@@ -224,9 +246,59 @@ def build_train_sampler(
     return sampler, sampler.summary(config.model.num_classes)
 
 
+def resolve_token_mask_sampling(
+    config: ExperimentConfig,
+    train_dataset: LOBDataset | LOBTokenChunkDataset,
+) -> tuple[list[int] | None, dict[str, Any] | None]:
+    """Configure deterministic token-level neutral sampling for token chunks."""
+    ratio = config.training.sampling.neutral_to_directional_ratio
+    if (
+        not config.training.sequence_supervision.token_chunk_enabled
+        or not isinstance(train_dataset, LOBTokenChunkDataset)
+        or ratio is None
+    ):
+        return None, None
+    if not hasattr(train_dataset, "supervised_class_counts"):
+        return None, None
+
+    full_counts = train_dataset.supervised_class_counts(config.model.num_classes)  # type: ignore[attr-defined]
+    down_id = int(config.data.label_mapping[-1])
+    neutral_id = int(config.data.label_mapping[0])
+    up_id = int(config.data.label_mapping[1])
+    directional_count = int(full_counts[down_id] + full_counts[up_id])
+    neutral_count = int(full_counts[neutral_id])
+    sampled_neutral_count = min(neutral_count, math.floor(float(ratio) * directional_count))
+    keep_probability = 0.0 if neutral_count == 0 else float(sampled_neutral_count / neutral_count)
+    config.training.sequence_supervision.neutral_keep_probability = keep_probability
+    sampled_counts = list(full_counts)
+    sampled_counts[neutral_id] = sampled_neutral_count
+    return sampled_counts, {
+        "enabled": True,
+        "mode": "token_mask",
+        "neutral_to_directional_ratio": float(ratio),
+        "neutral_keep_probability": keep_probability,
+        "full_counts": {
+            "total": int(sum(full_counts)),
+            "down": int(full_counts[down_id]),
+            "neutral": neutral_count,
+            "up": int(full_counts[up_id]),
+            "directional": directional_count,
+            "by_class": full_counts,
+        },
+        "sampled_counts_per_epoch": {
+            "total": int(sum(sampled_counts)),
+            "down": int(sampled_counts[down_id]),
+            "neutral": sampled_neutral_count,
+            "up": int(sampled_counts[up_id]),
+            "directional": directional_count,
+            "by_class": sampled_counts,
+        },
+    }
+
+
 def resolve_class_weights(
     config: ExperimentConfig,
-    train_dataset: LOBDataset,
+    train_dataset: LOBDataset | LOBTokenChunkDataset,
     *,
     sampled_class_counts: list[int] | None = None,
 ) -> dict[str, list[float] | list[int] | bool | str]:
@@ -1349,6 +1421,9 @@ def train_fold(
     print(f"Fold '{fold_id}' sequence directory: {fold_sequence_dir}")
     print(f"Fold '{fold_id}' log directory: {fold_log_dir}")
     print(f"Fold '{fold_id}' result directory: {fold_result_dir}")
+    config.training.sequence_supervision.neutral_sampling_seed = fold_seed
+    if 0 in config.data.label_mapping:
+        config.training.sequence_supervision.neutral_class_id = int(config.data.label_mapping[0])
     fold_log_dir.mkdir(parents=True, exist_ok=True)
     fold_result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1391,7 +1466,7 @@ def train_fold(
     train_dataset = build_dataset(
         fold_sequence_dir,
         "train",
-        config.data.sequence_window,
+        config,
         preload_to_memory=config.training.preload_data_to_memory,
     )
     if len(train_dataset) == 0:
@@ -1403,7 +1478,7 @@ def train_fold(
     validation_dataset = build_dataset(
         fold_sequence_dir,
         "validation",
-        config.data.sequence_window,
+        config,
         preload_to_memory=config.training.preload_data_to_memory,
     )
     if len(validation_dataset) == 0:
@@ -1420,7 +1495,7 @@ def train_fold(
         test_dataset = build_dataset(
             fold_sequence_dir,
             "test",
-            config.data.sequence_window,
+            config,
             preload_to_memory=config.training.preload_data_to_memory,
         )
         has_test_split = len(test_dataset) > 0 if fold_has_test_split is None else bool(fold_has_test_split)
@@ -1439,22 +1514,30 @@ def train_fold(
         f"over {max_dt_summary['n_windows']} windows."
     )
     train_sampler, sampling_summary = build_train_sampler(config, train_dataset, seed=fold_seed)
+    token_sampled_class_counts, token_sampling_summary = resolve_token_mask_sampling(config, train_dataset)
+    if token_sampling_summary is not None:
+        sampling_summary = token_sampling_summary
     if sampling_summary.get("enabled"):
         sampled_counts = sampling_summary["sampled_counts_per_epoch"]
         full_counts = sampling_summary["full_counts"]
         print(
             f"Fold '{fold_id}' train sampling enabled: "
             f"neutral_to_directional_ratio={sampling_summary['neutral_to_directional_ratio']}, "
+            f"mode={sampling_summary.get('mode', 'window_sampler')}, "
             f"full_counts={full_counts}, sampled_counts_per_epoch={sampled_counts}."
         )
     else:
-        print(f"Fold '{fold_id}' train sampling disabled.")
+        if sampling_summary.get("mode") == "token_mask":
+            print(
+                f"Fold '{fold_id}' train sampling disabled in the DataLoader; "
+                "token-level neutral masking will be configured when counts are available."
+            )
+        else:
+            print(f"Fold '{fold_id}' train sampling disabled.")
 
-    sampled_class_counts = (
-        None
-        if train_sampler is None
-        else train_sampler.sampled_class_counts(config.model.num_classes)
-    )
+    sampled_class_counts = token_sampled_class_counts
+    if sampled_class_counts is None and train_sampler is not None:
+        sampled_class_counts = train_sampler.sampled_class_counts(config.model.num_classes)
     class_weight_summary = resolve_class_weights(
         config,
         train_dataset,
@@ -1522,7 +1605,7 @@ def train_fold(
         else None
     )
 
-    x_sample, _, _ = train_dataset[0]
+    x_sample = train_dataset[0][0]
     model = build_model(config.model, d_input=x_sample.shape[-1])
     model_parameters = model_parameter_summary(model)
     class_distributions = {

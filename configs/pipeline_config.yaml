@@ -19,7 +19,7 @@ data:
   # NB: time/label col are automatically excluded as they are used
   # to generate specific .npy files for the model to use. 
   feature_exclude_columns: []
-  sequence_window: 128
+  sequence_window: 256
 
 # fallback only used when folds is empty
 dataset_splits:
@@ -266,6 +266,7 @@ model:
   moe_router_noise: 0.01
   moe_load_balancing_weight: 0.01
   classifier_dropout: 0.1
+  local_attention_context_tokens: 128 # null = full causal attention; 128 = current token + 127 previous tokens
   classifier_pooling:
     methods: [last, mean] # allowed elements: last, mean, max; multiple values are concatenated
     last_k: 16 # number of final tokens used by mean/max pooling
@@ -278,8 +279,8 @@ model:
 training:
   device: cuda # allowed: cpu, cuda
   epochs: 30
-  batch_size: 128 # larger A100 batch; reduces DataLoader iterations per epoch
-  eval_batch_size: 256 # evaluation only; no backward pass
+  batch_size: 32 # token_chunk L=256; start conservative on L40S, try 64 after VRAM dry-run
+  eval_batch_size: 128 # evaluation only; no backward pass
   num_workers: 0
   prefetch_factor: null # DataLoader batches prefetched per worker; 16 workers * 4 = up to 64 queued batches
   preload_data_to_memory: true # load compact .npy shards into host RAM before DataLoader workers fork
@@ -297,7 +298,7 @@ training:
     fixed_rate: 0.005 # used by precision_at_fixed_rate; selects top 1% P(down) and top 1% P(up) separately
   persistent_workers: false
   optimizer: adamw # allowed: adam, adamw
-  learning_rate: 5.0e-6
+  learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   focal_gamma: 0.0
   class_weight_beta: 0.25
@@ -328,10 +329,15 @@ training:
     delta: 0.0 # logit-margin gap required to break up/down ties; otherwise neutral
     up_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
     down_precision_floor: null # required only for precision_floor; null for joint_up_down/top_x_quantile
-    up_quantile: 0.01 # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
-    down_quantile: 0.01 # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
+    up_quantile: 0.005 # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
+    down_quantile: 0.005 # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
   sampling:
-    neutral_to_directional_ratio: 20 # faster training: keep all directional samples, sample 2x as many neutrals
+    neutral_to_directional_ratio: 20 # token_chunk: keep all directional tokens, sample neutrals by deterministic mask
+  sequence_supervision:
+    mode: token_chunk # last_window = one label per sliding window; token_chunk = loss on supervised chunk tokens
+    loss_warmup_tokens: 128 # mask the first 128 tokens of each 256-token chunk
+    chunk_stride: 128 # covers each supervised event once
+    neutral_sampling: token_mask # apply neutral_to_directional_ratio as a token-level loss mask
 
 tracking:
   wandb:

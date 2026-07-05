@@ -6,6 +6,7 @@
 *.e[0-9]*
 
 # Results/logs dir
+backtest/*
 results/*
 !results/.gitkeep
 logs/*

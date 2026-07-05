@@ -304,6 +304,39 @@ def test_sequence_dataset_and_model_forward_use_matching_tensor_shapes(artifact_
     assert model.auxiliary_outputs == {}
 
 
+def test_model_forward_tokenwise_outputs_one_logit_per_token() -> None:
+    torch.manual_seed(0)
+    model_config = ModelConfig(
+        d_input=4,
+        d_model=16,
+        feature_embed_dim=4,
+        feature_num_frequencies=3,
+        feature_sigma=1.0,
+        num_heads=2,
+        max_dt=10.0,
+        num_experts=2,
+        top_k=1,
+        num_classes=3,
+        rope_type="hybrid_crope",
+        rope_base=10000,
+        attention_dropout=0.0,
+        moe_dropout=0.0,
+        moe_expansion_factor=2,
+        moe_router_noise=0.0,
+        moe_load_balancing_weight=0.0,
+        classifier_dropout=0.0,
+        local_attention_context_tokens=4,
+    )
+    model = build_model(model_config)
+    x = torch.randn(2, 8, 4)
+    t = torch.arange(8, dtype=torch.float32).repeat(2, 1)
+
+    logits = model(x, t, tokenwise=True)
+
+    assert logits.shape == (2, 8, 3)
+    assert torch.isfinite(logits).all()
+
+
 def test_multi_layer_model_uses_dense_intermediate_blocks_and_final_moe() -> None:
     torch.manual_seed(0)
     model_config = ModelConfig(

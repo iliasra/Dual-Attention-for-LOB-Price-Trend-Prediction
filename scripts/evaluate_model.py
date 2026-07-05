@@ -20,7 +20,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from configuration import ExperimentConfig
-from datasets import LOBDataset
+from datasets import LOBDataset, LOBTokenChunkDataset, sequence_window_labels
 from model import build_model
 from run_logging import (
     format_duration,
@@ -141,10 +141,25 @@ def sequence_paths(sequence_dir: Path, split: str | None = None) -> tuple[list[s
     return x_paths, t_paths, y_paths, split_dir
 
 
-def build_evaluation_dataset(sequence_dir: Path, split: str | None, sequence_window: int) -> tuple[LOBDataset, Path]:
+def build_evaluation_dataset(
+    sequence_dir: Path,
+    split: str | None,
+    config: ExperimentConfig,
+) -> tuple[LOBDataset | LOBTokenChunkDataset, Path]:
     """Build the evaluation dataset from a parent or direct sequence directory."""
     x_paths, t_paths, y_paths, split_dir = sequence_paths(sequence_dir, split)
-    dataset = LOBDataset(x_paths, t_paths, y_paths, sequence_window=sequence_window)
+    if config.training.sequence_supervision.token_chunk_enabled:
+        stride = config.training.sequence_supervision.resolved_chunk_stride(config.data.sequence_window)
+        dataset = LOBTokenChunkDataset(
+            x_paths,
+            t_paths,
+            y_paths,
+            sequence_window=config.data.sequence_window,
+            loss_warmup_tokens=int(config.training.sequence_supervision.loss_warmup_tokens or 0),
+            chunk_stride=stride,
+        )
+    else:
+        dataset = LOBDataset(x_paths, t_paths, y_paths, sequence_window=config.data.sequence_window)
     if len(dataset) == 0:
         raise ValueError(f"No full sequence windows found in {split_dir}.")
     return dataset, split_dir
@@ -503,7 +518,7 @@ def main() -> None:
     dataset, resolved_sequence_path = build_evaluation_dataset(
         args.sequence_dir,
         args.split,
-        config.data.sequence_window,
+        config,
     )
     x_sample, _, _ = dataset[0]
     model = build_model(config.model, d_input=x_sample.shape[-1])
@@ -541,7 +556,7 @@ def main() -> None:
         config=config,
         output_dir=args.output_dir,
         split=split_name,
-        num_samples=len(dataset),
+        num_samples=len(sequence_window_labels(dataset)),
         checkpoint=args.checkpoint,
         config_path=args.config,
         sequence_path=resolved_sequence_path,

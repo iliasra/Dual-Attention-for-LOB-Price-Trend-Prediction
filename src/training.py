@@ -544,15 +544,27 @@ class ExpertUsageAccumulator:
         targets_cpu = targets.detach().to("cpu", dtype=torch.long)
         for class_id in range(num_classes):
             class_mask = targets_cpu == class_id
-            class_sequences = int(class_mask.sum().item())
-            if class_sequences == 0:
+            class_count = int(class_mask.sum().item())
+            if class_count == 0:
                 continue
             class_indices = indices[class_mask]
             class_weights = selected_weights[class_mask]
             class_probabilities = probabilities[class_mask]
-            self.class_sequence_counts[class_id] += class_sequences
-            self.class_token_counts[class_id] += class_sequences * sequence_length
-            self.class_assignment_counts[class_id] += class_sequences * sequence_length * top_k
+            self.class_sequence_counts[class_id] += class_count
+            if class_indices.ndim == 2:
+                self.class_token_counts[class_id] += class_count
+                self.class_assignment_counts[class_id] += class_count * top_k
+                self.class_selected_counts[class_id] += self._counts(class_indices, num_experts)
+                self.class_primary_counts[class_id] += self._counts(class_indices[:, 0], num_experts)
+                self.class_router_probability_sums[class_id] += class_probabilities.sum(dim=0)
+                self.class_selected_weight_sums[class_id].scatter_add_(
+                    0,
+                    class_indices.reshape(-1),
+                    class_weights.reshape(-1),
+                )
+                continue
+            self.class_token_counts[class_id] += class_count * sequence_length
+            self.class_assignment_counts[class_id] += class_count * sequence_length * top_k
             self.class_selected_counts[class_id] += self._counts(class_indices, num_experts)
             self.class_primary_counts[class_id] += self._counts(class_indices[:, :, 0], num_experts)
             self.class_router_probability_sums[class_id] += class_probabilities.sum(dim=(0, 1))
@@ -1072,43 +1084,63 @@ class MovementDirectionAuxiliaryLoss(nn.Module):
         class_logits: torch.Tensor,
         targets: torch.Tensor,
         auxiliary_outputs: dict[str, torch.Tensor] | None,
+        sample_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not auxiliary_outputs:
             return class_logits.new_zeros(())
 
         total = class_logits.new_zeros(())
+        class_logits_flat = class_logits.reshape(-1, class_logits.shape[-1])
+        targets_flat = targets.reshape(-1)
+        if sample_mask is not None:
+            flat_mask = sample_mask.reshape(-1).bool()
+            if not bool(flat_mask.any()):
+                return total
+            class_logits_flat = class_logits_flat[flat_mask]
+            targets_flat = targets_flat[flat_mask]
+        else:
+            flat_mask = None
 
         movement_logit = auxiliary_outputs.get("movement_logit")
         if movement_logit is not None and self.movement_weight > 0.0:
-            movement_target = (targets != self.neutral_id).float()
+            movement_logit_flat = movement_logit.reshape(-1)
+            if flat_mask is not None:
+                movement_logit_flat = movement_logit_flat[flat_mask]
+            movement_target = (targets_flat != self.neutral_id).float()
             total = total + self.movement_weight * F.binary_cross_entropy_with_logits(
-                movement_logit.float(),
+                movement_logit_flat.float(),
                 movement_target,
                 pos_weight=self.movement_pos_weight,
             )
 
         direction_logits = auxiliary_outputs.get("direction_logits")
         if direction_logits is not None and self.direction_weight > 0.0:
-            directional_mask = targets != self.neutral_id
+            direction_logits_flat = direction_logits.reshape(-1, direction_logits.shape[-1])
+            if flat_mask is not None:
+                direction_logits_flat = direction_logits_flat[flat_mask]
+            directional_mask = targets_flat != self.neutral_id
             if bool(directional_mask.any()):
-                directional_targets_raw = targets[directional_mask]
+                directional_targets_raw = targets_flat[directional_mask]
                 direction_targets = torch.where(
                     directional_targets_raw == self.up_id,
                     torch.zeros_like(directional_targets_raw),
                     torch.ones_like(directional_targets_raw),
                 )
                 total = total + self.direction_weight * F.cross_entropy(
-                    direction_logits[directional_mask].float(),
+                    direction_logits_flat[directional_mask].float(),
                     direction_targets.long(),
                     weight=self.direction_class_weights,
                 )
 
         if movement_logit is not None and self.consistency_weight > 0.0:
-            probabilities = torch.softmax(class_logits.float(), dim=-1)
+            movement_logit_flat = movement_logit.reshape(-1)
+            if flat_mask is not None:
+                movement_logit_flat = movement_logit_flat[flat_mask]
+            probabilities = torch.softmax(class_logits_flat.float(), dim=-1)
             main_movement_prob = (
                 probabilities[:, self.up_id] + probabilities[:, self.down_id]
             ).clamp(1e-6, 1.0 - 1e-6)
-            aux_movement_prob = torch.sigmoid(movement_logit.float()).clamp(1e-6, 1.0 - 1e-6)
+            aux_movement_prob = torch.sigmoid(movement_logit_flat.float()).clamp(1e-6, 1.0 - 1e-6)
             total = total + self.consistency_weight * F.mse_loss(
                 aux_movement_prob,
                 main_movement_prob.detach(),
@@ -1167,6 +1199,7 @@ class LobTrainer:
         model: nn.Module,
         logits: torch.Tensor,
         targets: torch.Tensor,
+        sample_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.auxiliary_criterion is None:
             return logits.new_zeros(())
@@ -1174,12 +1207,137 @@ class LobTrainer:
             class_logits=logits,
             targets=targets,
             auxiliary_outputs=getattr(model, "auxiliary_outputs", None),
+            sample_mask=sample_mask,
         )
 
     def _amp_context(self):
         if self.amp_dtype is None:
             return torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled)
         return torch.amp.autocast(device_type=self.device.type, enabled=self.amp_enabled, dtype=self.amp_dtype)
+
+    @property
+    def _token_chunk_enabled(self) -> bool:
+        return bool(getattr(self.config.sequence_supervision, "token_chunk_enabled", False))
+
+    def _unpack_batch(
+        self,
+        batch: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        if not isinstance(batch, (tuple, list)):
+            raise TypeError("Training batches must be tuples or lists.")
+        if len(batch) == 3:
+            x_batch, t_batch, y_batch = batch
+            return x_batch, t_batch, y_batch, None, None
+        if len(batch) >= 5:
+            x_batch, t_batch, y_batch, loss_mask, token_indices = batch[:5]
+            return x_batch, t_batch, y_batch, loss_mask, token_indices
+        raise ValueError("Training batches must contain either 3 or 5 tensors.")
+
+    def _move_batch_to_device(
+        self,
+        batch: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        x_batch, t_batch, y_batch, loss_mask, token_indices = self._unpack_batch(batch)
+        x_batch = x_batch.to(self.device, non_blocking=True)
+        t_batch = t_batch.to(self.device, non_blocking=True)
+        y_batch = y_batch.to(self.device, non_blocking=True)
+        if loss_mask is not None:
+            loss_mask = loss_mask.to(self.device, non_blocking=True).bool()
+        if token_indices is not None:
+            token_indices = token_indices.to(self.device, non_blocking=True).long()
+        return x_batch, t_batch, y_batch, loss_mask, token_indices
+
+    def _forward_model(
+        self,
+        model: nn.Module,
+        x_batch: torch.Tensor,
+        t_batch: torch.Tensor,
+        *,
+        tokenwise: bool | None = None,
+    ) -> torch.Tensor:
+        use_tokenwise = self._token_chunk_enabled if tokenwise is None else bool(tokenwise)
+        try:
+            return model(x_batch, t_batch, tokenwise=use_tokenwise)
+        except TypeError:
+            if use_tokenwise:
+                raise
+            return model(x_batch, t_batch)
+
+    def _deterministic_neutral_mask(
+        self,
+        targets: torch.Tensor,
+        base_mask: torch.Tensor,
+        token_indices: torch.Tensor | None,
+        *,
+        epoch_number: int | None,
+    ) -> torch.Tensor:
+        ratio = self.config.sampling.neutral_to_directional_ratio
+        supervision = self.config.sequence_supervision
+        if (
+            ratio is None
+            or not self._token_chunk_enabled
+            or supervision.neutral_sampling != "token_mask"
+        ):
+            return base_mask
+
+        neutral_class_id = int(supervision.neutral_class_id)
+        directional_mask = base_mask & (targets != neutral_class_id)
+        neutral_mask = base_mask & (targets == neutral_class_id)
+        if not bool(neutral_mask.any()):
+            return base_mask
+
+        keep_probability = supervision.neutral_keep_probability
+        if keep_probability is None:
+            neutral_count = int(neutral_mask.sum().item())
+            directional_count = int(directional_mask.sum().item())
+            keep_probability = min(1.0, float(ratio) * directional_count / max(neutral_count, 1))
+        keep_probability = float(keep_probability)
+        if keep_probability >= 1.0:
+            return base_mask
+        if keep_probability <= 0.0:
+            sampled_neutral_mask = torch.zeros_like(neutral_mask)
+        else:
+            if token_indices is None:
+                token_indices = torch.arange(targets.numel(), device=targets.device, dtype=torch.long).reshape_as(targets)
+            epoch = int(epoch_number or 0)
+            seed = int(supervision.neutral_sampling_seed)
+            values = token_indices.to(torch.int64)
+            mixed = (values + 1 + seed + epoch * 1_000_003) * 48_271
+            random_values = torch.remainder(mixed, 2_147_483_647).to(torch.float64) / 2_147_483_647.0
+            sampled_neutral_mask = neutral_mask & (random_values < keep_probability)
+        keep_mask = directional_mask | sampled_neutral_mask
+        if not bool(keep_mask.any()) and bool(base_mask.any()):
+            first_index = torch.nonzero(base_mask.reshape(-1), as_tuple=False)[0, 0]
+            keep_mask = keep_mask.reshape(-1)
+            keep_mask[first_index] = True
+            keep_mask = keep_mask.reshape_as(base_mask)
+        return keep_mask
+
+    def _supervised_logits_targets(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        loss_mask: torch.Tensor | None,
+        token_indices: torch.Tensor | None,
+        *,
+        training: bool,
+        epoch_number: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if not self._token_chunk_enabled or loss_mask is None:
+            return logits.reshape(-1, logits.shape[-1]), targets.reshape(-1), None
+        if loss_mask is None:
+            raise ValueError("token_chunk supervision requires each batch to include a loss_mask tensor.")
+        sample_mask = loss_mask.bool()
+        if training:
+            sample_mask = self._deterministic_neutral_mask(
+                targets,
+                sample_mask,
+                token_indices,
+                epoch_number=epoch_number,
+            )
+        if not bool(sample_mask.any()):
+            raise ValueError("token_chunk supervision mask selected no tokens for this batch.")
+        return logits[sample_mask], targets[sample_mask].long(), sample_mask
 
     @staticmethod
     def _set_epoch(data_loader: Iterable, epoch: int) -> None:
@@ -1327,6 +1485,11 @@ class LobTrainer:
                 ],
                 "rng_state": self._rng_state(),
                 "wandb_run_id": wandb_run_id,
+                "sequence_supervision": {
+                    "mode": self.config.sequence_supervision.mode,
+                    "loss_warmup_tokens": self.config.sequence_supervision.loss_warmup_tokens,
+                    "chunk_stride": self.config.sequence_supervision.chunk_stride,
+                },
             },
             path,
         )
@@ -1341,6 +1504,15 @@ class LobTrainer:
     ) -> dict[str, Any]:
         """Load a complete training state and restore model/optimizer components."""
         state = torch.load(path, map_location=self.device, weights_only=False)
+        saved_supervision = state.get("sequence_supervision")
+        if isinstance(saved_supervision, dict):
+            saved_mode = str(saved_supervision.get("mode", "last_window"))
+            if saved_mode != self.config.sequence_supervision.mode:
+                raise ValueError(
+                    "Cannot resume training_state_latest.pth with a different "
+                    "training.sequence_supervision.mode "
+                    f"({saved_mode!r} != {self.config.sequence_supervision.mode!r})."
+                )
         model.load_state_dict(state["model_state_dict"])
         optimizer.load_state_dict(state["optimizer_state_dict"])
         scheduler.load_state_dict(state["scheduler_state_dict"])
@@ -1599,7 +1771,7 @@ class LobTrainer:
             last_batch_in_epoch = 0
             progress = tqdm(train_loader, desc=f"Epoch {epoch_number}/{self.config.epochs} [Train]")
             last_step_end = profiler.now() if profiler.enabled else perf_counter()
-            for batch_in_epoch, (x_batch, t_batch, y_batch) in enumerate(progress, start=1):
+            for batch_in_epoch, batch in enumerate(progress, start=1):
                 if epoch_number == start_epoch_number and batch_in_epoch <= resume_skip_batches:
                     last_step_end = profiler.now() if profiler.enabled else perf_counter()
                     continue
@@ -1615,9 +1787,7 @@ class LobTrainer:
                     step_start = 0.0
                     stage_start = 0.0
                 last_batch_in_epoch = batch_in_epoch
-                x_batch = x_batch.to(self.device, non_blocking=True)
-                t_batch = t_batch.to(self.device, non_blocking=True)
-                y_batch = y_batch.to(self.device, non_blocking=True)
+                x_batch, t_batch, y_batch, loss_mask, token_indices = self._move_batch_to_device(batch)
                 if profiler.enabled:
                     stage_end = profiler.now()
                     timings["h2d"] = stage_end - stage_start
@@ -1629,9 +1799,17 @@ class LobTrainer:
                     stage_start = stage_end
 
                 with self._amp_context():
-                    logits = model(x_batch, t_batch)
-                    base_loss = criterion(logits, y_batch)
-                    aux_loss = self._auxiliary_loss(model, logits, y_batch)
+                    logits = self._forward_model(model, x_batch, t_batch, tokenwise=loss_mask is not None)
+                    supervised_logits, supervised_targets, sample_mask = self._supervised_logits_targets(
+                        logits,
+                        y_batch,
+                        loss_mask,
+                        token_indices,
+                        training=True,
+                        epoch_number=epoch_number,
+                    )
+                    base_loss = criterion(supervised_logits, supervised_targets)
+                    aux_loss = self._auxiliary_loss(model, logits, y_batch, sample_mask=sample_mask)
                     loss = base_loss + aux_loss
                     moe_loss = getattr(model, "moe_load_balancing_loss", None)
                     if moe_loss is not None:
@@ -1669,12 +1847,13 @@ class LobTrainer:
                     timings["optimizer_step"] = stage_end - stage_start
                     stage_start = stage_end
 
-                interval_metrics.update(logits, y_batch)
+                interval_metrics.update(supervised_logits, supervised_targets)
                 step_loss = float(loss.item())
                 interval_loss += step_loss
                 interval_batches += 1
                 global_step += 1
-                batch_size = int(y_batch.shape[0])
+                batch_size = int(supervised_targets.numel())
+                chunk_count = int(x_batch.shape[0])
                 if profiler.enabled:
                     stage_end = profiler.now()
                     timings["metrics_update"] = stage_end - stage_start
@@ -1689,6 +1868,8 @@ class LobTrainer:
                         "train_auxiliary_loss_step": float(aux_loss.item()),
                         "learning_rate": float(optimizer.param_groups[0]["lr"]),
                         "gradient_norm": float(grad_norm.item()),
+                        "supervised_tokens_per_step": int(supervised_targets.numel()),
+                        "chunks_per_step": chunk_count,
                     }
                     if moe_loss is not None:
                         step_payload["train_moe_loss_step"] = float(moe_loss.item())
@@ -1854,7 +2035,7 @@ class LobTrainer:
         profile_enabled = profiler is not None and profiler.enabled
         last_step_end = profiler.now() if profile_enabled else perf_counter()
 
-        for x_batch, t_batch, y_batch in tqdm(data_loader, desc=description):
+        for batch in tqdm(data_loader, desc=description):
             if profile_enabled and profiler is not None:
                 batch_ready = profiler.now()
                 timings = {
@@ -1866,9 +2047,7 @@ class LobTrainer:
                 timings = {}
                 step_start = 0.0
                 stage_start = 0.0
-            x_batch = x_batch.to(self.device, non_blocking=True)
-            t_batch = t_batch.to(self.device, non_blocking=True)
-            y_batch = y_batch.to(self.device, non_blocking=True)
+            x_batch, t_batch, y_batch, loss_mask, token_indices = self._move_batch_to_device(batch)
             if profile_enabled and profiler is not None:
                 stage_end = profiler.now()
                 timings["h2d"] = stage_end - stage_start
@@ -1880,9 +2059,17 @@ class LobTrainer:
                 stage_start = stage_end
 
             with self._amp_context():
-                logits = model(x_batch, t_batch)
-                base_loss = criterion(logits, y_batch)
-                aux_loss = self._auxiliary_loss(model, logits, y_batch)
+                logits = self._forward_model(model, x_batch, t_batch, tokenwise=loss_mask is not None)
+                supervised_logits, supervised_targets, sample_mask = self._supervised_logits_targets(
+                    logits,
+                    y_batch,
+                    loss_mask,
+                    token_indices,
+                    training=True,
+                    epoch_number=epoch_number,
+                )
+                base_loss = criterion(supervised_logits, supervised_targets)
+                aux_loss = self._auxiliary_loss(model, logits, y_batch, sample_mask=sample_mask)
                 loss = base_loss + aux_loss
                 moe_loss = getattr(model, "moe_load_balancing_loss", None)  # load-balancing for MoE training
                 if moe_loss is not None:  # add MoE auxiliary loss only when the model exposes it
@@ -1921,11 +2108,12 @@ class LobTrainer:
                 timings["optimizer_step"] = stage_end - stage_start
                 stage_start = stage_end
 
-            metrics.update(logits, y_batch)
+            metrics.update(supervised_logits, supervised_targets)
             step_loss = float(loss.item())
             total_loss += step_loss
             batch_count += 1
-            batch_size = int(y_batch.shape[0])
+            batch_size = int(supervised_targets.numel())
+            chunk_count = int(x_batch.shape[0])
             if profile_enabled and profiler is not None:
                 stage_end = profiler.now()
                 timings["metrics_update"] = stage_end - stage_start
@@ -1940,6 +2128,8 @@ class LobTrainer:
                     "train_auxiliary_loss_step": float(aux_loss.item()),
                     "learning_rate": float(optimizer.param_groups[0]["lr"]),
                     "gradient_norm": float(grad_norm.item()),
+                    "supervised_tokens_per_step": int(supervised_targets.numel()),
+                    "chunks_per_step": chunk_count,
                 }
                 if moe_loss is not None:
                     step_payload["train_moe_loss_step"] = float(moe_loss.item())
@@ -2000,20 +2190,28 @@ class LobTrainer:
         prediction_outputs = PredictionOutputAccumulator() if collect_outputs else None
 
         with torch.no_grad():
-            for x_batch, t_batch, y_batch in tqdm(data_loader, desc=description):
-                x_batch = x_batch.to(self.device, non_blocking=True)
-                t_batch = t_batch.to(self.device, non_blocking=True)
-                y_batch = y_batch.to(self.device, non_blocking=True)
+            for batch in tqdm(data_loader, desc=description):
+                x_batch, t_batch, y_batch, loss_mask, token_indices = self._move_batch_to_device(batch)
 
-                logits = model(x_batch, t_batch)
-                total_loss += float(criterion(logits, y_batch).item())
-                metrics.update(logits, y_batch)
+                logits = self._forward_model(model, x_batch, t_batch, tokenwise=loss_mask is not None)
+                supervised_logits, supervised_targets, sample_mask = self._supervised_logits_targets(
+                    logits,
+                    y_batch,
+                    loss_mask,
+                    token_indices,
+                    training=False,
+                )
+                total_loss += float(criterion(supervised_logits, supervised_targets).item())
+                metrics.update(supervised_logits, supervised_targets)
                 if prediction_outputs is not None:
-                    prediction_outputs.update(logits, y_batch)
+                    prediction_outputs.update(supervised_logits, supervised_targets)
                 if expert_usage is not None:
+                    expert_targets = y_batch
+                    if sample_mask is not None:
+                        expert_targets = y_batch.masked_fill(~sample_mask, -1)
                     expert_usage.update(
                         getattr(model, "moe_routing", None),
-                        y_batch,
+                        expert_targets,
                         num_classes=int(logits.shape[-1]),
                     )
                 batch_count += 1

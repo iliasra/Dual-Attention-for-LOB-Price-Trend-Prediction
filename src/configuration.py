@@ -166,6 +166,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "moe_router_noise": None,
         "moe_load_balancing_weight": None,
         "classifier_dropout": None,
+        "local_attention_context_tokens": None,
         "classifier_pooling": {
             "methods": None,
             "last_k": None,
@@ -239,6 +240,12 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "sampling": {
             "neutral_to_directional_ratio": None,
         },
+        "sequence_supervision": {
+            "mode": None,
+            "loss_warmup_tokens": None,
+            "chunk_stride": None,
+            "neutral_sampling": None,
+        },
     },
 }
 
@@ -249,6 +256,7 @@ OPTIONAL_CONFIG_KEYS = {
     "preprocessing.price_static.tau_clip",
     "preprocessing.price_static.tau_max",
     "model.max_dt",
+    "model.local_attention_context_tokens",
     "model.num_layers",
     "model.latent_spatial_embed_dim",
     "model.use_moe",
@@ -263,6 +271,8 @@ OPTIONAL_CONFIG_KEYS = {
     "training.monitor_params.lambda_ece",
     "training.monitor_params.lambda_rate",
     "training.monitor_params.fixed_rate",
+    "training.prefetch_factor",
+    "training.preload_data_to_memory",
     "training.top_k_checkpoints",
     "training.validate_every_n_batches",
     "training.auxiliary_losses",
@@ -307,6 +317,11 @@ OPTIONAL_CONFIG_KEYS = {
     "training.directional_thresholds.up_quantile",
     "training.directional_thresholds.down_quantile",
     "training.sampling",
+    "training.sequence_supervision",
+    "training.sequence_supervision.mode",
+    "training.sequence_supervision.loss_warmup_tokens",
+    "training.sequence_supervision.chunk_stride",
+    "training.sequence_supervision.neutral_sampling",
 }
 LEGACY_IGNORED_CONFIG_KEYS = {
     "model.auxiliary_heads.dropout",
@@ -338,6 +353,8 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
         "precision_at_fixed_rate",
     },
     "training.monitor_mode": {"min", "max"},
+    "training.sequence_supervision.mode": {"last_window", "token_chunk"},
+    "training.sequence_supervision.neutral_sampling": {"none", "token_mask"},
 }
 
 
@@ -1491,6 +1508,7 @@ class ModelConfig:
     use_moe: bool = True
     max_dt_quantile: float = 95.0
     max_dt: float | None = None
+    local_attention_context_tokens: int | None = None
 
     def __post_init__(self) -> None:
         """Check model-derived scalar settings.
@@ -1513,6 +1531,8 @@ class ModelConfig:
             raise ValueError("model.max_dt_quantile must be in [0, 100].")
         if self.max_dt is not None and self.max_dt < 0.0:
             raise ValueError("model.max_dt must be >= 0 when resolved.")
+        if self.local_attention_context_tokens is not None and self.local_attention_context_tokens <= 0:
+            raise ValueError("model.local_attention_context_tokens must be > 0 or null.")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ModelConfig":
@@ -1545,6 +1565,10 @@ class ModelConfig:
             use_moe=_optional_bool(payload.get("use_moe"), "model.use_moe", default=True),
             max_dt_quantile=float(_require_explicit_value(payload["max_dt_quantile"], "model.max_dt_quantile")),
             max_dt=_optional_float(payload.get("max_dt")),
+            local_attention_context_tokens=_optional_int(
+                payload.get("local_attention_context_tokens"),
+                "model.local_attention_context_tokens",
+            ),
         )
 
     def resolved_latent_spatial_embed_dim(self) -> int:
@@ -1594,6 +1618,108 @@ class TrainingSamplingConfig:
             return cls(neutral_to_directional_ratio=None)
         return cls(
             neutral_to_directional_ratio=_optional_float(payload.get("neutral_to_directional_ratio")),
+        )
+
+
+def _optional_positive_int_or_auto(value: Any, dotted_path: str) -> int | str | None:
+    """Parse optional positive integer settings that may use the 'auto' sentinel."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"", "none", "null"}:
+            return None
+        if lowered == "auto":
+            return lowered
+    parsed = _required_int(value, dotted_path)
+    if parsed <= 0:
+        raise ValueError(f"{dotted_path} must be > 0, null, or 'auto'.")
+    return parsed
+
+
+@dataclass(slots=True)
+class TrainingSequenceSupervisionConfig:
+    mode: str = "last_window"
+    loss_warmup_tokens: int | None = None
+    chunk_stride: int | str | None = None
+    neutral_sampling: str = "none"
+    neutral_keep_probability: float | None = None
+    neutral_sampling_seed: int = 0
+    neutral_class_id: int = 1
+
+    def __post_init__(self) -> None:
+        """Validate optional token-wise supervision settings."""
+        self.mode = str(self.mode).strip().lower()
+        self.neutral_sampling = str(self.neutral_sampling).strip().lower()
+        if self.mode not in {"last_window", "token_chunk"}:
+            raise ValueError("training.sequence_supervision.mode must be 'last_window' or 'token_chunk'.")
+        if self.neutral_sampling not in {"none", "token_mask"}:
+            raise ValueError("training.sequence_supervision.neutral_sampling must be 'none' or 'token_mask'.")
+        if self.loss_warmup_tokens is not None and self.loss_warmup_tokens < 0:
+            raise ValueError("training.sequence_supervision.loss_warmup_tokens must be >= 0 or null.")
+        if isinstance(self.chunk_stride, int) and self.chunk_stride <= 0:
+            raise ValueError("training.sequence_supervision.chunk_stride must be > 0, null, or 'auto'.")
+        if self.chunk_stride not in {None, "auto"} and not isinstance(self.chunk_stride, int):
+            raise ValueError("training.sequence_supervision.chunk_stride must be > 0, null, or 'auto'.")
+        if self.mode == "last_window":
+            if self.neutral_sampling == "token_mask":
+                raise ValueError(
+                    "training.sequence_supervision.neutral_sampling='token_mask' requires mode='token_chunk'."
+                )
+        if self.mode == "token_chunk":
+            if self.loss_warmup_tokens is None:
+                raise ValueError(
+                    "training.sequence_supervision.loss_warmup_tokens must be set when mode is token_chunk."
+                )
+            if self.neutral_sampling == "none":
+                self.neutral_sampling = "token_mask"
+        if self.neutral_keep_probability is not None and not 0.0 <= self.neutral_keep_probability <= 1.0:
+            raise ValueError("training.sequence_supervision.neutral_keep_probability must be in [0, 1] or null.")
+        if self.neutral_sampling_seed < 0:
+            raise ValueError("training.sequence_supervision.neutral_sampling_seed must be >= 0.")
+        if self.neutral_class_id < 0:
+            raise ValueError("training.sequence_supervision.neutral_class_id must be >= 0.")
+
+    @property
+    def token_chunk_enabled(self) -> bool:
+        return self.mode == "token_chunk"
+
+    def resolved_chunk_stride(self, sequence_window: int) -> int:
+        """Return the stride that covers the supervised tail once per chunk."""
+        if not self.token_chunk_enabled:
+            return 1
+        if self.loss_warmup_tokens is None:
+            raise ValueError("loss_warmup_tokens is required for token_chunk supervision.")
+        if not 0 <= self.loss_warmup_tokens < sequence_window:
+            raise ValueError(
+                "training.sequence_supervision.loss_warmup_tokens must be in [0, data.sequence_window)."
+            )
+        if self.chunk_stride in {None, "auto"}:
+            return int(sequence_window - self.loss_warmup_tokens)
+        return int(self.chunk_stride)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingSequenceSupervisionConfig":
+        """Build token-wise supervision settings from YAML."""
+        if payload is None:
+            return cls()
+        unexpected = sorted(set(payload) - {"mode", "loss_warmup_tokens", "chunk_stride", "neutral_sampling"})
+        if unexpected:
+            raise ValueError(
+                "Invalid experiment config; unexpected key(s) in training.sequence_supervision: "
+                f"{unexpected}"
+            )
+        return cls(
+            mode=str(payload.get("mode", "last_window")),
+            loss_warmup_tokens=_optional_int(
+                payload.get("loss_warmup_tokens"),
+                "training.sequence_supervision.loss_warmup_tokens",
+            ),
+            chunk_stride=_optional_positive_int_or_auto(
+                payload.get("chunk_stride"),
+                "training.sequence_supervision.chunk_stride",
+            ),
+            neutral_sampling=str(payload.get("neutral_sampling", "none")),
         )
 
 
@@ -1897,6 +2023,7 @@ class TrainingConfig:
     temperature_scaling: TrainingTemperatureScalingConfig
     directional_thresholds: TrainingDirectionalThresholdConfig
     sampling: TrainingSamplingConfig
+    sequence_supervision: TrainingSequenceSupervisionConfig
     class_weights: list[float] | None = None
 
     def __post_init__(self) -> None:
@@ -2095,6 +2222,9 @@ class TrainingConfig:
                 payload.get("directional_thresholds"),
             ),
             sampling=TrainingSamplingConfig.from_dict(payload.get("sampling")),
+            sequence_supervision=TrainingSequenceSupervisionConfig.from_dict(
+                payload.get("sequence_supervision"),
+            ),
         )
 
 
@@ -2171,6 +2301,10 @@ class ExperimentConfig:
     model: ModelConfig
     training: TrainingConfig
     tracking: TrackingConfig
+
+    def __post_init__(self) -> None:
+        if self.training.sequence_supervision.token_chunk_enabled:
+            self.training.sequence_supervision.resolved_chunk_stride(self.data.sequence_window)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ExperimentConfig":
