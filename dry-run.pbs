@@ -13,6 +13,12 @@ RESULT_PATH="$TMPDIR/$RESULT_FILE"
 HOME_RESULT_PATH="$HOME/$RESULT_FILE"
 LOG_FIFO="$TMPDIR/dry_run_log_fifo.$$"
 
+CONFIG_PATH="${DRY_RUN_CONFIG:-configs/pipeline_config.yaml}"
+DRY_RUN_D_INPUT="${DRY_RUN_D_INPUT:-214}"
+DRY_RUN_BATCH_SIZE="${DRY_RUN_BATCH_SIZE:-}"
+DRY_RUN_STEPS="${DRY_RUN_STEPS:-10}"
+DRY_RUN_WARMUP="${DRY_RUN_WARMUP:-2}"
+
 format_duration() {
   total_seconds="$1"
   hours=$((total_seconds / 3600))
@@ -85,6 +91,11 @@ echo "HOME=$HOME"
 echo "PBS_O_WORKDIR=$PBS_O_WORKDIR"
 echo "TMPDIR=$TMPDIR"
 echo "PWD=$(pwd)"
+echo "CONFIG_PATH=$CONFIG_PATH"
+echo "DRY_RUN_D_INPUT=$DRY_RUN_D_INPUT"
+echo "DRY_RUN_BATCH_SIZE=${DRY_RUN_BATCH_SIZE:-config default}"
+echo "DRY_RUN_STEPS=$DRY_RUN_STEPS"
+echo "DRY_RUN_WARMUP=$DRY_RUN_WARMUP"
 
 set +u
 eval "$($HOME/miniforge3/bin/conda shell.bash hook)"
@@ -124,12 +135,44 @@ echo "===== IMPORT TEST ====="
 PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python -c "import yaml; from configuration import load_config; from model import build_model; print('imports ok')"
 
 echo
-echo "===== RUNNING VRAM DRY RUN ====="
-PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python scripts/vram_dry_run.py \
-  --batch-size 128 \
-  --sequence-length 100 \
-  --num-features 214 \
-  --steps 5
+echo "===== LOADED CONFIG SUMMARY ====="
+PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python - "$CONFIG_PATH" "$DRY_RUN_D_INPUT" <<'PY'
+import sys
+from pathlib import Path
+
+from configuration import ExperimentConfig
+
+config_path = Path(sys.argv[1])
+d_input = int(sys.argv[2])
+config = ExperimentConfig.from_yaml(config_path)
+
+print(f"config={config_path}")
+print(f"data.sequence_window={config.data.sequence_window}")
+print(f"model.d_input={config.model.d_input} (dry-run override d_input={d_input})")
+print(f"model.d_model={config.model.d_model}")
+print(f"model.local_attention_context_tokens={config.model.local_attention_context_tokens}")
+print(f"training.device={config.training.device}")
+print(f"training.batch_size={config.training.batch_size}")
+print(f"training.eval_batch_size={config.training.eval_batch_size}")
+print(f"training.use_amp={config.training.use_amp}")
+print(f"training.sequence_supervision.mode={config.training.sequence_supervision.mode}")
+print(f"training.sequence_supervision.loss_warmup_tokens={config.training.sequence_supervision.loss_warmup_tokens}")
+print(f"training.sequence_supervision.chunk_stride={config.training.sequence_supervision.chunk_stride}")
+PY
+
+echo
+echo "===== RUNNING TOKEN-CHUNK BENCHMARK ====="
+BENCHMARK_BATCH_ARGS=()
+if [ -n "$DRY_RUN_BATCH_SIZE" ]; then
+  BENCHMARK_BATCH_ARGS=(--batch-size "$DRY_RUN_BATCH_SIZE")
+fi
+PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" python scripts/benchmark_token_chunk.py \
+  --config "$CONFIG_PATH" \
+  --device cuda \
+  "${BENCHMARK_BATCH_ARGS[@]}" \
+  --d-input "$DRY_RUN_D_INPUT" \
+  --steps "$DRY_RUN_STEPS" \
+  --warmup "$DRY_RUN_WARMUP"
 
 echo
 echo "===== JOB COMPLETED OK ====="
