@@ -177,7 +177,7 @@ class FocalLoss(nn.Module):
         self.gamma = gamma
         self.reduction = reduction
 
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def per_sample_loss(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         cross_entropy = F.cross_entropy(inputs, targets, reduction="none")
         pt = torch.exp(-cross_entropy)
         focal_loss = ((1 - pt) ** self.gamma) * cross_entropy
@@ -186,6 +186,10 @@ class FocalLoss(nn.Module):
             alpha_t = self.alpha[targets]
             focal_loss = alpha_t * focal_loss
 
+        return focal_loss
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        focal_loss = self.per_sample_loss(inputs, targets)
         if self.reduction == "mean":
             return focal_loss.mean()
         if self.reduction == "sum":
@@ -439,6 +443,7 @@ class EvaluationResult:
     expert_usage: dict[str, Any] | None = None
     prediction_outputs: dict[str, Any] | None = None
     batch_count: int = 0
+    optimizer_step_count: int = 0
 
 
 class ExpertUsageAccumulator:
@@ -1085,6 +1090,7 @@ class MovementDirectionAuxiliaryLoss(nn.Module):
         targets: torch.Tensor,
         auxiliary_outputs: dict[str, torch.Tensor] | None,
         sample_mask: torch.Tensor | None = None,
+        sample_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not auxiliary_outputs:
             return class_logits.new_zeros(())
@@ -1092,6 +1098,7 @@ class MovementDirectionAuxiliaryLoss(nn.Module):
         total = class_logits.new_zeros(())
         class_logits_flat = class_logits.reshape(-1, class_logits.shape[-1])
         targets_flat = targets.reshape(-1)
+        weights_flat = None
         if sample_mask is not None:
             flat_mask = sample_mask.reshape(-1).bool()
             if not bool(flat_mask.any()):
@@ -1100,6 +1107,21 @@ class MovementDirectionAuxiliaryLoss(nn.Module):
             targets_flat = targets_flat[flat_mask]
         else:
             flat_mask = None
+        if sample_weights is not None:
+            if sample_weights.shape == targets.shape:
+                weights_flat = sample_weights.reshape(-1).to(dtype=class_logits.dtype, device=class_logits.device)
+                if flat_mask is not None:
+                    weights_flat = weights_flat[flat_mask]
+            else:
+                weights_flat = sample_weights.reshape(-1).to(dtype=class_logits.dtype, device=class_logits.device)
+            if weights_flat.numel() != targets_flat.numel():
+                raise ValueError("sample_weights must match the selected auxiliary-loss targets.")
+
+        def weighted_mean(values: torch.Tensor, weights: torch.Tensor | None) -> torch.Tensor:
+            if weights is None:
+                return values.mean()
+            weights = weights.to(dtype=values.dtype, device=values.device)
+            return (values * weights).sum() / weights.sum().clamp_min(1.0)
 
         movement_logit = auxiliary_outputs.get("movement_logit")
         if movement_logit is not None and self.movement_weight > 0.0:
@@ -1107,11 +1129,13 @@ class MovementDirectionAuxiliaryLoss(nn.Module):
             if flat_mask is not None:
                 movement_logit_flat = movement_logit_flat[flat_mask]
             movement_target = (targets_flat != self.neutral_id).float()
-            total = total + self.movement_weight * F.binary_cross_entropy_with_logits(
+            movement_loss = F.binary_cross_entropy_with_logits(
                 movement_logit_flat.float(),
                 movement_target,
                 pos_weight=self.movement_pos_weight,
+                reduction="none",
             )
+            total = total + self.movement_weight * weighted_mean(movement_loss, weights_flat)
 
         direction_logits = auxiliary_outputs.get("direction_logits")
         if direction_logits is not None and self.direction_weight > 0.0:
@@ -1126,11 +1150,26 @@ class MovementDirectionAuxiliaryLoss(nn.Module):
                     torch.zeros_like(directional_targets_raw),
                     torch.ones_like(directional_targets_raw),
                 )
-                total = total + self.direction_weight * F.cross_entropy(
+                direction_loss = F.cross_entropy(
                     direction_logits_flat[directional_mask].float(),
                     direction_targets.long(),
                     weight=self.direction_class_weights,
+                    reduction="none",
                 )
+                direction_weights = None if weights_flat is None else weights_flat[directional_mask]
+                if self.direction_class_weights is None:
+                    direction_denominator_weights = torch.ones_like(direction_loss)
+                else:
+                    direction_denominator_weights = self.direction_class_weights[direction_targets.long()].to(
+                        dtype=direction_loss.dtype,
+                        device=direction_loss.device,
+                    )
+                if direction_weights is not None:
+                    direction_weights = direction_weights.to(dtype=direction_loss.dtype, device=direction_loss.device)
+                    direction_loss = direction_loss * direction_weights
+                    direction_denominator_weights = direction_denominator_weights * direction_weights
+                direction_loss = direction_loss.sum() / direction_denominator_weights.sum().clamp_min(1.0)
+                total = total + self.direction_weight * direction_loss
 
         if movement_logit is not None and self.consistency_weight > 0.0:
             movement_logit_flat = movement_logit.reshape(-1)
@@ -1141,10 +1180,12 @@ class MovementDirectionAuxiliaryLoss(nn.Module):
                 probabilities[:, self.up_id] + probabilities[:, self.down_id]
             ).clamp(1e-6, 1.0 - 1e-6)
             aux_movement_prob = torch.sigmoid(movement_logit_flat.float()).clamp(1e-6, 1.0 - 1e-6)
-            total = total + self.consistency_weight * F.mse_loss(
+            consistency_loss = F.mse_loss(
                 aux_movement_prob,
                 main_movement_prob.detach(),
+                reduction="none",
             )
+            total = total + self.consistency_weight * weighted_mean(consistency_loss, weights_flat)
 
         return total
 
@@ -1200,6 +1241,7 @@ class LobTrainer:
         logits: torch.Tensor,
         targets: torch.Tensor,
         sample_mask: torch.Tensor | None = None,
+        sample_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.auxiliary_criterion is None:
             return logits.new_zeros(())
@@ -1208,6 +1250,7 @@ class LobTrainer:
             targets=targets,
             auxiliary_outputs=getattr(model, "auxiliary_outputs", None),
             sample_mask=sample_mask,
+            sample_weights=sample_weights,
         )
 
     def _amp_context(self):
@@ -1263,14 +1306,11 @@ class LobTrainer:
                 raise
             return model(x_batch, t_batch)
 
-    def _deterministic_neutral_mask(
+    def _neutral_loss_weight(
         self,
         targets: torch.Tensor,
         base_mask: torch.Tensor,
-        token_indices: torch.Tensor | None,
-        *,
-        epoch_number: int | None,
-    ) -> torch.Tensor:
+    ) -> float:
         ratio = self.config.sampling.neutral_to_directional_ratio
         supervision = self.config.sequence_supervision
         if (
@@ -1278,40 +1318,68 @@ class LobTrainer:
             or not self._token_chunk_enabled
             or supervision.neutral_sampling != "token_mask"
         ):
-            return base_mask
+            return 1.0
 
         neutral_class_id = int(supervision.neutral_class_id)
         directional_mask = base_mask & (targets != neutral_class_id)
         neutral_mask = base_mask & (targets == neutral_class_id)
         if not bool(neutral_mask.any()):
-            return base_mask
+            return 1.0
 
         keep_probability = supervision.neutral_keep_probability
         if keep_probability is None:
+            # Private helpers can be exercised without calling fit(); in real
+            # token_chunk training fit() resolves this once from the train set.
             neutral_count = int(neutral_mask.sum().item())
             directional_count = int(directional_mask.sum().item())
             keep_probability = min(1.0, float(ratio) * directional_count / max(neutral_count, 1))
-        keep_probability = float(keep_probability)
-        if keep_probability >= 1.0:
-            return base_mask
-        if keep_probability <= 0.0:
-            sampled_neutral_mask = torch.zeros_like(neutral_mask)
+        return float(keep_probability)
+
+    def _configure_global_neutral_loss_weight(self, train_loader: Iterable) -> dict[str, Any] | None:
+        """Fit the token_chunk neutral loss weight once from train-set labels."""
+        ratio = self.config.sampling.neutral_to_directional_ratio
+        supervision = self.config.sequence_supervision
+        if (
+            ratio is None
+            or not self._token_chunk_enabled
+            or supervision.neutral_sampling != "token_mask"
+        ):
+            return None
+
+        dataset = getattr(train_loader, "dataset", None)
+        supervised_labels_fn = getattr(dataset, "supervised_labels", None)
+        if not callable(supervised_labels_fn):
+            return None
+
+        labels = np.asarray(supervised_labels_fn(), dtype=np.int64)
+        neutral_class_id = int(supervision.neutral_class_id)
+        neutral_count = int(np.count_nonzero(labels == neutral_class_id))
+        directional_count = int(np.count_nonzero(labels != neutral_class_id))
+        if neutral_count == 0:
+            neutral_loss_weight = 1.0
         else:
-            if token_indices is None:
-                token_indices = torch.arange(targets.numel(), device=targets.device, dtype=torch.long).reshape_as(targets)
-            epoch = int(epoch_number or 0)
-            seed = int(supervision.neutral_sampling_seed)
-            values = token_indices.to(torch.int64)
-            mixed = (values + 1 + seed + epoch * 1_000_003) * 48_271
-            random_values = torch.remainder(mixed, 2_147_483_647).to(torch.float64) / 2_147_483_647.0
-            sampled_neutral_mask = neutral_mask & (random_values < keep_probability)
-        keep_mask = directional_mask | sampled_neutral_mask
-        if not bool(keep_mask.any()) and bool(base_mask.any()):
-            first_index = torch.nonzero(base_mask.reshape(-1), as_tuple=False)[0, 0]
-            keep_mask = keep_mask.reshape(-1)
-            keep_mask[first_index] = True
-            keep_mask = keep_mask.reshape_as(base_mask)
-        return keep_mask
+            neutral_loss_weight = min(1.0, float(ratio) * directional_count / neutral_count)
+        supervision.neutral_keep_probability = float(neutral_loss_weight)
+        return {
+            "neutral_loss_weight": float(neutral_loss_weight),
+            "neutral_to_directional_ratio": float(ratio),
+            "neutral_count": neutral_count,
+            "directional_count": directional_count,
+            "total_supervised_tokens": int(labels.size),
+        }
+
+    def _deterministic_token_loss_weights(
+        self,
+        targets: torch.Tensor,
+        base_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        weights = torch.ones_like(targets, dtype=torch.float32, device=targets.device)
+        neutral_weight = self._neutral_loss_weight(targets, base_mask)
+        neutral_class_id = int(self.config.sequence_supervision.neutral_class_id)
+        neutral_mask = base_mask & (targets == neutral_class_id)
+        if bool(neutral_mask.any()):
+            weights = weights.masked_fill(neutral_mask, float(neutral_weight))
+        return weights
 
     def _supervised_logits_targets(
         self,
@@ -1322,22 +1390,36 @@ class LobTrainer:
         *,
         training: bool,
         epoch_number: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        del token_indices, epoch_number
         if not self._token_chunk_enabled or loss_mask is None:
-            return logits.reshape(-1, logits.shape[-1]), targets.reshape(-1), None
+            return logits.reshape(-1, logits.shape[-1]), targets.reshape(-1), None, None
         if loss_mask is None:
             raise ValueError("token_chunk supervision requires each batch to include a loss_mask tensor.")
         sample_mask = loss_mask.bool()
+        sample_weights = None
         if training:
-            sample_mask = self._deterministic_neutral_mask(
+            token_loss_weights = self._deterministic_token_loss_weights(
                 targets,
                 sample_mask,
-                token_indices,
-                epoch_number=epoch_number,
             )
+            sample_weights = token_loss_weights[sample_mask]
         if not bool(sample_mask.any()):
             raise ValueError("token_chunk supervision mask selected no tokens for this batch.")
-        return logits[sample_mask], targets[sample_mask].long(), sample_mask
+        return logits[sample_mask], targets[sample_mask].long(), sample_mask, sample_weights
+
+    @staticmethod
+    def _weighted_criterion_loss(
+        criterion: FocalLoss,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        sample_weights: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if sample_weights is None:
+            return criterion(logits, targets)
+        per_sample_loss = criterion.per_sample_loss(logits, targets)
+        weights = sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+        return (per_sample_loss * weights).sum() / weights.sum().clamp_min(1.0)
 
     @staticmethod
     def _set_epoch(data_loader: Iterable, epoch: int) -> None:
@@ -1345,6 +1427,24 @@ class LobTrainer:
         sampler = getattr(data_loader, "sampler", None)
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(epoch)
+
+    @staticmethod
+    def _loader_len(data_loader: Iterable) -> int | None:
+        """Return the loader length when available."""
+        try:
+            return len(data_loader)  # type: ignore[arg-type]
+        except TypeError:
+            return None
+
+    @staticmethod
+    def _average_accumulated_gradients(model: nn.Module, divisor: int) -> None:
+        """Average gradients accumulated over multiple micro-batches."""
+        if divisor <= 1:
+            return
+        scale = float(divisor)
+        for parameter in model.parameters():
+            if parameter.grad is not None:
+                parameter.grad.div_(scale)
 
     def _monitor_value(self, result: EvaluationResult) -> float:
         """Return the configured validation monitor value."""
@@ -1455,6 +1555,7 @@ class LobTrainer:
         next_epoch: int,
         next_batch_in_epoch: int,
         global_step: int,
+        optimizer_step: int,
         validation_index: int,
         best_monitor_value: float,
         best_epoch: int,
@@ -1474,6 +1575,8 @@ class LobTrainer:
                 "next_epoch": int(next_epoch),
                 "next_batch_in_epoch": int(next_batch_in_epoch),
                 "global_step": int(global_step),
+                "optimizer_step": int(optimizer_step),
+                "gradient_accumulation_steps": int(self.config.gradient_accumulation_steps),
                 "validation_index": int(validation_index),
                 "best_monitor_value": float(best_monitor_value),
                 "best_epoch": int(best_epoch),
@@ -1504,6 +1607,20 @@ class LobTrainer:
     ) -> dict[str, Any]:
         """Load a complete training state and restore model/optimizer components."""
         state = torch.load(path, map_location=self.device, weights_only=False)
+        saved_accumulation = state.get("gradient_accumulation_steps")
+        if saved_accumulation is None:
+            if int(self.config.gradient_accumulation_steps) != 1:
+                raise ValueError(
+                    "Cannot resume training_state_latest.pth without "
+                    "gradient_accumulation_steps when current "
+                    "training.gradient_accumulation_steps is not 1."
+                )
+        elif int(saved_accumulation) != int(self.config.gradient_accumulation_steps):
+            raise ValueError(
+                "Cannot resume training_state_latest.pth with a different "
+                "training.gradient_accumulation_steps "
+                f"({int(saved_accumulation)} != {int(self.config.gradient_accumulation_steps)})."
+            )
         saved_supervision = state.get("sequence_supervision")
         if isinstance(saved_supervision, dict):
             saved_mode = str(saved_supervision.get("mode", "last_window"))
@@ -1555,14 +1672,25 @@ class LobTrainer:
         validations_without_improvement = 0
         validation_index = 0
         global_step = 0
+        optimizer_step = 0
         history: list[EpochResult] = []
         self.top_checkpoint_candidates = []
         validate_by_epoch = bool(self.config.validates_by_epoch)
         validation_interval = None if validate_by_epoch else int(self.config.validate_every_n_batches)
         validation_unit = "epoch" if validate_by_epoch else "validation interval"
+        accumulation_steps = int(self.config.gradient_accumulation_steps)
         start_epoch_number = 1
         resume_skip_batches = 0
         profiler = TrainingStepProfiler.from_env(self.device)
+        preconfigured_neutral_loss_weight = self.config.sequence_supervision.neutral_keep_probability
+        neutral_weight_summary = self._configure_global_neutral_loss_weight(train_loader)
+        if neutral_weight_summary is not None and preconfigured_neutral_loss_weight is None:
+            print(
+                "Token_chunk neutral loss weighting fitted on train set: "
+                f"neutral_loss_weight={neutral_weight_summary['neutral_loss_weight']:.6g}, "
+                f"directional={neutral_weight_summary['directional_count']}, "
+                f"neutral={neutral_weight_summary['neutral_count']}."
+            )
 
         if resume_checkpoint_path is not None:
             resume_state = self._load_training_state(
@@ -1578,6 +1706,7 @@ class LobTrainer:
             validations_without_improvement = int(resume_state.get("validations_without_improvement", 0))
             validation_index = int(resume_state.get("validation_index", 0))
             global_step = int(resume_state.get("global_step", 0))
+            optimizer_step = int(resume_state.get("optimizer_step", global_step if accumulation_steps == 1 else 0))
             start_epoch_number = int(resume_state.get("next_epoch", 1))
             resume_skip_batches = max(0, int(resume_state.get("next_batch_in_epoch", 1)) - 1)
             if best_checkpoint_label:
@@ -1589,7 +1718,8 @@ class LobTrainer:
                 "Resuming training from "
                 f"{resume_checkpoint_path}: next_epoch={start_epoch_number}, "
                 f"next_batch_in_epoch={resume_skip_batches + 1}, "
-                f"global_step={global_step}, validation_index={validation_index}."
+                f"global_step={global_step}, optimizer_step={optimizer_step}, "
+                f"validation_index={validation_index}."
             )
 
         def record_validation(
@@ -1666,6 +1796,7 @@ class LobTrainer:
                     next_epoch=next_epoch_number,
                     next_batch_in_epoch=next_batch_in_epoch,
                     global_step=global_step if global_step_value is None else int(global_step_value),
+                    optimizer_step=optimizer_step,
                     validation_index=validation_index,
                     best_monitor_value=best_monitor_value,
                     best_epoch=best_epoch,
@@ -1722,6 +1853,7 @@ class LobTrainer:
             f"Monitoring {self.config.monitor} ({self.config.monitor_mode}); "
             f"saving top_k_checkpoints={self.config.top_k_checkpoints}; "
             f"validate_every_n_batches={self.config.validate_every_n_batches}; "
+            f"gradient_accumulation_steps={accumulation_steps}; "
             f"early stopping warmup={self.config.early_stopping_warmup} {validation_unit}(s), "
             f"min_delta={self.config.early_stopping_min_delta:.6g}; "
             f"optimizer={self.config.optimizer}."
@@ -1739,10 +1871,12 @@ class LobTrainer:
                     description=f"Epoch {epoch_number}/{self.config.epochs} [Train]",
                     epoch_number=epoch_number,
                     start_global_step=global_step,
+                    start_optimizer_step=optimizer_step,
                     training_step_callback=training_step_callback,
                     profiler=profiler,
                 )
                 global_step += int(train_result.batch_count)
+                optimizer_step += int(train_result.optimizer_step_count)
                 val_result = self.evaluate(
                     model=model,
                     data_loader=val_loader,
@@ -1771,6 +1905,9 @@ class LobTrainer:
             last_batch_in_epoch = 0
             progress = tqdm(train_loader, desc=f"Epoch {epoch_number}/{self.config.epochs} [Train]")
             last_step_end = profiler.now() if profiler.enabled else perf_counter()
+            train_loader_length = self._loader_len(train_loader)
+            accumulation_count = 0
+            validation_due = False
             for batch_in_epoch, batch in enumerate(progress, start=1):
                 if epoch_number == start_epoch_number and batch_in_epoch <= resume_skip_batches:
                     last_step_end = profiler.now() if profiler.enabled else perf_counter()
@@ -1792,15 +1929,16 @@ class LobTrainer:
                     stage_end = profiler.now()
                     timings["h2d"] = stage_end - stage_start
                     stage_start = stage_end
-                optimizer.zero_grad(set_to_none=True)
+                if accumulation_count == 0:
+                    optimizer.zero_grad(set_to_none=True)
                 if profiler.enabled:
                     stage_end = profiler.now()
-                    timings["zero_grad"] = stage_end - stage_start
+                    timings["zero_grad"] = stage_end - stage_start if accumulation_count == 0 else 0.0
                     stage_start = stage_end
 
                 with self._amp_context():
                     logits = self._forward_model(model, x_batch, t_batch, tokenwise=loss_mask is not None)
-                    supervised_logits, supervised_targets, sample_mask = self._supervised_logits_targets(
+                    supervised_logits, supervised_targets, sample_mask, sample_weights = self._supervised_logits_targets(
                         logits,
                         y_batch,
                         loss_mask,
@@ -1808,8 +1946,14 @@ class LobTrainer:
                         training=True,
                         epoch_number=epoch_number,
                     )
-                    base_loss = criterion(supervised_logits, supervised_targets)
-                    aux_loss = self._auxiliary_loss(model, logits, y_batch, sample_mask=sample_mask)
+                    base_loss = self._weighted_criterion_loss(criterion, supervised_logits, supervised_targets, sample_weights)
+                    aux_loss = self._auxiliary_loss(
+                        model,
+                        logits,
+                        y_batch,
+                        sample_mask=sample_mask,
+                        sample_weights=sample_weights,
+                    )
                     loss = base_loss + aux_loss
                     moe_loss = getattr(model, "moe_load_balancing_loss", None)
                     if moe_loss is not None:
@@ -1838,13 +1982,21 @@ class LobTrainer:
                     stage_end = profiler.now()
                     timings["backward"] = stage_end - stage_start
                     stage_start = stage_end
-                self.scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
-                self.scaler.step(optimizer)
-                self.scaler.update()
+                accumulation_count += 1
+                is_last_batch = train_loader_length is not None and batch_in_epoch >= train_loader_length
+                optimizer_step_completed = accumulation_count >= accumulation_steps or is_last_batch
+                grad_norm = None
+                if optimizer_step_completed:
+                    self.scaler.unscale_(optimizer)
+                    self._average_accumulated_gradients(model, accumulation_count)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
+                    self.scaler.step(optimizer)
+                    self.scaler.update()
+                    optimizer_step += 1
+                    accumulation_count = 0
                 if profiler.enabled:
                     stage_end = profiler.now()
-                    timings["optimizer_step"] = stage_end - stage_start
+                    timings["optimizer_step"] = stage_end - stage_start if optimizer_step_completed else 0.0
                     stage_start = stage_end
 
                 interval_metrics.update(supervised_logits, supervised_targets)
@@ -1854,6 +2006,11 @@ class LobTrainer:
                 global_step += 1
                 batch_size = int(supervised_targets.numel())
                 chunk_count = int(x_batch.shape[0])
+                neutral_loss_weight = None
+                sample_weight_sum = None
+                if sample_weights is not None:
+                    neutral_loss_weight = self._neutral_loss_weight(y_batch, sample_mask)
+                    sample_weight_sum = float(sample_weights.sum().item())
                 if profiler.enabled:
                     stage_end = profiler.now()
                     timings["metrics_update"] = stage_end - stage_start
@@ -1867,10 +2024,19 @@ class LobTrainer:
                         "train_base_loss_step": float(base_loss.item()),
                         "train_auxiliary_loss_step": float(aux_loss.item()),
                         "learning_rate": float(optimizer.param_groups[0]["lr"]),
-                        "gradient_norm": float(grad_norm.item()),
+                        "optimizer_step": int(optimizer_step),
+                        "gradient_accumulation_steps": int(accumulation_steps),
+                        "effective_batch_size_chunks": int(chunk_count * accumulation_steps),
+                        "optimizer_step_completed": bool(optimizer_step_completed),
                         "supervised_tokens_per_step": int(supervised_targets.numel()),
                         "chunks_per_step": chunk_count,
                     }
+                    if neutral_loss_weight is not None:
+                        step_payload["neutral_loss_weight"] = float(neutral_loss_weight)
+                    if sample_weight_sum is not None:
+                        step_payload["sample_weight_sum"] = float(sample_weight_sum)
+                    if grad_norm is not None:
+                        step_payload["gradient_norm"] = float(grad_norm.item())
                     if moe_loss is not None:
                         step_payload["train_moe_loss_step"] = float(moe_loss.item())
                     training_step_callback(step_payload)
@@ -1891,6 +2057,9 @@ class LobTrainer:
                                 "epoch": int(epoch_number),
                                 "batch_in_epoch": int(batch_in_epoch),
                                 "global_step": int(global_step),
+                                "optimizer_step": int(optimizer_step),
+                                "gradient_accumulation_steps": int(accumulation_steps),
+                                "optimizer_step_completed": bool(optimizer_step_completed),
                             }
                         )
                         training_step_callback(profile_payload)
@@ -1899,9 +2068,12 @@ class LobTrainer:
                     last_step_end = perf_counter()
 
                 if validation_interval is not None and global_step % validation_interval == 0:
+                    validation_due = True
+                if validation_due and optimizer_step_completed:
                     train_result = EvaluationResult(
                         loss=interval_loss / max(interval_batches, 1),
                         metrics=interval_metrics.compute(),
+                        batch_count=interval_batches,
                     )
                     val_result = self.evaluate(
                         model=model,
@@ -1922,16 +2094,27 @@ class LobTrainer:
                     interval_loss = 0.0
                     interval_batches = 0
                     interval_metrics = ClassificationMetricAccumulator(device=self.device)
+                    validation_due = False
                     model.train()
                     if stopped:
                         break
             if stopped:
                 break
 
+            if accumulation_count > 0:
+                self.scaler.unscale_(optimizer)
+                self._average_accumulated_gradients(model, accumulation_count)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
+                self.scaler.step(optimizer)
+                self.scaler.update()
+                optimizer_step += 1
+                accumulation_count = 0
+
             if interval_batches > 0:
                 train_result = EvaluationResult(
                     loss=interval_loss / max(interval_batches, 1),
                     metrics=interval_metrics.compute(),
+                    batch_count=interval_batches,
                 )
                 val_result = self.evaluate(
                     model=model,
@@ -1961,6 +2144,7 @@ class LobTrainer:
                     next_epoch=epoch_number + 1,
                     next_batch_in_epoch=1,
                     global_step=global_step,
+                    optimizer_step=optimizer_step,
                     validation_index=validation_index,
                     best_monitor_value=best_monitor_value,
                     best_epoch=best_epoch,
@@ -2025,15 +2209,20 @@ class LobTrainer:
         *,
         epoch_number: int | None = None,
         start_global_step: int = 0,
+        start_optimizer_step: int = 0,
         training_step_callback: Callable[[dict[str, Any]], None] | None = None,
         profiler: TrainingStepProfiler | None = None,
     ) -> EvaluationResult:
         model.train()
         total_loss = 0.0
         batch_count = 0
+        optimizer_step_count = 0
         metrics = ClassificationMetricAccumulator(device=self.device)
         profile_enabled = profiler is not None and profiler.enabled
         last_step_end = profiler.now() if profile_enabled else perf_counter()
+        accumulation_steps = int(self.config.gradient_accumulation_steps)
+        accumulation_count = 0
+        data_loader_length = self._loader_len(data_loader)
 
         for batch in tqdm(data_loader, desc=description):
             if profile_enabled and profiler is not None:
@@ -2052,15 +2241,16 @@ class LobTrainer:
                 stage_end = profiler.now()
                 timings["h2d"] = stage_end - stage_start
                 stage_start = stage_end
-            optimizer.zero_grad(set_to_none=True)
+            if accumulation_count == 0:
+                optimizer.zero_grad(set_to_none=True)
             if profile_enabled and profiler is not None:
                 stage_end = profiler.now()
-                timings["zero_grad"] = stage_end - stage_start
+                timings["zero_grad"] = stage_end - stage_start if accumulation_count == 0 else 0.0
                 stage_start = stage_end
 
             with self._amp_context():
                 logits = self._forward_model(model, x_batch, t_batch, tokenwise=loss_mask is not None)
-                supervised_logits, supervised_targets, sample_mask = self._supervised_logits_targets(
+                supervised_logits, supervised_targets, sample_mask, sample_weights = self._supervised_logits_targets(
                     logits,
                     y_batch,
                     loss_mask,
@@ -2068,8 +2258,14 @@ class LobTrainer:
                     training=True,
                     epoch_number=epoch_number,
                 )
-                base_loss = criterion(supervised_logits, supervised_targets)
-                aux_loss = self._auxiliary_loss(model, logits, y_batch, sample_mask=sample_mask)
+                base_loss = self._weighted_criterion_loss(criterion, supervised_logits, supervised_targets, sample_weights)
+                aux_loss = self._auxiliary_loss(
+                    model,
+                    logits,
+                    y_batch,
+                    sample_mask=sample_mask,
+                    sample_weights=sample_weights,
+                )
                 loss = base_loss + aux_loss
                 moe_loss = getattr(model, "moe_load_balancing_loss", None)  # load-balancing for MoE training
                 if moe_loss is not None:  # add MoE auxiliary loss only when the model exposes it
@@ -2099,13 +2295,21 @@ class LobTrainer:
                 stage_end = profiler.now()
                 timings["backward"] = stage_end - stage_start
                 stage_start = stage_end
-            self.scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
-            self.scaler.step(optimizer)
-            self.scaler.update()
+            accumulation_count += 1
+            is_last_batch = data_loader_length is not None and current_batch >= data_loader_length
+            optimizer_step_completed = accumulation_count >= accumulation_steps or is_last_batch
+            grad_norm = None
+            if optimizer_step_completed:
+                self.scaler.unscale_(optimizer)
+                self._average_accumulated_gradients(model, accumulation_count)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
+                self.scaler.step(optimizer)
+                self.scaler.update()
+                optimizer_step_count += 1
+                accumulation_count = 0
             if profile_enabled and profiler is not None:
                 stage_end = profiler.now()
-                timings["optimizer_step"] = stage_end - stage_start
+                timings["optimizer_step"] = stage_end - stage_start if optimizer_step_completed else 0.0
                 stage_start = stage_end
 
             metrics.update(supervised_logits, supervised_targets)
@@ -2114,6 +2318,11 @@ class LobTrainer:
             batch_count += 1
             batch_size = int(supervised_targets.numel())
             chunk_count = int(x_batch.shape[0])
+            neutral_loss_weight = None
+            sample_weight_sum = None
+            if sample_weights is not None:
+                neutral_loss_weight = self._neutral_loss_weight(y_batch, sample_mask)
+                sample_weight_sum = float(sample_weights.sum().item())
             if profile_enabled and profiler is not None:
                 stage_end = profiler.now()
                 timings["metrics_update"] = stage_end - stage_start
@@ -2127,10 +2336,19 @@ class LobTrainer:
                     "train_base_loss_step": float(base_loss.item()),
                     "train_auxiliary_loss_step": float(aux_loss.item()),
                     "learning_rate": float(optimizer.param_groups[0]["lr"]),
-                    "gradient_norm": float(grad_norm.item()),
+                    "optimizer_step": int(start_optimizer_step + optimizer_step_count),
+                    "gradient_accumulation_steps": int(accumulation_steps),
+                    "effective_batch_size_chunks": int(chunk_count * accumulation_steps),
+                    "optimizer_step_completed": bool(optimizer_step_completed),
                     "supervised_tokens_per_step": int(supervised_targets.numel()),
                     "chunks_per_step": chunk_count,
                 }
+                if neutral_loss_weight is not None:
+                    step_payload["neutral_loss_weight"] = float(neutral_loss_weight)
+                if sample_weight_sum is not None:
+                    step_payload["sample_weight_sum"] = float(sample_weight_sum)
+                if grad_norm is not None:
+                    step_payload["gradient_norm"] = float(grad_norm.item())
                 if moe_loss is not None:
                     step_payload["train_moe_loss_step"] = float(moe_loss.item())
                 training_step_callback(step_payload)
@@ -2152,6 +2370,9 @@ class LobTrainer:
                             "epoch": int(epoch_number or 0),
                             "batch_in_epoch": int(current_batch),
                             "global_step": global_step,
+                            "optimizer_step": int(start_optimizer_step + optimizer_step_count),
+                            "gradient_accumulation_steps": int(accumulation_steps),
+                            "optimizer_step_completed": bool(optimizer_step_completed),
                         }
                     )
                     training_step_callback(profile_payload)
@@ -2159,10 +2380,19 @@ class LobTrainer:
             else:
                 last_step_end = perf_counter()
 
+        if accumulation_count > 0:
+            self.scaler.unscale_(optimizer)
+            self._average_accumulated_gradients(model, accumulation_count)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
+            self.scaler.step(optimizer)
+            self.scaler.update()
+            optimizer_step_count += 1
+
         return EvaluationResult(
             loss=total_loss / max(batch_count, 1),
             metrics=metrics.compute(),
             batch_count=batch_count,
+            optimizer_step_count=optimizer_step_count,
         )
 
     def evaluate(
@@ -2194,7 +2424,7 @@ class LobTrainer:
                 x_batch, t_batch, y_batch, loss_mask, token_indices = self._move_batch_to_device(batch)
 
                 logits = self._forward_model(model, x_batch, t_batch, tokenwise=loss_mask is not None)
-                supervised_logits, supervised_targets, sample_mask = self._supervised_logits_targets(
+                supervised_logits, supervised_targets, sample_mask, _sample_weights = self._supervised_logits_targets(
                     logits,
                     y_batch,
                     loss_mask,

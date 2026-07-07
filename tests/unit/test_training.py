@@ -408,6 +408,138 @@ def test_lob_trainer_logs_training_step_callback_for_each_batch(
 
 
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_accumulates_gradients_before_optimizer_step(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CountingSGD(torch.optim.SGD):
+        def __init__(self, params, *args, **kwargs) -> None:
+            super().__init__(params, *args, **kwargs)
+            self.step_calls = 0
+
+        def step(self, closure=None):
+            self.step_calls += 1
+            return super().step(closure)
+
+    config = _training_config()
+    config.epochs = 1
+    config.gradient_accumulation_steps = 2
+    config.validate_every_n_batches = "epoch"
+    config.early_stopping_patience = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.device = "cpu"
+    config.use_amp = False
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    optimizers: list[CountingSGD] = []
+
+    def fake_optimizer(model: nn.Module) -> CountingSGD:
+        optimizer = CountingSGD(model.parameters(), lr=0.0)
+        optimizers.append(optimizer)
+        return optimizer
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=1.0, metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_optimizer", fake_optimizer)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+    logged_steps: list[dict[str, object]] = []
+
+    trainer.fit(
+        TinySequenceClassifier(),
+        train_loader=_tiny_batches(4),
+        val_loader=[],
+        training_step_callback=logged_steps.append,
+    )
+
+    assert optimizers[0].step_calls == 2
+    assert [item["optimizer_step_completed"] for item in logged_steps] == [False, True, False, True]
+    assert [item["optimizer_step"] for item in logged_steps] == [0, 1, 1, 2]
+    assert all(item["gradient_accumulation_steps"] == 2 for item in logged_steps)
+    assert "gradient_norm" not in logged_steps[0]
+    assert "gradient_norm" in logged_steps[1]
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_flushes_partial_gradient_accumulation_window(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CountingSGD(torch.optim.SGD):
+        def __init__(self, params, *args, **kwargs) -> None:
+            super().__init__(params, *args, **kwargs)
+            self.step_calls = 0
+
+        def step(self, closure=None):
+            self.step_calls += 1
+            return super().step(closure)
+
+    config = _training_config()
+    config.epochs = 1
+    config.gradient_accumulation_steps = 2
+    config.validate_every_n_batches = "epoch"
+    config.early_stopping_patience = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.device = "cpu"
+    config.use_amp = False
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    optimizers: list[CountingSGD] = []
+
+    def fake_optimizer(model: nn.Module) -> CountingSGD:
+        optimizer = CountingSGD(model.parameters(), lr=0.0)
+        optimizers.append(optimizer)
+        return optimizer
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=1.0, metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_optimizer", fake_optimizer)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    trainer.fit(TinySequenceClassifier(), train_loader=_tiny_batches(5), val_loader=[])
+
+    assert optimizers[0].step_calls == 3
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_delays_validation_until_accumulation_boundary(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _training_config()
+    config.epochs = 1
+    config.gradient_accumulation_steps = 2
+    config.validate_every_n_batches = 3
+    config.early_stopping_patience = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.device = "cpu"
+    config.use_amp = False
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_losses = iter([1.0, 0.9])
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=next(validation_losses), metrics=metrics)
+
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    _, history = trainer.fit(TinySequenceClassifier(), train_loader=_tiny_batches(5), val_loader=[])
+
+    assert [(item.batch_in_epoch, item.global_step) for item in history] == [(4, 4), (5, 5)]
+    assert [item.checkpoint_label for item in history] == [
+        "epoch_0001_step_00000004",
+        "epoch_0001_step_00000005",
+    ]
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
 def test_lob_trainer_early_stopping_counts_validation_intervals(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1115,6 +1247,206 @@ def test_lob_trainer_evaluate_token_chunk_uses_loss_mask() -> None:
     assert result.prediction_outputs is not None
     assert result.prediction_outputs["targets"].tolist() == [2, 0]
     assert result.prediction_outputs["predictions"].tolist() == [2, 0]
+
+
+def test_token_chunk_neutral_loss_weights_keep_all_supervised_tokens() -> None:
+    config = _training_config()
+    config.device = "cpu"
+    config.sampling.neutral_to_directional_ratio = 0.5
+    config.sequence_supervision.mode = "token_chunk"
+    config.sequence_supervision.loss_warmup_tokens = 0
+    config.sequence_supervision.chunk_stride = 4
+    config.sequence_supervision.neutral_sampling = "token_mask"
+    config.sequence_supervision.neutral_keep_probability = None
+    trainer = LobTrainer(config)
+
+    logits = torch.zeros((1, 4, 3))
+    targets = torch.tensor([[0, 1, 1, 2]])
+    loss_mask = torch.ones((1, 4), dtype=torch.bool)
+
+    supervised_logits, supervised_targets, sample_mask, sample_weights = trainer._supervised_logits_targets(
+        logits,
+        targets,
+        loss_mask,
+        token_indices=torch.arange(4).reshape(1, 4),
+        training=True,
+        epoch_number=1,
+    )
+
+    assert supervised_logits.shape == (4, 3)
+    assert supervised_targets.tolist() == [0, 1, 1, 2]
+    assert sample_mask is not None
+    assert sample_mask.tolist() == [[True, True, True, True]]
+    assert sample_weights is not None
+    assert sample_weights.tolist() == pytest.approx([1.0, 0.5, 0.5, 1.0])
+
+
+def test_token_chunk_neutral_loss_weight_is_fit_once_from_train_set() -> None:
+    class TrainDataset:
+        def supervised_labels(self) -> np.ndarray:
+            return np.asarray([0, 1, 1, 1, 2, 1], dtype=np.int64)
+
+    class TrainLoader:
+        dataset = TrainDataset()
+
+    config = _training_config()
+    config.device = "cpu"
+    config.sampling.neutral_to_directional_ratio = 1.0
+    config.sequence_supervision.mode = "token_chunk"
+    config.sequence_supervision.loss_warmup_tokens = 0
+    config.sequence_supervision.chunk_stride = 4
+    config.sequence_supervision.neutral_sampling = "token_mask"
+    config.sequence_supervision.neutral_keep_probability = None
+    trainer = LobTrainer(config)
+
+    summary = trainer._configure_global_neutral_loss_weight(TrainLoader())
+
+    assert summary is not None
+    assert summary["directional_count"] == 2
+    assert summary["neutral_count"] == 4
+    assert summary["neutral_loss_weight"] == pytest.approx(0.5)
+    assert config.sequence_supervision.neutral_keep_probability == pytest.approx(0.5)
+
+    logits = torch.zeros((1, 4, 3))
+    targets = torch.tensor([[0, 1, 1, 2]])
+    loss_mask = torch.ones((1, 4), dtype=torch.bool)
+
+    _, _, _, sample_weights = trainer._supervised_logits_targets(
+        logits,
+        targets,
+        loss_mask,
+        token_indices=torch.arange(4).reshape(1, 4),
+        training=True,
+        epoch_number=1,
+    )
+
+    assert sample_weights is not None
+    assert sample_weights.tolist() == pytest.approx([1.0, 0.5, 0.5, 1.0])
+
+
+def test_token_chunk_neutral_loss_weight_edge_cases() -> None:
+    config = _training_config()
+    config.device = "cpu"
+    config.sequence_supervision.mode = "token_chunk"
+    config.sequence_supervision.loss_warmup_tokens = 0
+    config.sequence_supervision.chunk_stride = 4
+    config.sequence_supervision.neutral_sampling = "token_mask"
+    config.sequence_supervision.neutral_keep_probability = None
+    trainer = LobTrainer(config)
+    mask = torch.ones((1, 4), dtype=torch.bool)
+
+    config.sampling.neutral_to_directional_ratio = 0.5
+    no_neutrals = torch.tensor([[0, 2, 0, 2]])
+    assert trainer._deterministic_token_loss_weights(no_neutrals, mask).reshape(-1).tolist() == pytest.approx(
+        [1.0, 1.0, 1.0, 1.0],
+    )
+
+    no_directionals = torch.tensor([[1, 1, 1, 1]])
+    assert trainer._deterministic_token_loss_weights(no_directionals, mask).reshape(-1).tolist() == pytest.approx(
+        [0.0, 0.0, 0.0, 0.0],
+    )
+
+    config.sampling.neutral_to_directional_ratio = 20.0
+    p_ge_one = torch.tensor([[0, 1, 2, 1]])
+    assert trainer._deterministic_token_loss_weights(p_ge_one, mask).reshape(-1).tolist() == pytest.approx(
+        [1.0, 1.0, 1.0, 1.0],
+    )
+
+
+def test_weighted_focal_loss_matches_manual_weighted_mean() -> None:
+    criterion = LobTrainer(_training_config())._criterion()
+    criterion.gamma = 0.0
+    criterion.alpha = None
+    logits = torch.tensor(
+        [
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 2.0],
+        ],
+    )
+    targets = torch.tensor([0, 1, 2])
+    weights = torch.tensor([1.0, 0.25, 1.0])
+
+    loss = LobTrainer._weighted_criterion_loss(criterion, logits, targets, weights)
+    per_token = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
+    expected = (per_token * weights).sum() / weights.sum().clamp_min(1.0)
+
+    assert loss.item() == pytest.approx(expected.item())
+
+
+def test_auxiliary_movement_and_consistency_losses_use_sample_weights() -> None:
+    criterion = MovementDirectionAuxiliaryLoss(
+        up_id=2,
+        neutral_id=1,
+        down_id=0,
+        movement_weight=1.0,
+        direction_weight=0.0,
+        consistency_weight=1.0,
+    )
+    class_logits = torch.tensor(
+        [
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 2.0],
+            [0.5, 1.0, 0.0],
+        ],
+    )
+    targets = torch.tensor([0, 1, 2, 1])
+    movement_logit = torch.tensor([0.0, 1.0, -1.0, 2.0])
+    sample_weights = torch.tensor([1.0, 0.25, 1.0, 0.25])
+
+    loss = criterion(
+        class_logits=class_logits,
+        targets=targets,
+        auxiliary_outputs={"movement_logit": movement_logit},
+        sample_weights=sample_weights,
+    )
+
+    movement_target = (targets != 1).float()
+    movement_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        movement_logit,
+        movement_target,
+        reduction="none",
+    )
+    probabilities = torch.softmax(class_logits.float(), dim=-1)
+    main_movement_prob = (probabilities[:, 0] + probabilities[:, 2]).clamp(1e-6, 1.0 - 1e-6)
+    aux_movement_prob = torch.sigmoid(movement_logit.float()).clamp(1e-6, 1.0 - 1e-6)
+    consistency_loss = torch.nn.functional.mse_loss(
+        aux_movement_prob,
+        main_movement_prob.detach(),
+        reduction="none",
+    )
+    expected = ((movement_loss + consistency_loss) * sample_weights).sum() / sample_weights.sum().clamp_min(1.0)
+
+    assert loss.item() == pytest.approx(expected.item())
+
+
+def test_token_chunk_evaluation_returns_unweighted_supervised_tokens() -> None:
+    config = _training_config()
+    config.device = "cpu"
+    config.sampling.neutral_to_directional_ratio = 0.5
+    config.sequence_supervision.mode = "token_chunk"
+    config.sequence_supervision.loss_warmup_tokens = 0
+    config.sequence_supervision.chunk_stride = 3
+    config.sequence_supervision.neutral_sampling = "token_mask"
+    trainer = LobTrainer(config)
+
+    logits = torch.zeros((1, 3, 3))
+    targets = torch.tensor([[1, 1, 0]])
+    loss_mask = torch.ones((1, 3), dtype=torch.bool)
+
+    _, supervised_targets, sample_mask, sample_weights = trainer._supervised_logits_targets(
+        logits,
+        targets,
+        loss_mask,
+        token_indices=torch.arange(3).reshape(1, 3),
+        training=False,
+    )
+
+    assert supervised_targets.tolist() == [1, 1, 0]
+    assert sample_mask is not None
+    assert sample_mask.tolist() == [[True, True, True]]
+    assert sample_weights is None
 
 
 def test_classification_metrics_from_predictions_uses_fixed_decisions() -> None:

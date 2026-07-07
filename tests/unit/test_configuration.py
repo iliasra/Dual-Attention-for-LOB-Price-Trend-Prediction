@@ -1130,6 +1130,30 @@ def test_training_eval_batch_size_rejects_non_positive_value(artifact_dir: Path)
         ExperimentConfig.from_yaml(broken_config_path)
 
 
+def test_training_gradient_accumulation_steps_defaults_and_validates(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"].pop("gradient_accumulation_steps", None)
+
+    config_path = artifact_dir / "legacy_without_gradient_accumulation.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.training.gradient_accumulation_steps == 1
+
+    for value in (2, 4):
+        payload["training"]["gradient_accumulation_steps"] = value
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        loaded = ExperimentConfig.from_yaml(config_path)
+        assert loaded.training.gradient_accumulation_steps == value
+
+    for bad_value in (0, -1, True, 1.5, "2"):
+        payload["training"]["gradient_accumulation_steps"] = bad_value
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="gradient_accumulation_steps"):
+            ExperimentConfig.from_yaml(config_path)
+
+
 def test_training_prefetch_factor_is_optional_and_validated(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))

@@ -474,21 +474,27 @@ model:
   local_attention_context_tokens: 128
 training:
   batch_size: 32
+  gradient_accumulation_steps: 1
   eval_batch_size: 128
   preload_data_to_memory: true
   sequence_supervision:
     mode: token_chunk
     loss_warmup_tokens: 128
     chunk_stride: 128
-    neutral_sampling: token_mask
+    neutral_sampling: token_mask  # legacy name: neutral loss weighting in token_chunk mode
 ```
 
 With this setup, each chunk contains 256 events, the first 128 positions are
 context warmup, and the loss/evaluation are computed on the remaining 128
-positions. The neutral-to-directional ratio is applied as a deterministic
-token-level loss mask: directional labels are kept, and neutral labels are
-sampled for the loss. The dataloader still iterates over chunks; neutral
-sampling does not remove chunks from the epoch.
+positions. `gradient_accumulation_steps: 2` would accumulate two micro-batches
+before one optimizer update, giving an effective optimizer batch of about 64
+chunks without holding both micro-batches' activations in memory at once. The
+neutral-to-directional ratio is applied as deterministic token-level loss
+weighting fitted once on the train set: directional labels have weight `1.0`,
+while neutral labels receive the same expected contribution that neutral
+downsampling would have produced.
+The dataloader still iterates over chunks and no neutral token is randomly
+dropped from the loss.
 
 `preload_data_to_memory: true` can require substantial host RAM for large folds.
 The current PBS script requests fewer CPUs than older runs but keeps high memory

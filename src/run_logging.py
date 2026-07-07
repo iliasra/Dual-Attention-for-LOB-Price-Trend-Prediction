@@ -1141,13 +1141,21 @@ def _write_sampling_summary(handle: Any, summary: dict[str, Any]) -> None:
         return
     handle.write(f"method: {summary.get('method')}\n")
     handle.write(f"neutral_to_directional_ratio: {summary.get('neutral_to_directional_ratio')}\n")
+    if "neutral_loss_weight" in summary:
+        handle.write(f"neutral_loss_weight: {summary.get('neutral_loss_weight')}\n")
     handle.write(f"base_seed: {summary.get('base_seed')}\n")
     handle.write(f"epoch_seed_rule: {summary.get('epoch_seed_rule')}\n")
-    handle.write(
-        "train_metric_scope: train_* metrics are computed on the sampled train windows for each epoch; "
-        "validation/test metrics use complete splits.\n"
-    )
-    for section in ("full_counts", "sampled_counts_per_epoch"):
+    if summary.get("method") == "token_chunk_neutral_loss_weighting":
+        handle.write(
+            "train_metric_scope: train_* metrics are computed on complete supervised train tokens; "
+            "neutral tokens are kept and downweighted in the training loss only.\n"
+        )
+    else:
+        handle.write(
+            "train_metric_scope: train_* metrics are computed on the sampled train windows for each epoch; "
+            "validation/test metrics use complete splits.\n"
+        )
+    for section in ("full_counts", "effective_counts_for_loss", "sampled_counts_per_epoch"):
         values = summary.get(section)
         if isinstance(values, dict):
             handle.write(f"{section}: {values}\n")

@@ -182,6 +182,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "device": None,
         "epochs": None,
         "batch_size": None,
+        "gradient_accumulation_steps": None,
         "eval_batch_size": None,
         "num_workers": None,
         "prefetch_factor": None,
@@ -271,6 +272,7 @@ OPTIONAL_CONFIG_KEYS = {
     "training.monitor_params.lambda_ece",
     "training.monitor_params.lambda_rate",
     "training.monitor_params.fixed_rate",
+    "training.gradient_accumulation_steps",
     "training.prefetch_factor",
     "training.preload_data_to_memory",
     "training.top_k_checkpoints",
@@ -1995,6 +1997,7 @@ class TrainingConfig:
     device: str
     epochs: int
     batch_size: int
+    gradient_accumulation_steps: int
     eval_batch_size: int
     num_workers: int
     prefetch_factor: int | None
@@ -2030,6 +2033,14 @@ class TrainingConfig:
         """Check training worker settings."""
         if self.batch_size <= 0:
             raise ValueError("training.batch_size must be > 0.")
+        if isinstance(self.gradient_accumulation_steps, bool) or not isinstance(
+            self.gradient_accumulation_steps,
+            int,
+        ):
+            raise ValueError("training.gradient_accumulation_steps must be a positive integer.")
+        self.gradient_accumulation_steps = int(self.gradient_accumulation_steps)
+        if self.gradient_accumulation_steps <= 0:
+            raise ValueError("training.gradient_accumulation_steps must be a positive integer.")
         if self.eval_batch_size <= 0:
             raise ValueError("training.eval_batch_size must be > 0.")
         if self.num_workers < 0:
@@ -2188,6 +2199,7 @@ class TrainingConfig:
             device=str(payload["device"]).lower(),
             epochs=int(payload["epochs"]),
             batch_size=int(payload["batch_size"]),
+            gradient_accumulation_steps=payload.get("gradient_accumulation_steps", 1),
             eval_batch_size=int(payload["eval_batch_size"]),
             num_workers=int(payload["num_workers"]),
             prefetch_factor=None

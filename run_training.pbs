@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N training
-#PBS -l walltime=72:00:00
+#PBS -l walltime=15:00:00
 #PBS -l select=1:ncpus=8:mem=128gb:ngpus=1
 
 # UNCOMMENT FOLLOWING TO ENABLE DETERMINISTIC BEHAVIOR

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -43,6 +44,15 @@ class FakeRun:
 class ConfigDict(dict):
     def update(self, payload: dict[str, object], allow_val_change: bool = False) -> None:  # type: ignore[override]
         super().update(payload)
+
+
+@pytest.fixture()
+def artifact_dir(request: pytest.FixtureRequest) -> Path:
+    path = Path(__file__).resolve().parent / ".test_artifacts" / request.node.name
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
 
 
 def _metrics() -> ClassificationMetrics:
@@ -97,7 +107,7 @@ def test_epoch_result_to_wandb_metrics_uses_validation_step_fields() -> None:
 
 def test_wandb_tracker_initializes_and_logs_with_fake_module(
     monkeypatch,
-    tmp_path: Path,
+    artifact_dir: Path,
 ) -> None:
     fake_run = FakeRun()
     fake_run.config = ConfigDict()
@@ -114,7 +124,7 @@ def test_wandb_tracker_initializes_and_logs_with_fake_module(
         WandbTrackingConfig(enabled=True, mode="offline", tags=["unit"]),
         run_stem="run a",
         fold_id="fold/001",
-        fold_log_dir=tmp_path,
+        fold_log_dir=artifact_dir,
         config_payload={"seed": 42},
     )
 
@@ -147,14 +157,21 @@ def test_wandb_tracker_initializes_and_logs_with_fake_module(
             "epoch": 1,
             "batch_in_epoch": 8,
             "global_step": 129,
+            "optimizer_step": 64,
+            "gradient_accumulation_steps": 2,
+            "effective_batch_size_chunks": 64,
+            "optimizer_step_completed": True,
             "train_loss_step": 0.123,
             "learning_rate": 1e-4,
         }
     )
     assert fake_run.logged[2][1] == 129
     assert fake_run.logged[2][0]["train_loss_step"] == 0.123
+    assert fake_run.logged[2][0]["optimizer_step"] == 64
+    assert fake_run.logged[2][0]["gradient_accumulation_steps"] == 2
+    assert fake_run.logged[2][0]["optimizer_step_completed"] is True
 
-    artifact_file = tmp_path / "metrics.csv"
+    artifact_file = artifact_dir / "metrics.csv"
     artifact_file.write_text("epoch,val_loss\n1,0.5\n", encoding="utf-8")
     tracker.log_artifact_files(name="files", artifact_type="training-artifacts", paths=[artifact_file])
     assert fake_run.artifacts[0].files == [str(artifact_file)]

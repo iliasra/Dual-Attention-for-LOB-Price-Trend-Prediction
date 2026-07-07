@@ -6,7 +6,6 @@ from time import perf_counter
 from typing import Any
 import argparse
 import copy
-import math
 import os
 import shutil
 
@@ -250,7 +249,7 @@ def resolve_token_mask_sampling(
     config: ExperimentConfig,
     train_dataset: LOBDataset | LOBTokenChunkDataset,
 ) -> tuple[list[int] | None, dict[str, Any] | None]:
-    """Configure deterministic token-level neutral sampling for token chunks."""
+    """Configure deterministic token-level neutral loss weighting for token chunks."""
     ratio = config.training.sampling.neutral_to_directional_ratio
     if (
         not config.training.sequence_supervision.token_chunk_enabled
@@ -267,16 +266,17 @@ def resolve_token_mask_sampling(
     up_id = int(config.data.label_mapping[1])
     directional_count = int(full_counts[down_id] + full_counts[up_id])
     neutral_count = int(full_counts[neutral_id])
-    sampled_neutral_count = min(neutral_count, math.floor(float(ratio) * directional_count))
-    keep_probability = 0.0 if neutral_count == 0 else float(sampled_neutral_count / neutral_count)
-    config.training.sequence_supervision.neutral_keep_probability = keep_probability
-    sampled_counts = list(full_counts)
-    sampled_counts[neutral_id] = sampled_neutral_count
-    return sampled_counts, {
+    effective_neutral_count = min(float(neutral_count), float(ratio) * directional_count)
+    neutral_loss_weight = 1.0 if neutral_count == 0 else float(effective_neutral_count / neutral_count)
+    config.training.sequence_supervision.neutral_keep_probability = neutral_loss_weight
+    effective_counts = list(full_counts)
+    effective_counts[neutral_id] = int(round(effective_neutral_count))
+    return effective_counts, {
         "enabled": True,
-        "mode": "token_mask",
+        "method": "token_chunk_neutral_loss_weighting",
+        "mode": "token_loss_weight",
         "neutral_to_directional_ratio": float(ratio),
-        "neutral_keep_probability": keep_probability,
+        "neutral_loss_weight": neutral_loss_weight,
         "full_counts": {
             "total": int(sum(full_counts)),
             "down": int(full_counts[down_id]),
@@ -285,13 +285,21 @@ def resolve_token_mask_sampling(
             "directional": directional_count,
             "by_class": full_counts,
         },
-        "sampled_counts_per_epoch": {
-            "total": int(sum(sampled_counts)),
-            "down": int(sampled_counts[down_id]),
-            "neutral": sampled_neutral_count,
-            "up": int(sampled_counts[up_id]),
+        "effective_counts_for_loss": {
+            "total": int(sum(effective_counts)),
+            "down": int(effective_counts[down_id]),
+            "neutral": int(effective_counts[neutral_id]),
+            "up": int(effective_counts[up_id]),
             "directional": directional_count,
-            "by_class": sampled_counts,
+            "by_class": effective_counts,
+        },
+        "sampled_counts_per_epoch": {
+            "total": int(sum(effective_counts)),
+            "down": int(effective_counts[down_id]),
+            "neutral": int(effective_counts[neutral_id]),
+            "up": int(effective_counts[up_id]),
+            "directional": directional_count,
+            "by_class": effective_counts,
         },
     }
 
@@ -1520,17 +1528,26 @@ def train_fold(
     if sampling_summary.get("enabled"):
         sampled_counts = sampling_summary["sampled_counts_per_epoch"]
         full_counts = sampling_summary["full_counts"]
-        print(
-            f"Fold '{fold_id}' train sampling enabled: "
-            f"neutral_to_directional_ratio={sampling_summary['neutral_to_directional_ratio']}, "
-            f"mode={sampling_summary.get('mode', 'window_sampler')}, "
-            f"full_counts={full_counts}, sampled_counts_per_epoch={sampled_counts}."
-        )
+        if sampling_summary.get("method") == "token_chunk_neutral_loss_weighting":
+            print(
+                f"Fold '{fold_id}' token_chunk neutral loss weighting enabled: "
+                f"neutral_to_directional_ratio={sampling_summary['neutral_to_directional_ratio']}, "
+                f"neutral_loss_weight={sampling_summary['neutral_loss_weight']}, "
+                f"full_counts={full_counts}, effective_counts_for_loss="
+                f"{sampling_summary['effective_counts_for_loss']}."
+            )
+        else:
+            print(
+                f"Fold '{fold_id}' train sampling enabled: "
+                f"neutral_to_directional_ratio={sampling_summary['neutral_to_directional_ratio']}, "
+                f"mode={sampling_summary.get('mode', 'window_sampler')}, "
+                f"full_counts={full_counts}, sampled_counts_per_epoch={sampled_counts}."
+            )
     else:
         if sampling_summary.get("mode") == "token_mask":
             print(
                 f"Fold '{fold_id}' train sampling disabled in the DataLoader; "
-                "token-level neutral masking will be configured when counts are available."
+                "token-level neutral loss weighting will be configured when counts are available."
             )
         else:
             print(f"Fold '{fold_id}' train sampling disabled.")

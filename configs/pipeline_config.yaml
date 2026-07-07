@@ -280,6 +280,7 @@ training:
   device: cuda # allowed: cpu, cuda
   epochs: 30
   batch_size: 32 # token_chunk L=256; start conservative on L40S, try 64 after VRAM dry-run
+  gradient_accumulation_steps: 2 # 2 => effective optimizer batch ~= 64 chunks without extra activation memory
   eval_batch_size: 128 # evaluation only; no backward pass
   num_workers: 0
   prefetch_factor: null # DataLoader batches prefetched per worker; 16 workers * 4 = up to 64 queued batches
@@ -332,12 +333,12 @@ training:
     up_quantile: 0.005 # required only for top_x_quantile; 0.01 selects the top 1% p_up validation scores
     down_quantile: 0.005 # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
   sampling:
-    neutral_to_directional_ratio: 20 # token_chunk: keep all directional tokens, sample neutrals by deterministic mask
+    neutral_to_directional_ratio: 20 # token_chunk: fit neutral loss weight once on train set
   sequence_supervision:
     mode: token_chunk # last_window = one label per sliding window; token_chunk = loss on supervised chunk tokens
     loss_warmup_tokens: 128 # mask the first 128 tokens of each 256-token chunk
     chunk_stride: 128 # covers each supervised event once
-    neutral_sampling: token_mask # apply neutral_to_directional_ratio as a token-level loss mask
+    neutral_sampling: token_mask # token_chunk legacy name: downweight neutral-token loss by neutral_to_directional_ratio
 
 tracking:
   wandb:
