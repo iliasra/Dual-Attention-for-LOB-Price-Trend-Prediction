@@ -1,26 +1,48 @@
-# Dual Attention for Limit Order Book Price Trend Prediction
+# Economically Grounded Evaluation for LOB Price Trend Prediction
 
 This repository contains the research code for a thesis project on price trend
-prediction from Limit Order Book (LOB) data. I use it as an experimental
-framework to study how event-level preprocessing, continuous-time feature
-representations, and transformer-based architectures can be combined for
-short-horizon market movement prediction.
+prediction from Limit Order Book (LOB) data. The objective is to build and test an
+evaluation framework for price trend prediction where labels, thresholds,
+metrics, and model selection are tied to economically meaningful trading
+signals.
+
+A dual-attention transformer architecture is used as a case study inside this framework. It
+provides a controlled model family for testing hypotheses about event-level LOB
+representations, continuous-time kinematic streams, local attention over noisy
+sequences, and optional mixture-of-experts (MoE) routing. The broader research
+question is whether a model that looks good under standard classification
+metrics still produces useful directional signals once the labelling and
+evaluation protocol accounts for spread, execution costs, calibration, and
+fixed-rate signal selection.
 
 The project is not intended to be a polished trading system. It is a research
-prototype designed to make modelling assumptions explicit, test alternative LOB
-representations, and evaluate whether richer event-window features improve
-classification of future price trends.
+prototype designed to make modelling assumptions explicit, compare economically
+motivated labelling choices, and evaluate short-horizon price trend prediction in
+a way that is closer to the decisions a downstream trading or backtesting system
+would actually consume.
 
 ## Research Motivation
 
 LOB data is high-frequency, irregular, noisy, and strongly event-driven. A core
-question in this project is whether I can represent local LOB dynamics in a way
-that is more informative than raw snapshots alone, while still preserving the
-temporal structure needed by a transformer model.
+problem is that conventional price-movement labels can be statistically
+convenient while remaining economically weak: they may ignore spread, execution
+costs, output rate, and the difference between ranking the best signals and
+classifying every event. This repository therefore focuses on the full
+evaluation protocol, not only the neural architecture.
 
-I focus on two complementary research directions:
+I focus on three complementary research directions:
 
-1. **Preprocessing and token construction for LOB events**
+1. **Economically meaningful labels and evaluation**
+
+   The preprocessing pipeline supports adaptive price trend labels whose
+   threshold can combine estimated round-trip costs and local volatility. Model
+   selection can monitor metrics such as directional precision at a fixed signal
+   rate, where the top `x%` up and down probability scores are evaluated as the
+   actionable signals. Post-training evaluation can fit directional thresholds
+   on validation probabilities and apply the selected thresholds to held-out
+   test data.
+
+2. **Preprocessing and token construction for noisy LOB events**
 
    I explore dynamic and static transformations of LOB windows before they are
    passed to the model. For dynamic streams, I experiment with a spline-based
@@ -35,18 +57,21 @@ I focus on two complementary research directions:
    Order Book Messages"](https://arxiv.org/abs/2511.12563)**. This gives the preprocessing pipeline a way to encode
    the relative structure of the book while reducing the effect of raw scale.
 
-2. **Dual-attention modelling for price trend prediction**
+3. **Dual-attention modelling as a case study**
 
    I implement a transformer-style architecture inspired by **"TLOB: A Novel
    Transformer Model with Dual Attention for Price Trend Prediction with Limit
    Order Book Data"**. The model combines feature-wise attention over LOB-derived
    variables with temporal attention over event sequences. The goal is to study
-   whether separating feature interactions and temporal dependencies is useful
-   for LOB trend classification.
+   whether separating feature interactions and temporal dependencies, optionally
+   with MoE routing, is useful under the economic evaluation protocol above.
 
 ## Current Pipeline
 
-The codebase is organized around a preprocessing and training workflow. When fast kinematic tokenization is enabled, an optional GCV cache can be built before preprocessing so that expanding-window folds do not recompute the same daily GCV scores repeatedly.
+The codebase is organized around a preprocessing, training, and evaluation
+workflow. When fast kinematic tokenization is enabled, an optional GCV cache can
+be built before preprocessing so that expanding-window folds do not recompute the
+same daily GCV scores repeatedly.
 
 ```bash
 python scripts/process_data.py
@@ -61,14 +86,25 @@ sequence tensors. Large processed dataframe CSVs are optional and controlled by
 `preprocessing.save_processed_dataframes`.
 
 `scripts/run_training.py` loads the generated sequence tensors, creates PyTorch
-datasets and dataloaders, instantiates the dual-attention model, and trains it
-using the configured training loop.
+datasets and dataloaders, instantiates the case-study model, and trains it using
+the configured training loop.
 
 For fast kinematic tokenization, `scripts/list_lambda_gcv_tasks.py` and
 `scripts/build_lambda_gcv_cache.py` can precompute daily GCV score caches under `data/gcv_cache/`. The preprocessing pipeline can then read those caches through `--lambda-cache-dir`.
 
-Each training sample is a full event window of length `sequence_window`, defined
-in `configs/pipeline_config.yaml`.
+The current training process supports two supervision modes:
+
+- `last_window`: the legacy mode, where each `sequence_window` event window
+  produces one prediction for the final token.
+- `token_chunk`: the current large-scale mode, where a longer chunk such as
+  `sequence_window: 256` produces token-wise logits and computes the loss only
+  on the supervised tail, for example the final 128 tokens. With
+  `chunk_stride: 128`, each supervised event is covered once while avoiding most
+  of the repeated computation from overlapping sliding windows.
+
+In the default token-chunk configuration, attention is causal, optionally
+bounded by `model.local_attention_context_tokens`, and still respects the
+configured continuous-time `max_dt` mask.
 
 ## Repository Structure
 
@@ -92,7 +128,8 @@ in `configs/pipeline_config.yaml`.
 |   |-- process_data.py                   # Runs the preprocessing pipeline
 |   |-- run_training.py                   # Trains the model from saved sequences
 |   |-- validate_lobster_format.py        # Validates raw LOBSTER CSV files
-|   `-- vram_dry_run.py                   # GPU VRAM workload test on HPC
+|   |-- benchmark_token_chunk.py          # Synthetic token-chunk throughput/VRAM benchmark
+|   `-- vram_dry_run.py                   # Legacy GPU VRAM workload test
 |-- src/
 |   |-- configuration.py                  # YAML configuration dataclasses
 |   |-- datasets.py                       # Sequence construction and PyTorch dataset
@@ -111,12 +148,13 @@ in `configs/pipeline_config.yaml`.
 |   |-- integration/                      # Synthetic pipeline/model integration tests
 |   `-- smoke/                            # Smoke test on a small LOBSTER sample
 |-- requirements.txt                      
-|-- dry-run.pbs                           # Dry-run test on HPC 
+|-- dry-run.pbs                           # Lightweight token-chunk dry-run test on HPC
 |-- env_setup.sh                          # Allows to setup the required conda environment
 |-- environment.yml                       # Contains package and versions to create conda env
 |-- build_lambda_gcv_cache_array.pbs       # PBS array job for GCV cache construction
 |-- preprocess_folds_array.pbs             # PBS array job for fold-level preprocessing
 |-- run_training.pbs                       # PBS script to train from preprocessed folds
+|-- run_training_folds_array.pbs           # PBS array job for fold-level training
 `-- pytest.ini
 ```
 
@@ -140,7 +178,12 @@ data/sequences/<fold_id>/<split>/<symbol>_<date>_times.npy
 data/sequences/<fold_id>/<split>/<symbol>_<date>_labels.npy
 ```
 
-`LOBDataset` reconstructs sliding windows from these compact arrays during training.
+The training datasets reconstruct windows or chunks from these compact arrays:
+
+- `LOBDataset` is used in legacy `last_window` mode.
+- `LOBTokenChunkDataset` is used in `token_chunk` mode. It creates per-day
+  chunks, never crosses day boundaries, masks the warmup tokens, and covers each
+  supervised event once according to `training.sequence_supervision.chunk_stride`.
 
 Additional preprocessing artifacts include:
 
@@ -173,8 +216,8 @@ results/<RUN_STEM>/<fold_id>/best_lob_transformer.pth
 results/<RUN_STEM>/<fold_id>/training_state_latest.pth
 ```
 
-Optional Weights & Biases tracking is configured under `tracking.wandb` and is
-disabled by default. To enable it on a machine with network access, set
+Optional Weights & Biases tracking is configured under `tracking.wandb` in the
+YAML. To enable it on a machine with network access, set
 `tracking.wandb.enabled: true` in the config and provide credentials outside the
 repo:
 
@@ -198,6 +241,13 @@ Training can resume from the complete state checkpoint with:
 python scripts/run_training.py --config configs/pipeline_config.yaml --resume-latest
 python scripts/run_training.py --config configs/pipeline_config.yaml --fold-id <fold_id> --resume-from <path/to/training_state_latest.pth>
 ```
+
+The complete training-state checkpoint stores the optimizer, scheduler, AMP
+scaler, validation index, early-stopping state, RNG states, top-k checkpoint
+metadata, and W&B run id. It is separate from the top-k model checkpoints used
+for final model selection. A checkpoint from `last_window` training is not
+resumed into `token_chunk` training; start a new run or warm-start model weights
+explicitly if the model dimensions remain compatible.
 
 ## Testing
 
@@ -225,7 +275,9 @@ The expected HPC workflow is:
 1. create the environment;
 2. generate and build the daily GCV cache;
 3. preprocess folds as array jobs;
-4. train the model from the preprocessed fold artifacts.
+4. run a lightweight token-chunk GPU dry-run;
+5. train the model from the preprocessed fold artifacts;
+6. evaluate the selected checkpoints and thresholded signals.
 
 Start by cloning the project and creating the conda environment:
 
@@ -354,9 +406,130 @@ python scripts/process_data.py
 Without `--fold-id` or `--fold-index`, all configured folds are processed
 sequentially.
 
-### 4. Train
+### 4. Token-Chunk Dry-Run
+
+Before submitting a long training job, run the synthetic GPU dry-run:
+
+```bash
+qsub dry-run.pbs
+```
+
+`dry-run.pbs` does not copy the raw data or sequence shards. It copies only the
+code needed for the benchmark, excluding large directories such as `data/`,
+`logs/`, `output/`, `results/`, and `.git/`. The job runs
+`scripts/benchmark_token_chunk.py` against the current config and prints peak
+CUDA memory, tokens/s, and supervised labels/s.
+
+The benchmark uses `training.batch_size` from the YAML unless an override is
+provided:
+
+```bash
+qsub -v DRY_RUN_BATCH_SIZE=64 dry-run.pbs
+```
+
+Useful dry-run overrides are:
+
+```bash
+qsub -v DRY_RUN_BATCH_SIZE=64,DRY_RUN_D_INPUT=214,DRY_RUN_STEPS=5 dry-run.pbs
+```
+
+`DRY_RUN_D_INPUT` should match the number of generated feature columns when
+`model.d_input` is left as `null` in the config.
+
+### 5. Train
 
 After preprocessing has produced all configured fold sequence directories:
+
+For the current workflow, `run_training.pbs` processes the fold ids from
+`configs/folds.txt` sequentially in one PBS job:
+
+```bash
+RUN_STEM=my_experiment_$(date +%Y%m%d_%H%M%S)
+qsub -v TRAINING_RUN_STEM="$RUN_STEM" run_training.pbs
+```
+
+For a non-default config or folds file:
+
+```bash
+qsub -v TRAINING_CONFIG=configs/my_config.yaml,FOLDS_FILE=configs/my_folds.txt,TRAINING_RUN_STEM="$RUN_STEM" \
+  run_training.pbs
+```
+
+`run_training.pbs` copies the code to `$TMPDIR`, links persistent `logs/` and
+`results/`, stages `data/sequences/<fold_id>/` into `$TMPDIR`, and then runs:
+
+```bash
+python scripts/run_training.py \
+  --config "$WORK_CONFIG_PATH" \
+  --fold-id "$fold_id" \
+  --run-stem "$RUN_STEM"
+```
+
+The current default config uses token-wise chunked supervision:
+
+```yaml
+data:
+  sequence_window: 256
+model:
+  local_attention_context_tokens: 128
+training:
+  batch_size: 32
+  eval_batch_size: 128
+  preload_data_to_memory: true
+  sequence_supervision:
+    mode: token_chunk
+    loss_warmup_tokens: 128
+    chunk_stride: 128
+    neutral_sampling: token_mask
+```
+
+With this setup, each chunk contains 256 events, the first 128 positions are
+context warmup, and the loss/evaluation are computed on the remaining 128
+positions. The neutral-to-directional ratio is applied as a deterministic
+token-level loss mask: directional labels are kept, and neutral labels are
+sampled for the loss. The dataloader still iterates over chunks; neutral
+sampling does not remove chunks from the epoch.
+
+`preload_data_to_memory: true` can require substantial host RAM for large folds.
+The current PBS script requests fewer CPUs than older runs but keeps high memory
+because the compact `.npy` shards may be loaded into RAM:
+
+```bash
+#PBS -l select=1:ncpus=8:mem=128gb:ngpus=1
+```
+
+`run_training.pbs` saves the PBS stdout/stderr stream under:
+
+```text
+logs/<RUN_STEM>/pbs/run_logs.txt
+```
+
+and mirrors that stream under:
+
+```text
+$HOME/run_outputs/<RUN_STEM>/run_logs.txt
+```
+
+To resume after walltime, reuse the same `TRAINING_RUN_STEM` and pass resume
+arguments through the PBS variable:
+
+```bash
+qsub -v TRAINING_RUN_STEM="$RUN_STEM",TRAINING_RESUME_ARGS=--resume-latest run_training.pbs
+```
+
+For W&B online tracking from PBS, pass the API key through the environment, for
+example:
+
+```bash
+qsub -v WANDB_API_KEY,WANDB_MODE=online,TRAINING_RUN_STEM="$RUN_STEM" run_training.pbs
+```
+
+If the compute node has no network access, run offline and sync later:
+
+```bash
+qsub -v WANDB_MODE=offline,TRAINING_RUN_STEM="$RUN_STEM" run_training.pbs
+wandb sync --sync-all logs/<RUN_STEM>
+```
 
 To train folds independently as PBS array jobs, use `run_training_folds_array.pbs`.
 Each array task reads one fold id from `configs/folds.txt`. As with
@@ -371,47 +544,43 @@ qsub -J 1-$N_FOLDS \
   run_training_folds_array.pbs
 ```
 
-For a non-default config or folds file, pass them explicitly:
-
-```bash
-qsub -J 1-<N_FOLDS> \
-  -v TRAINING_CONFIG=configs/my_config.yaml,FOLDS_FILE=configs/my_folds.txt,TRAINING_RUN_STEM="$RUN_STEM" \
-  run_training_folds_array.pbs
-```
-
-For a sequential training run that processes the fold ids one after another in a
-single PBS job, use:
-
-```bash
-qsub run_training.pbs
-```
-
-`run_training.pbs` trains over the selected folds sequentially and copies
-generated logs and model weights back into `$PROJECT_DIR/logs/` and
-`$PROJECT_DIR/results/`. It also saves the PBS stdout/stderr stream under:
-
-```text
-logs/<RUN_STEM>/pbs/run_logs.txt
-```
-
-and mirrors that stream under:
-
-```text
-$HOME/run_outputs/<RUN_STEM>/run_logs.txt
-```
-
 For `run_training_folds_array.pbs`, each fold task writes its live PBS stream to:
 
 ```text
 logs/<RUN_STEM>/<fold_id>/run_logs.txt
 ```
 
+### 6. Evaluate
+
+After training, evaluate a selected checkpoint with `scripts/evaluate_model.py`.
+The script can use the same compact sequence shards, supports token-chunk
+inference, and can write validation/test probabilities for downstream
+calibration, threshold fitting, PR curves, and backtests.
+
+Typical evaluation is:
+
+```bash
+PYTHONPATH="$PWD/src:${PYTHONPATH:-}" \
+python scripts/evaluate_model.py \
+  --config results/<RUN_STEM>/<fold_id>/config.yaml \
+  --checkpoint results/<RUN_STEM>/<fold_id>/best_lob_transformer.pth \
+  --sequence-dir data/sequences/<fold_id> \
+  --split test \
+  --output-dir results/<RUN_STEM>/<fold_id>/test_eval \
+  --save-probabilities
+```
+
+Directional thresholds should be fit on validation probabilities and then
+applied to test probabilities, so test metrics remain out-of-sample.
+
 ## Status
 
 This repository is under active development as part of my thesis. The current
-implementation provides the core preprocessing, sequence construction,
-dual-attention model, and training loop. The main ongoing work is experimental:
-I am refining the feature representations, validating the labelling choices, and
-comparing model behaviour across alternative LOB tokenization strategies.
+implementation provides the core preprocessing pipeline, economically motivated
+labels, token-wise chunked training, checkpoint/resume support, optional W&B
+tracking, directional thresholding, and a dual-attention transformer case study.
 
-Once a first run is performed on this particular architecture, I would like to implement and test the following ideas: work on a volume-based view of the data (i.e. one snapshot each x traded shares); switch temporal/spatial attentions execution order, to see what impact the order has; implement an adaptative horizon framework based on the paper ["The Label Horizon Paradox: Rethinking Supervision Targets in Financial Forecasting"](https://arxiv.org/abs/2602.03395); try to apply kinematic processing to a more continuous feature, such as microprice, as raw prices/volumes may be too discrete for the method to perform well.   
+The main ongoing work is experimental and evaluative: I am refining the label
+framework and validating how fixed-rate directional metrics behave on validation
+and test splits, and comparing model behaviour across alternative LOB
+representations. I intend to perform some ablation studies on the case study model, as well as comparing it to several baselines models, to evaluate the hypotheses on kinematic streams and MoE usefulness. 
