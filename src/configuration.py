@@ -245,6 +245,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "mode": None,
             "loss_warmup_tokens": None,
             "chunk_stride": None,
+            "neutral_weighting": None,
             "neutral_sampling": None,
         },
     },
@@ -323,6 +324,7 @@ OPTIONAL_CONFIG_KEYS = {
     "training.sequence_supervision.mode",
     "training.sequence_supervision.loss_warmup_tokens",
     "training.sequence_supervision.chunk_stride",
+    "training.sequence_supervision.neutral_weighting",
     "training.sequence_supervision.neutral_sampling",
 }
 LEGACY_IGNORED_CONFIG_KEYS = {
@@ -356,6 +358,7 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     },
     "training.monitor_mode": {"min", "max"},
     "training.sequence_supervision.mode": {"last_window", "token_chunk"},
+    "training.sequence_supervision.neutral_weighting": {"none", "loss_weight"},
     "training.sequence_supervision.neutral_sampling": {"none", "token_mask"},
 }
 
@@ -1644,7 +1647,7 @@ class TrainingSequenceSupervisionConfig:
     mode: str = "last_window"
     loss_warmup_tokens: int | None = None
     chunk_stride: int | str | None = None
-    neutral_sampling: str = "none"
+    neutral_weighting: str = "none"
     neutral_keep_probability: float | None = None
     neutral_sampling_seed: int = 0
     neutral_class_id: int = 1
@@ -1652,11 +1655,9 @@ class TrainingSequenceSupervisionConfig:
     def __post_init__(self) -> None:
         """Validate optional token-wise supervision settings."""
         self.mode = str(self.mode).strip().lower()
-        self.neutral_sampling = str(self.neutral_sampling).strip().lower()
+        self.neutral_weighting = self._normalize_neutral_weighting(self.neutral_weighting)
         if self.mode not in {"last_window", "token_chunk"}:
             raise ValueError("training.sequence_supervision.mode must be 'last_window' or 'token_chunk'.")
-        if self.neutral_sampling not in {"none", "token_mask"}:
-            raise ValueError("training.sequence_supervision.neutral_sampling must be 'none' or 'token_mask'.")
         if self.loss_warmup_tokens is not None and self.loss_warmup_tokens < 0:
             raise ValueError("training.sequence_supervision.loss_warmup_tokens must be >= 0 or null.")
         if isinstance(self.chunk_stride, int) and self.chunk_stride <= 0:
@@ -1664,23 +1665,50 @@ class TrainingSequenceSupervisionConfig:
         if self.chunk_stride not in {None, "auto"} and not isinstance(self.chunk_stride, int):
             raise ValueError("training.sequence_supervision.chunk_stride must be > 0, null, or 'auto'.")
         if self.mode == "last_window":
-            if self.neutral_sampling == "token_mask":
+            if self.neutral_weighting == "loss_weight":
                 raise ValueError(
-                    "training.sequence_supervision.neutral_sampling='token_mask' requires mode='token_chunk'."
+                    "training.sequence_supervision.neutral_weighting='loss_weight' requires mode='token_chunk'."
                 )
         if self.mode == "token_chunk":
             if self.loss_warmup_tokens is None:
                 raise ValueError(
                     "training.sequence_supervision.loss_warmup_tokens must be set when mode is token_chunk."
                 )
-            if self.neutral_sampling == "none":
-                self.neutral_sampling = "token_mask"
+            if self.neutral_weighting == "none":
+                self.neutral_weighting = "loss_weight"
         if self.neutral_keep_probability is not None and not 0.0 <= self.neutral_keep_probability <= 1.0:
             raise ValueError("training.sequence_supervision.neutral_keep_probability must be in [0, 1] or null.")
         if self.neutral_sampling_seed < 0:
             raise ValueError("training.sequence_supervision.neutral_sampling_seed must be >= 0.")
         if self.neutral_class_id < 0:
             raise ValueError("training.sequence_supervision.neutral_class_id must be >= 0.")
+
+    @staticmethod
+    def _normalize_neutral_weighting(value: Any) -> str:
+        normalized = str(value).strip().lower()
+        if normalized == "token_mask":
+            normalized = "loss_weight"
+        if normalized not in {"none", "loss_weight"}:
+            raise ValueError("training.sequence_supervision.neutral_weighting must be 'none' or 'loss_weight'.")
+        return normalized
+
+    @staticmethod
+    def _legacy_sampling_to_weighting(value: Any) -> str:
+        normalized = str(value).strip().lower()
+        if normalized == "token_mask":
+            return "loss_weight"
+        if normalized == "none":
+            return "none"
+        raise ValueError("training.sequence_supervision.neutral_sampling must be 'none' or 'token_mask'.")
+
+    @property
+    def neutral_sampling(self) -> str:
+        """Backward-compatible alias for old configs/tests."""
+        return "token_mask" if self.neutral_weighting == "loss_weight" else "none"
+
+    @neutral_sampling.setter
+    def neutral_sampling(self, value: Any) -> None:
+        self.neutral_weighting = self._legacy_sampling_to_weighting(value)
 
     @property
     def token_chunk_enabled(self) -> bool:
@@ -1705,12 +1733,22 @@ class TrainingSequenceSupervisionConfig:
         """Build token-wise supervision settings from YAML."""
         if payload is None:
             return cls()
-        unexpected = sorted(set(payload) - {"mode", "loss_warmup_tokens", "chunk_stride", "neutral_sampling"})
+        unexpected = sorted(
+            set(payload) - {"mode", "loss_warmup_tokens", "chunk_stride", "neutral_weighting", "neutral_sampling"}
+        )
         if unexpected:
             raise ValueError(
                 "Invalid experiment config; unexpected key(s) in training.sequence_supervision: "
                 f"{unexpected}"
             )
+        neutral_weighting = str(payload.get("neutral_weighting", "none"))
+        if "neutral_sampling" in payload:
+            legacy_weighting = cls._legacy_sampling_to_weighting(payload["neutral_sampling"])
+            if "neutral_weighting" in payload and cls._normalize_neutral_weighting(neutral_weighting) != legacy_weighting:
+                raise ValueError(
+                    "training.sequence_supervision cannot set conflicting neutral_weighting and neutral_sampling."
+                )
+            neutral_weighting = legacy_weighting
         return cls(
             mode=str(payload.get("mode", "last_window")),
             loss_warmup_tokens=_optional_int(
@@ -1721,7 +1759,7 @@ class TrainingSequenceSupervisionConfig:
                 payload.get("chunk_stride"),
                 "training.sequence_supervision.chunk_stride",
             ),
-            neutral_sampling=str(payload.get("neutral_sampling", "none")),
+            neutral_weighting=neutral_weighting,
         )
 
 

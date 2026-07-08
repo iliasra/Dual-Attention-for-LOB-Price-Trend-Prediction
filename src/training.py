@@ -1316,7 +1316,7 @@ class LobTrainer:
         if (
             ratio is None
             or not self._token_chunk_enabled
-            or supervision.neutral_sampling != "token_mask"
+            or supervision.neutral_weighting != "loss_weight"
         ):
             return 1.0
 
@@ -1342,7 +1342,7 @@ class LobTrainer:
         if (
             ratio is None
             or not self._token_chunk_enabled
-            or supervision.neutral_sampling != "token_mask"
+            or supervision.neutral_weighting != "loss_weight"
         ):
             return None
 

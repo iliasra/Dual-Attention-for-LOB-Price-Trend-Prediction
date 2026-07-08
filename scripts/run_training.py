@@ -234,7 +234,7 @@ def build_train_sampler(
     if ratio is None:
         return None, {"enabled": False, "neutral_to_directional_ratio": None}
     if config.training.sequence_supervision.token_chunk_enabled and isinstance(train_dataset, LOBTokenChunkDataset):
-        return None, {"enabled": False, "neutral_to_directional_ratio": ratio, "mode": "token_mask"}
+        return None, {"enabled": False, "neutral_to_directional_ratio": ratio, "mode": "loss_weight"}
 
     sampler = EpochNeutralDownsamplingSampler(
         train_dataset,
@@ -245,7 +245,7 @@ def build_train_sampler(
     return sampler, sampler.summary(config.model.num_classes)
 
 
-def resolve_token_mask_sampling(
+def resolve_neutral_loss_weighting(
     config: ExperimentConfig,
     train_dataset: LOBDataset | LOBTokenChunkDataset,
 ) -> tuple[list[int] | None, dict[str, Any] | None]:
@@ -1522,7 +1522,7 @@ def train_fold(
         f"over {max_dt_summary['n_windows']} windows."
     )
     train_sampler, sampling_summary = build_train_sampler(config, train_dataset, seed=fold_seed)
-    token_sampled_class_counts, token_sampling_summary = resolve_token_mask_sampling(config, train_dataset)
+    token_sampled_class_counts, token_sampling_summary = resolve_neutral_loss_weighting(config, train_dataset)
     if token_sampling_summary is not None:
         sampling_summary = token_sampling_summary
     if sampling_summary.get("enabled"):
@@ -1544,7 +1544,7 @@ def train_fold(
                 f"full_counts={full_counts}, sampled_counts_per_epoch={sampled_counts}."
             )
     else:
-        if sampling_summary.get("mode") == "token_mask":
+        if sampling_summary.get("mode") == "loss_weight":
             print(
                 f"Fold '{fold_id}' train sampling disabled in the DataLoader; "
                 "token-level neutral loss weighting will be configured when counts are available."

@@ -37,7 +37,7 @@ def _training_config():
     config.sequence_supervision.mode = "last_window"
     config.sequence_supervision.loss_warmup_tokens = None
     config.sequence_supervision.chunk_stride = None
-    config.sequence_supervision.neutral_sampling = "none"
+    config.sequence_supervision.neutral_weighting = "none"
     config.sequence_supervision.neutral_keep_probability = None
     return config
 
@@ -1224,7 +1224,7 @@ def test_lob_trainer_evaluate_token_chunk_uses_loss_mask() -> None:
     config.sequence_supervision.mode = "token_chunk"
     config.sequence_supervision.loss_warmup_tokens = 2
     config.sequence_supervision.chunk_stride = 2
-    config.sequence_supervision.neutral_sampling = "token_mask"
+    config.sequence_supervision.neutral_weighting = "loss_weight"
     trainer = LobTrainer(config)
     data_loader = [
         (
@@ -1256,7 +1256,7 @@ def test_token_chunk_neutral_loss_weights_keep_all_supervised_tokens() -> None:
     config.sequence_supervision.mode = "token_chunk"
     config.sequence_supervision.loss_warmup_tokens = 0
     config.sequence_supervision.chunk_stride = 4
-    config.sequence_supervision.neutral_sampling = "token_mask"
+    config.sequence_supervision.neutral_weighting = "loss_weight"
     config.sequence_supervision.neutral_keep_probability = None
     trainer = LobTrainer(config)
 
@@ -1295,7 +1295,7 @@ def test_token_chunk_neutral_loss_weight_is_fit_once_from_train_set() -> None:
     config.sequence_supervision.mode = "token_chunk"
     config.sequence_supervision.loss_warmup_tokens = 0
     config.sequence_supervision.chunk_stride = 4
-    config.sequence_supervision.neutral_sampling = "token_mask"
+    config.sequence_supervision.neutral_weighting = "loss_weight"
     config.sequence_supervision.neutral_keep_probability = None
     trainer = LobTrainer(config)
 
@@ -1330,7 +1330,7 @@ def test_token_chunk_neutral_loss_weight_edge_cases() -> None:
     config.sequence_supervision.mode = "token_chunk"
     config.sequence_supervision.loss_warmup_tokens = 0
     config.sequence_supervision.chunk_stride = 4
-    config.sequence_supervision.neutral_sampling = "token_mask"
+    config.sequence_supervision.neutral_weighting = "loss_weight"
     config.sequence_supervision.neutral_keep_probability = None
     trainer = LobTrainer(config)
     mask = torch.ones((1, 4), dtype=torch.bool)
@@ -1428,7 +1428,7 @@ def test_token_chunk_evaluation_returns_unweighted_supervised_tokens() -> None:
     config.sequence_supervision.mode = "token_chunk"
     config.sequence_supervision.loss_warmup_tokens = 0
     config.sequence_supervision.chunk_stride = 3
-    config.sequence_supervision.neutral_sampling = "token_mask"
+    config.sequence_supervision.neutral_weighting = "loss_weight"
     trainer = LobTrainer(config)
 
     logits = torch.zeros((1, 3, 3))

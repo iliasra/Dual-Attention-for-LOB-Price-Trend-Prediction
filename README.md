@@ -481,7 +481,7 @@ training:
     mode: token_chunk
     loss_warmup_tokens: 128
     chunk_stride: 128
-    neutral_sampling: token_mask  # legacy name: neutral loss weighting in token_chunk mode
+    neutral_weighting: loss_weight
 ```
 
 With this setup, each chunk contains 256 events, the first 128 positions are

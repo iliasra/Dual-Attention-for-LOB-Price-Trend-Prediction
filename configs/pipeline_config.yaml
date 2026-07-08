@@ -338,7 +338,7 @@ training:
     mode: token_chunk # last_window = one label per sliding window; token_chunk = loss on supervised chunk tokens
     loss_warmup_tokens: 128 # mask the first 128 tokens of each 256-token chunk
     chunk_stride: 128 # covers each supervised event once
-    neutral_sampling: token_mask # token_chunk legacy name: downweight neutral-token loss by neutral_to_directional_ratio
+    neutral_weighting: loss_weight # downweight neutral-token loss by neutral_to_directional_ratio
 
 tracking:
   wandb:
