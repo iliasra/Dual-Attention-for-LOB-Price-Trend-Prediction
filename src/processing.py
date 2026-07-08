@@ -1304,6 +1304,9 @@ class LobProcessingPipeline:
             position_method=self.config.preprocessing.normalization.position_scaling_method,
             size_log1p_method=self.config.preprocessing.normalization.size_log1p_scaling_method,
             price_static_method=self.config.preprocessing.normalization.price_static_scaling_method,
+            adaptive_label_feature_method=(
+                self.config.preprocessing.normalization.adaptive_label_feature_scaling_method
+            ),
             delta_t_method=self.config.preprocessing.normalization.delta_t_scaling_method,
             delta_t_transform=self.config.preprocessing.normalization.delta_t_transform,
         )
@@ -1442,6 +1445,9 @@ class LobProcessingPipeline:
             position_method=self.config.preprocessing.normalization.position_scaling_method,
             size_log1p_method=self.config.preprocessing.normalization.size_log1p_scaling_method,
             price_static_method=self.config.preprocessing.normalization.price_static_scaling_method,
+            adaptive_label_feature_method=(
+                self.config.preprocessing.normalization.adaptive_label_feature_scaling_method
+            ),
             delta_t_method=self.config.preprocessing.normalization.delta_t_scaling_method,
             delta_t_transform=self.config.preprocessing.normalization.delta_t_transform,
         )
@@ -1468,6 +1474,9 @@ class LobProcessingPipeline:
                     "kinematic_positions": self.config.preprocessing.normalization.position_scaling_method,
                     "size_log1p": self.config.preprocessing.normalization.size_log1p_scaling_method,
                     "price_static": self.config.preprocessing.normalization.price_static_scaling_method,
+                    "adaptive_label_features": (
+                        self.config.preprocessing.normalization.adaptive_label_feature_scaling_method
+                    ),
                     "delta_t": self.config.preprocessing.normalization.delta_t_scaling_method,
                     "delta_t_transform": self.config.preprocessing.normalization.delta_t_transform,
                 }

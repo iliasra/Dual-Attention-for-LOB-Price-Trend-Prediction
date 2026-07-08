@@ -47,10 +47,11 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
                 "adaptive_threshold": {
                     "enabled": None,
                     "exit_spread_window": None,
-                    "volatility_window": None,
-                    "round_trip_fees_bps": None,
-                    "volatility_lambda": None,
-                },
+                "volatility_window": None,
+                "round_trip_fees_bps": None,
+                "volatility_lambda": None,
+                "label_timing": None,
+            },
             },
             "triple_barrier": {
                 "horizon": None,
@@ -84,6 +85,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "position_scaling_method": None,
             "size_log1p_scaling_method": None,
             "price_static_scaling_method": None,
+            "adaptive_label_feature_scaling_method": None,
             "delta_t_transform": None,
             "delta_t_scaling_method": None,
         },
@@ -254,6 +256,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
 OPTIONAL_TOP_LEVEL_KEYS = {"experiment", "folds", "run_metadata", "tracking"}
 OPTIONAL_CONFIG_KEYS = {
     "preprocessing.labels.smoothing.adaptive_threshold",
+    "preprocessing.labels.smoothing.adaptive_threshold.label_timing",
     "preprocessing.labels.smoothing.fit_scope",
     "preprocessing.price_static.tau_clip",
     "preprocessing.price_static.tau_max",
@@ -299,6 +302,7 @@ OPTIONAL_CONFIG_KEYS = {
     "preprocessing.normalization.position_scaling_method",
     "preprocessing.normalization.size_log1p_scaling_method",
     "preprocessing.normalization.price_static_scaling_method",
+    "preprocessing.normalization.adaptive_label_feature_scaling_method",
     "preprocessing.normalization.delta_t_transform",
     "preprocessing.normalization.delta_t_scaling_method",
     "training.early_stopping_warmup",
@@ -343,8 +347,10 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.normalization.position_scaling_method": NORMALIZATION_SCALING_METHODS,
     "preprocessing.normalization.size_log1p_scaling_method": NORMALIZATION_SCALING_METHODS,
     "preprocessing.normalization.price_static_scaling_method": NORMALIZATION_SCALING_METHODS,
+    "preprocessing.normalization.adaptive_label_feature_scaling_method": NORMALIZATION_SCALING_METHODS,
     "preprocessing.normalization.delta_t_transform": {"log1p"},
     "preprocessing.normalization.delta_t_scaling_method": NORMALIZATION_SCALING_METHODS,
+    "preprocessing.labels.smoothing.adaptive_threshold.label_timing": {"ex_ante", "ex_post"},
     "preprocessing.kinematic_tokenization.method": {"basis", "fast"},
     "preprocessing.price_kinematic.reference": {"tick", "time"},
     "preprocessing.volume_kinematic.reference": {"tick", "time"},
@@ -948,9 +954,11 @@ class AdaptiveThresholdConfig:
     volatility_window: int
     round_trip_fees_bps: float
     volatility_lambda: float
+    label_timing: str = "ex_ante"
 
     def __post_init__(self) -> None:
         """Check adaptive label-threshold parameters."""
+        self.label_timing = str(self.label_timing).strip().lower()
         if self.exit_spread_window <= 0:
             raise ValueError("preprocessing.labels.smoothing.adaptive_threshold.exit_spread_window must be > 0.")
         if self.volatility_window <= 0:
@@ -959,6 +967,11 @@ class AdaptiveThresholdConfig:
             raise ValueError("preprocessing.labels.smoothing.adaptive_threshold.round_trip_fees_bps must be >= 0.")
         if self.volatility_lambda < 0:
             raise ValueError("preprocessing.labels.smoothing.adaptive_threshold.volatility_lambda must be >= 0.")
+        if self.label_timing not in {"ex_ante", "ex_post"}:
+            raise ValueError(
+                "preprocessing.labels.smoothing.adaptive_threshold.label_timing "
+                "must be 'ex_ante' or 'ex_post'."
+            )
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "AdaptiveThresholdConfig":
@@ -969,6 +982,7 @@ class AdaptiveThresholdConfig:
             volatility_window=int(payload["volatility_window"]),
             round_trip_fees_bps=float(payload["round_trip_fees_bps"]),
             volatility_lambda=float(payload["volatility_lambda"]),
+            label_timing=str(payload.get("label_timing", "ex_ante")),
         )
 
 
@@ -1155,6 +1169,7 @@ class NormalizationConfig:
     position_scaling_method: str = "zscore"
     size_log1p_scaling_method: str = "zscore"
     price_static_scaling_method: str = "zscore"
+    adaptive_label_feature_scaling_method: str = "zscore"
     delta_t_transform: str = "log1p"
     delta_t_scaling_method: str = "robust_mad"
 
@@ -1182,6 +1197,11 @@ class NormalizationConfig:
             price_static_scaling_method=_normalization_scaling_value(
                 payload,
                 "price_static_scaling_method",
+                "zscore",
+            ),
+            adaptive_label_feature_scaling_method=_normalization_scaling_value(
+                payload,
+                "adaptive_label_feature_scaling_method",
                 "zscore",
             ),
             delta_t_transform=str(payload.get("delta_t_transform", "log1p")).strip().lower(),

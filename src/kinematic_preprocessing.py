@@ -36,6 +36,13 @@ FEATURE_SCALING_METHODS = {"zscore", "robust_mad", "quantile_scaling"}
 DUMMY_PRICE_VALUES = [9999999999, -9999999999, 9999999999.0, -9999999999.0]
 DERIVATIVE_SCALING_EPS = 1e-8
 MAD_NORMAL_CONSISTENCY = 1.4826
+ADAPTIVE_LABEL_FEATURE_COLUMNS = (
+    "adaptive_exit_spread_median",
+    "adaptive_local_volatility",
+    "adaptive_volatility_floor",
+    "adaptive_cost_floor",
+    "adaptive_threshold",
+)
 
 
 def _normalize_row_mask(row_mask: pd.Series | np.ndarray | list[bool], length: int) -> np.ndarray:
@@ -1307,6 +1314,10 @@ def delta_t_feature_columns(df: pd.DataFrame) -> list[str]:
     return [column for column in df.columns if column.lower() == "delta_t"]
 
 
+def adaptive_label_feature_columns(df: pd.DataFrame) -> list[str]:
+    return [column for column in ADAPTIVE_LABEL_FEATURE_COLUMNS if column in df.columns]
+
+
 def normalizable_feature_columns(df: pd.DataFrame) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
@@ -1316,6 +1327,7 @@ def normalizable_feature_columns(df: pd.DataFrame) -> list[str]:
         message_size_feature_columns,
         message_price_static_feature_columns,
         delta_t_feature_columns,
+        adaptive_label_feature_columns,
     ):
         for column in selector(df):
             if column in seen:
@@ -1358,6 +1370,7 @@ class DerivativeNormalizer:
     position_method: str = "zscore"
     size_log1p_method: str = "zscore"
     price_static_method: str = "zscore"
+    adaptive_label_feature_method: str = "zscore"
     delta_t_method: str = "robust_mad"
     delta_t_transform: str = "log1p"
     stats_: dict[str, dict[str, float | int | str]] = field(default_factory=dict)
@@ -1375,6 +1388,10 @@ class DerivativeNormalizer:
         self.price_static_method = _normalize_scaling_method(
             self.price_static_method,
             context="price_static scaling method",
+        )
+        self.adaptive_label_feature_method = _normalize_scaling_method(
+            self.adaptive_label_feature_method,
+            context="adaptive label feature scaling method",
         )
         self.delta_t_method = _normalize_scaling_method(
             self.delta_t_method,
@@ -1402,6 +1419,11 @@ class DerivativeNormalizer:
         add(kinematic_position_feature_columns(df), family="kinematic_position", method=self.position_method)
         add(message_size_feature_columns(df), family="message_size_log1p", method=self.size_log1p_method)
         add(message_price_static_feature_columns(df), family="message_price_static", method=self.price_static_method)
+        add(
+            adaptive_label_feature_columns(df),
+            family="adaptive_label_feature",
+            method=self.adaptive_label_feature_method,
+        )
         add(
             delta_t_feature_columns(df),
             family="delta_t",

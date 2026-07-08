@@ -66,6 +66,7 @@ preprocessing:
         volatility_window: 256
         round_trip_fees_bps: 1.5 # estimated for INTC in 03/24
         volatility_lambda: 1.0
+        label_timing: ex_ante # allowed: ex_ante, ex_post; ex_post uses realized costs/vol for labels only, not model features
     triple_barrier:
       horizon: 10
       upper_barrier_ticks: 2.0
@@ -97,6 +98,7 @@ preprocessing:
     position_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales *_kin_pos, fit on train only
     size_log1p_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales message-level size_log1p, fit on train only
     price_static_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales message-level price_static after opposite-best distance, fit on train only
+    adaptive_label_feature_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales ex-ante adaptive label features known at t, fit on train only
     delta_t_transform: log1p # applies log1p(delta_t) before scaling
     delta_t_scaling_method: robust_mad # allowed: zscore, quantile, robust_mad; scales transformed delta_t, fit on train only
   kinematic_tokenization:

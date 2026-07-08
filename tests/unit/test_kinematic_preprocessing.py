@@ -35,6 +35,7 @@ from kinematic_preprocessing import (
     VolumeStaticProcessor,
     _fast_price_tokens,
     _static_centering,
+    adaptive_label_feature_columns,
     calculate_microprice,
     derivative_feature_columns,
     fit_exp_scaling_parameters,
@@ -423,6 +424,52 @@ def test_derivative_normalizer_scales_positions_message_features_and_delta_t() -
     np.testing.assert_allclose(normalized["size_log1p"], [expected_size])
     np.testing.assert_allclose(normalized["price_static"], [expected_price_static])
     np.testing.assert_allclose(normalized["delta_t"], [expected_delta_t])
+    np.testing.assert_allclose(normalized["trend_label"], [1])
+
+
+def test_derivative_normalizer_scales_adaptive_label_features() -> None:
+    artifact_dir = Path(__file__).resolve().parent / ".test_artifacts" / "adaptive_label_feature_scaling"
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True)
+    stats_path = artifact_dir / "derivatives_stats.yaml"
+    train = pd.DataFrame(
+        {
+            "adaptive_exit_spread_median": [1.0, 2.0, 3.0],
+            "adaptive_local_volatility": [0.01, 0.02, 0.03],
+            "adaptive_volatility_floor": [0.01, 0.02, 0.03],
+            "adaptive_cost_floor": [0.10, 0.20, 0.30],
+            "adaptive_threshold": [0.10, 0.22, 0.35],
+            "trend_label": [0, 1, -1],
+        }
+    )
+    test = pd.DataFrame(
+        {
+            "adaptive_exit_spread_median": [4.0],
+            "adaptive_local_volatility": [0.04],
+            "adaptive_volatility_floor": [0.04],
+            "adaptive_cost_floor": [0.40],
+            "adaptive_threshold": [0.46],
+            "trend_label": [1],
+        }
+    )
+
+    normalizer = DerivativeNormalizer(stats_path, adaptive_label_feature_method="zscore").fit([train])
+    normalized = normalizer.transform(test)
+    stats = DerivativeNormalizer.load_stats(stats_path)
+
+    assert adaptive_label_feature_columns(train) == [
+        "adaptive_exit_spread_median",
+        "adaptive_local_volatility",
+        "adaptive_volatility_floor",
+        "adaptive_cost_floor",
+        "adaptive_threshold",
+    ]
+    assert set(adaptive_label_feature_columns(train)) <= set(normalizable_feature_columns(train))
+    assert stats["adaptive_threshold"]["family"] == "adaptive_label_feature"
+    assert stats["adaptive_threshold"]["method"] == "zscore"
+    expected = (0.46 - train["adaptive_threshold"].mean()) / train["adaptive_threshold"].std(ddof=0)
+    np.testing.assert_allclose(normalized["adaptive_threshold"], [expected])
     np.testing.assert_allclose(normalized["trend_label"], [1])
 
 

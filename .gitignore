@@ -10,6 +10,7 @@ backtest/*
 results/*
 !results/.gitkeep
 logs/*
+label/
 
 # Data
 data/*

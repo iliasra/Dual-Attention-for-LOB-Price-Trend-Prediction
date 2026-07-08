@@ -52,6 +52,7 @@ def test_tick_size_is_inherited_from_data_config() -> None:
     assert config.preprocessing.normalization.position_scaling_method == "zscore"
     assert config.preprocessing.normalization.size_log1p_scaling_method == "zscore"
     assert config.preprocessing.normalization.price_static_scaling_method == "zscore"
+    assert config.preprocessing.normalization.adaptive_label_feature_scaling_method == "zscore"
     assert config.preprocessing.normalization.delta_t_transform == "log1p"
     assert config.preprocessing.normalization.delta_t_scaling_method == "robust_mad"
     assert config.preprocessing.message.tick_size == config.data.tick_size
@@ -102,6 +103,7 @@ def test_config_loader_accepts_quantile_alias_for_normalization_scalers(artifact
     normalization["position_scaling_method"] = "quantile"
     normalization["size_log1p_scaling_method"] = "quantile"
     normalization["price_static_scaling_method"] = "quantile"
+    normalization["adaptive_label_feature_scaling_method"] = "quantile"
 
     config_path = artifact_dir / "quantile_feature_scaling.yaml"
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
@@ -110,6 +112,7 @@ def test_config_loader_accepts_quantile_alias_for_normalization_scalers(artifact
     assert loaded.preprocessing.normalization.position_scaling_method == "quantile_scaling"
     assert loaded.preprocessing.normalization.size_log1p_scaling_method == "quantile_scaling"
     assert loaded.preprocessing.normalization.price_static_scaling_method == "quantile_scaling"
+    assert loaded.preprocessing.normalization.adaptive_label_feature_scaling_method == "quantile_scaling"
 
 
 def test_config_loader_rejects_unknown_derivative_scaling(artifact_dir: Path) -> None:
@@ -133,6 +136,18 @@ def test_config_loader_rejects_unknown_delta_t_scaling(artifact_dir: Path) -> No
     broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="preprocessing\\.normalization\\.delta_t_scaling_method"):
+        ExperimentConfig.from_yaml(broken_config_path)
+
+
+def test_config_loader_rejects_unknown_adaptive_label_feature_scaling(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["preprocessing"]["normalization"]["adaptive_label_feature_scaling_method"] = "made_up"
+
+    broken_config_path = artifact_dir / "bad_adaptive_label_feature_scaling.yaml"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="preprocessing\\.normalization\\.adaptive_label_feature_scaling_method"):
         ExperimentConfig.from_yaml(broken_config_path)
 
 
@@ -651,6 +666,7 @@ def test_adaptive_threshold_config_values_are_loaded() -> None:
     assert adaptive.volatility_window == 256
     assert adaptive.round_trip_fees_bps == 1.5
     assert adaptive.volatility_lambda == 1.0
+    assert adaptive.label_timing == "ex_ante"
 
 
 def test_smoothing_threshold_string_none_is_loaded_as_none_with_adaptive_threshold_enabled(artifact_dir: Path) -> None:
@@ -836,6 +852,26 @@ def test_adaptive_threshold_config_validates_non_negative_lambda(artifact_dir: P
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="adaptive_threshold\\.volatility_lambda"):
+        ExperimentConfig.from_yaml(config_path)
+
+
+def test_adaptive_threshold_config_loads_and_validates_label_timing(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    adaptive_payload = payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]
+    adaptive_payload["label_timing"] = "ex_post"
+
+    config_path = artifact_dir / "postex_label_timing.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+
+    assert loaded.preprocessing.labels.smoothing.adaptive_threshold is not None
+    assert loaded.preprocessing.labels.smoothing.adaptive_threshold.label_timing == "ex_post"
+
+    adaptive_payload["label_timing"] = "future_magic"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="adaptive_threshold\\.label_timing"):
         ExperimentConfig.from_yaml(config_path)
 
 

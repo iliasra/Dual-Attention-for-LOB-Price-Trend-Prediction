@@ -6,6 +6,7 @@ import pytest
 
 from configuration import AdaptiveThresholdConfig, LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
 from horizon import (
+    ADAPTIVE_LABEL_FEATURE_COLUMNS,
     SmoothingMethodC,
     SmoothingMethodA,
     TargetLabelPipeline,
@@ -336,13 +337,143 @@ def test_calculate_adaptive_method_c_threshold_components_expose_floor_dominance
     )
 
     valid = components.dropna()
-    assert {"cost_floor", "volatility_floor", "threshold"} <= set(components.columns)
+    assert {
+        "exit_spread_median",
+        "local_volatility",
+        "cost_floor",
+        "volatility_floor",
+        "threshold",
+        *ADAPTIVE_LABEL_FEATURE_COLUMNS,
+    } <= set(components.columns)
     assert (valid["cost_floor"] > valid["volatility_floor"]).all()
     pd.testing.assert_series_equal(
         valid["threshold"],
         valid["cost_floor"],
         check_names=False,
     )
+    pd.testing.assert_series_equal(
+        components["adaptive_threshold"],
+        components["threshold"],
+        check_names=False,
+    )
+
+
+def test_adaptive_method_c_components_include_exante_local_volatility() -> None:
+    midprices = pd.Series([100.0, 101.0, 103.0, 102.0, 104.0, 107.0, 109.0])
+    df = pd.DataFrame(
+        {
+            "bid_price_1": midprices - 0.5,
+            "ask_price_1": midprices + 0.5,
+        }
+    )
+    config = AdaptiveThresholdConfig(
+        enabled=True,
+        exit_spread_window=2,
+        volatility_window=2,
+        round_trip_fees_bps=0.0,
+        volatility_lambda=2.0,
+    )
+
+    components = calculate_adaptive_method_c_threshold_components(
+        df,
+        midprices,
+        k=1,
+        h=2,
+        bid_col="bid_price_1",
+        ask_col="ask_price_1",
+        config=config,
+    )
+
+    w_minus = midprices.rolling(window=2).mean()
+    expected_local_vol = w_minus.pct_change(periods=2).rolling(window=2, min_periods=2).std(ddof=0)
+    pd.testing.assert_series_equal(
+        components["adaptive_local_volatility"],
+        expected_local_vol,
+        check_names=False,
+    )
+    np.testing.assert_allclose(
+        components["adaptive_volatility_floor"].dropna(),
+        (2.0 * expected_local_vol).dropna(),
+    )
+    valid = components[["adaptive_threshold", "adaptive_cost_floor", "adaptive_volatility_floor"]].dropna()
+    np.testing.assert_allclose(
+        valid["adaptive_threshold"],
+        np.maximum(valid["adaptive_cost_floor"].to_numpy(), valid["adaptive_volatility_floor"].to_numpy()),
+    )
+
+
+def test_adaptive_method_c_can_use_postex_threshold_for_labels() -> None:
+    midprices = pd.Series([100.0, 100.0, 100.0, 106.0, 106.0, 106.0, 106.0])
+    spreads = pd.Series([1.0, 1.0, 1.0, 1.0, 20.0, 1.0, 1.0])
+    df = pd.DataFrame(
+        {
+            "row_id": np.arange(len(midprices)),
+            "bid_price_1": midprices - spreads / 2.0,
+            "ask_price_1": midprices + spreads / 2.0,
+        }
+    )
+    exante_adaptive = AdaptiveThresholdConfig(
+        enabled=True,
+        exit_spread_window=2,
+        volatility_window=2,
+        round_trip_fees_bps=0.0,
+        volatility_lambda=0.0,
+        label_timing="ex_ante",
+    )
+    postex_adaptive = AdaptiveThresholdConfig(
+        enabled=True,
+        exit_spread_window=2,
+        volatility_window=2,
+        round_trip_fees_bps=0.0,
+        volatility_lambda=0.0,
+        label_timing="ex_post",
+    )
+
+    exante_components = calculate_adaptive_method_c_threshold_components(
+        df,
+        midprices,
+        k=1,
+        h=2,
+        bid_col="bid_price_1",
+        ask_col="ask_price_1",
+        config=exante_adaptive,
+    )
+    postex_components = calculate_adaptive_method_c_threshold_components(
+        df,
+        midprices,
+        k=1,
+        h=2,
+        bid_col="bid_price_1",
+        ask_col="ask_price_1",
+        config=postex_adaptive,
+    )
+    idx = 2
+    w_minus = midprices.rolling(window=2).mean()
+    forward_return = (midprices.rolling(window=2).mean().shift(-2) - w_minus) / w_minus
+
+    assert exante_components.loc[idx, "threshold"] == pytest.approx(
+        exante_components.loc[idx, "adaptive_threshold"],
+    )
+    assert postex_components.loc[idx, "threshold"] == pytest.approx(
+        postex_components.loc[idx, "postex_threshold"],
+    )
+    assert postex_components.loc[idx, "adaptive_threshold"] == pytest.approx(
+        exante_components.loc[idx, "adaptive_threshold"],
+    )
+    assert exante_components.loc[idx, "threshold"] < forward_return.loc[idx]
+    assert postex_components.loc[idx, "threshold"] > forward_return.loc[idx]
+
+    exante_result = TargetLabelPipeline(
+        make_smoothing_config(k=1, h=2, adaptive_threshold=exante_adaptive),
+    ).transform(df)
+    postex_result = TargetLabelPipeline(
+        make_smoothing_config(k=1, h=2, adaptive_threshold=postex_adaptive),
+    ).transform(df)
+
+    assert exante_result.loc[exante_result["row_id"] == idx, "trend_label"].item() == 1
+    assert postex_result.loc[postex_result["row_id"] == idx, "trend_label"].item() == 0
+    assert set(ADAPTIVE_LABEL_FEATURE_COLUMNS) <= set(postex_result.columns)
+    assert not any(column.startswith("postex_") for column in postex_result.columns)
 
 
 def test_adaptive_method_c_threshold_does_not_use_future_values() -> None:
@@ -416,6 +547,8 @@ def test_target_label_pipeline_uses_adaptive_threshold_for_method_c() -> None:
     result = TargetLabelPipeline(config).transform(df)
 
     assert not result.empty
+    assert set(ADAPTIVE_LABEL_FEATURE_COLUMNS) <= set(result.columns)
+    assert not any(column.startswith("realized_") for column in result.columns)
     assert set(result["trend_label"]) == {1}
 
 

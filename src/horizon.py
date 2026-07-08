@@ -15,6 +15,13 @@ except ImportError:  # pragma: no cover
 TRAIN_FITTED_SMOOTHING_THRESHOLDS = {"mean_spread"}
 SPLIT_FITTED_SMOOTHING_THRESHOLDS = {"mean_pct", "mean_pct_2"}
 FITTED_SMOOTHING_THRESHOLDS = TRAIN_FITTED_SMOOTHING_THRESHOLDS | SPLIT_FITTED_SMOOTHING_THRESHOLDS
+ADAPTIVE_LABEL_FEATURE_COLUMNS = (
+    "adaptive_exit_spread_median",
+    "adaptive_local_volatility",
+    "adaptive_volatility_floor",
+    "adaptive_cost_floor",
+    "adaptive_threshold",
+)
 
 
 def calculate_midprice(
@@ -133,6 +140,11 @@ def calculate_adaptive_method_c_threshold(
     )["threshold"]
 
 
+def _future_rolling_std(values: pd.Series, *, window: int, min_periods: int) -> pd.Series:
+    """Return rolling std over the current/future window aligned to the current row."""
+    return values.iloc[::-1].rolling(window=window, min_periods=min_periods).std(ddof=0).iloc[::-1]
+
+
 def calculate_adaptive_method_c_threshold_components(
     df: pd.DataFrame,
     midprices: pd.Series,
@@ -155,6 +167,7 @@ def calculate_adaptive_method_c_threshold_components(
     cost_floor = (((spread + exit_spread) / 2.0) + fee_price) / w_minus
 
     if config.volatility_lambda == 0:
+        local_sigma = pd.Series(0.0, index=midprices.index)
         volatility_floor = pd.Series(0.0, index=midprices.index)
     else:
         realized_c_returns = w_minus.pct_change(periods=h)
@@ -165,12 +178,51 @@ def calculate_adaptive_method_c_threshold_components(
         ).std(ddof=0)
         volatility_floor = config.volatility_lambda * local_sigma
 
-    threshold_values = np.maximum(cost_floor.to_numpy(dtype=float), volatility_floor.to_numpy(dtype=float))
+    exante_threshold_values = np.maximum(cost_floor.to_numpy(dtype=float), volatility_floor.to_numpy(dtype=float))
+    selected_threshold_values = exante_threshold_values
+    postex_columns: dict[str, pd.Series | np.ndarray] = {}
+    if config.label_timing == "ex_post":
+        postex_exit_spread = spread.shift(-h)
+        postex_cost_floor = (((spread + postex_exit_spread) / 2.0) + fee_price) / w_minus
+        if config.volatility_lambda == 0:
+            postex_local_volatility = pd.Series(0.0, index=midprices.index)
+            postex_volatility_floor = pd.Series(0.0, index=midprices.index)
+        else:
+            future_one_step_returns = midprices.pct_change().shift(-1)
+            realized_volatility_min_periods = min(h, max(2, h // 10))
+            postex_local_volatility = _future_rolling_std(
+                future_one_step_returns,
+                window=h,
+                min_periods=realized_volatility_min_periods,
+            ) * np.sqrt(float(h))
+            postex_volatility_floor = config.volatility_lambda * postex_local_volatility
+        postex_threshold_values = np.maximum(
+            postex_cost_floor.to_numpy(dtype=float),
+            postex_volatility_floor.to_numpy(dtype=float),
+        )
+        selected_threshold_values = postex_threshold_values
+        postex_columns = {
+            "postex_exit_spread": postex_exit_spread,
+            "postex_local_volatility": postex_local_volatility,
+            "postex_volatility_floor": postex_volatility_floor,
+            "postex_cost_floor": postex_cost_floor,
+            "postex_threshold": postex_threshold_values,
+        }
+
     return pd.DataFrame(
         {
+            "exit_spread_median": exit_spread,
+            "local_volatility": local_sigma,
             "cost_floor": cost_floor,
             "volatility_floor": volatility_floor,
-            "threshold": threshold_values,
+            "exante_threshold": exante_threshold_values,
+            "threshold": selected_threshold_values,
+            "adaptive_exit_spread_median": exit_spread,
+            "adaptive_local_volatility": local_sigma,
+            "adaptive_volatility_floor": volatility_floor,
+            "adaptive_cost_floor": cost_floor,
+            "adaptive_threshold": exante_threshold_values,
+            **postex_columns,
         },
         index=midprices.index,
     )
@@ -389,6 +441,7 @@ class TargetLabelPipeline:
 
         method_name = config.method.upper()
         pct_changes = smoothing_pct_changes(midprices, config)
+        adaptive_feature_valid_mask: pd.Series | None = None
 
         threshold = config.threshold if threshold_override is None else float(threshold_override)
         if threshold_override is not None and (
@@ -400,7 +453,7 @@ class TargetLabelPipeline:
             and config.adaptive_threshold is not None
             and config.adaptive_threshold.enabled
         ):
-            threshold = calculate_adaptive_method_c_threshold(
+            adaptive_components = calculate_adaptive_method_c_threshold_components(
                 result,
                 midprices,
                 k=config.k,
@@ -409,6 +462,13 @@ class TargetLabelPipeline:
                 ask_col=config.ask_column,
                 config=config.adaptive_threshold,
             )
+            for column in ADAPTIVE_LABEL_FEATURE_COLUMNS:
+                result[column] = adaptive_components[column]
+            adaptive_feature_frame = adaptive_components.loc[:, list(ADAPTIVE_LABEL_FEATURE_COLUMNS)]
+            adaptive_feature_valid_mask = adaptive_feature_frame.notna().all(axis=1) & np.isfinite(
+                adaptive_feature_frame,
+            ).all(axis=1)
+            threshold = adaptive_components["threshold"]
         elif threshold is None:
             raise ValueError(
                 "Smoothing label threshold cannot be null unless adaptive method-C thresholding is enabled. "
@@ -422,6 +482,8 @@ class TargetLabelPipeline:
             )
 
         valid_mask = pct_changes.notna() & np.isfinite(pct_changes)
+        if adaptive_feature_valid_mask is not None:
+            valid_mask = valid_mask & adaptive_feature_valid_mask
         if isinstance(threshold, pd.Series):
             valid_mask = valid_mask & threshold.notna() & np.isfinite(threshold)
             threshold = threshold.loc[valid_mask].reset_index(drop=True)
