@@ -462,12 +462,13 @@ class TargetLabelPipeline:
                 ask_col=config.ask_column,
                 config=config.adaptive_threshold,
             )
-            for column in ADAPTIVE_LABEL_FEATURE_COLUMNS:
-                result[column] = adaptive_components[column]
-            adaptive_feature_frame = adaptive_components.loc[:, list(ADAPTIVE_LABEL_FEATURE_COLUMNS)]
-            adaptive_feature_valid_mask = adaptive_feature_frame.notna().all(axis=1) & np.isfinite(
-                adaptive_feature_frame,
-            ).all(axis=1)
+            if config.adaptive_threshold.include_exante_features:
+                for column in ADAPTIVE_LABEL_FEATURE_COLUMNS:
+                    result[column] = adaptive_components[column]
+                adaptive_feature_frame = adaptive_components.loc[:, list(ADAPTIVE_LABEL_FEATURE_COLUMNS)]
+                adaptive_feature_valid_mask = adaptive_feature_frame.notna().all(axis=1) & np.isfinite(
+                    adaptive_feature_frame,
+                ).all(axis=1)
             threshold = adaptive_components["threshold"]
         elif threshold is None:
             raise ValueError(

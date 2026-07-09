@@ -13,6 +13,7 @@ import yaml
 try:
     from configuration import ExperimentConfig
     from monitoring import epoch_monitor_value, tailored_score_from_params
+    from pnl_metrics import TEST_PNL_METRIC_KEYS
     from pr_metrics import (
         best_f1_threshold,
         per_class_ranking_metrics,
@@ -20,6 +21,7 @@ try:
 except ImportError:  # pragma: no cover
     from .configuration import ExperimentConfig
     from .monitoring import epoch_monitor_value, tailored_score_from_params
+    from .pnl_metrics import TEST_PNL_METRIC_KEYS
     from .pr_metrics import (
         best_f1_threshold,
         per_class_ranking_metrics,
@@ -149,6 +151,24 @@ def fast_smoothing_lambda_summary(
     return summary
 
 
+def adaptive_label_feature_summary(config: ExperimentConfig) -> dict[str, Any]:
+    smoothing_config = config.preprocessing.labels.smoothing
+    adaptive_config = smoothing_config.adaptive_threshold
+    enabled = bool(
+        adaptive_config is not None
+        and adaptive_config.enabled
+        and adaptive_config.include_exante_features
+    )
+    return {
+        "enabled": enabled,
+        "method": (
+            config.preprocessing.normalization.adaptive_label_feature_scaling_method
+            if enabled
+            else None
+        ),
+    }
+
+
 def save_preprocessing_metadata(
     config: ExperimentConfig,
     sequence_dir: Path,
@@ -181,6 +201,7 @@ def save_preprocessing_metadata(
             "volume_source": config.preprocessing.sample_clock.volume_source,
             "trade_type_values": list(config.preprocessing.sample_clock.trade_type_values),
         },
+        "adaptive_label_features": adaptive_label_feature_summary(config),
         "fast_smoothing_lambdas": lambdas,
     }
     if label_distribution is not None:
@@ -300,6 +321,7 @@ def save_run_config_snapshot(
                 "mode": config.training.monitor_mode,
                 "top_k_checkpoints": config.training.top_k_checkpoints,
                 "validate_every_n_batches": config.training.validate_every_n_batches,
+                "validate_at_epoch_end": config.training.validate_at_epoch_end,
                 "early_stopping_patience": config.training.early_stopping_patience,
                 "early_stopping_warmup": config.training.early_stopping_warmup,
                 "params": {
@@ -588,6 +610,10 @@ def _epoch_row(
                     up_class_id=up_class_id,
                 )
             )
+            pnl_metrics = getattr(result, "test_pnl_metrics", None) or {}
+            for key in TEST_PNL_METRIC_KEYS:
+                value = pnl_metrics.get(key)
+                row[key] = "" if value is None else f"{float(value):.10g}"
     return row
 
 
@@ -644,6 +670,8 @@ def _epoch_fieldnames(config: ExperimentConfig) -> list[str]:
         if split in {"val", "test"}:
             fieldnames.extend(f"{split}_threshold_{key}" for key in THRESHOLD_METRIC_KEYS)
             fieldnames.extend(f"{split}_argmax_{key}" for key in ARGMAX_ABLATION_METRIC_KEYS)
+        if split == "test":
+            fieldnames.extend(TEST_PNL_METRIC_KEYS)
     return fieldnames
 
 
@@ -1177,6 +1205,9 @@ def save_run_log(
     pr_thresholds_path: Path | None = None,
     pr_curves_dir: Path | None = None,
     probabilities_dir: Path | None = None,
+    pnl_metrics_path: Path | None = None,
+    pnl_by_day_path: Path | None = None,
+    pnl_summary: dict[str, Any] | None = None,
     temperature_scaling_path: Path | None = None,
     temperature_scaling_summary: dict[str, Any] | None = None,
     directional_thresholds_path: Path | None = None,
@@ -1211,6 +1242,10 @@ def save_run_log(
             handle.write(f"PR curves directory: {pr_curves_dir}\n")
         if probabilities_dir is not None:
             handle.write(f"Probability outputs directory: {probabilities_dir}\n")
+        if pnl_metrics_path is not None:
+            handle.write(f"PnL metrics: {pnl_metrics_path}\n")
+        if pnl_by_day_path is not None:
+            handle.write(f"PnL by day: {pnl_by_day_path}\n")
         if temperature_scaling_path is not None:
             handle.write(f"Temperature scaling: {temperature_scaling_path}\n")
         if directional_thresholds_path is not None:
@@ -1263,6 +1298,7 @@ def save_run_log(
         handle.write(f"monitor_mode: {config.training.monitor_mode}\n")
         handle.write(f"top_k_checkpoints: {config.training.top_k_checkpoints}\n")
         handle.write(f"validate_every_n_batches: {config.training.validate_every_n_batches}\n")
+        handle.write(f"validate_at_epoch_end: {config.training.validate_at_epoch_end}\n")
         handle.write(f"early_stopping_patience: {config.training.early_stopping_patience}\n")
         handle.write(f"early_stopping_warmup: {config.training.early_stopping_warmup}\n")
         if config.training.monitor_params.complete:
@@ -1373,8 +1409,23 @@ def save_run_log(
             details = threshold_summary.get("selection_details")
             if isinstance(details, dict) and details:
                 handle.write(f"selection_details: {details}\n")
-        if directional_thresholds_path is not None:
-            handle.write(f"artifact: {directional_thresholds_path}\n")
+            if directional_thresholds_path is not None:
+                handle.write(f"artifact: {directional_thresholds_path}\n")
+        handle.write("\nTest PnL\n")
+        pnl_payload = pnl_summary or {"status": "skipped", "reason": "not_available"}
+        handle.write(f"status: {pnl_payload.get('status', 'skipped')}\n")
+        if pnl_payload.get("status") == "computed":
+            handle.write(f"primary_metric: {pnl_payload.get('convention', {}).get('primary_metric')}\n")
+            handle.write(f"horizon: {pnl_payload.get('horizon')}\n")
+            handle.write(f"tick_size: {pnl_payload.get('tick_size')}\n")
+            handle.write(f"round_trip_fees_bps: {pnl_payload.get('round_trip_fees_bps')}\n")
+            metrics = pnl_payload.get("metrics", {})
+            if isinstance(metrics, dict):
+                for key in TEST_PNL_METRIC_KEYS:
+                    if key in metrics:
+                        handle.write(f"{key}: {metrics[key]}\n")
+        else:
+            handle.write(f"reason: {pnl_payload.get('reason', 'not_available')}\n")
         handle.write("\nCheckpoint selection\n")
         selection_summary = checkpoint_selection_summary or {"enabled": False}
         handle.write(f"enabled: {selection_summary.get('enabled', False)}\n")

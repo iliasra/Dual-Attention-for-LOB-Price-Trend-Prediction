@@ -419,6 +419,7 @@ def test_adaptive_method_c_can_use_postex_threshold_for_labels() -> None:
         round_trip_fees_bps=0.0,
         volatility_lambda=0.0,
         label_timing="ex_ante",
+        include_exante_features=True,
     )
     postex_adaptive = AdaptiveThresholdConfig(
         enabled=True,
@@ -427,6 +428,7 @@ def test_adaptive_method_c_can_use_postex_threshold_for_labels() -> None:
         round_trip_fees_bps=0.0,
         volatility_lambda=0.0,
         label_timing="ex_post",
+        include_exante_features=True,
     )
 
     exante_components = calculate_adaptive_method_c_threshold_components(
@@ -541,6 +543,7 @@ def test_target_label_pipeline_uses_adaptive_threshold_for_method_c() -> None:
             volatility_window=2,
             round_trip_fees_bps=0.0,
             volatility_lambda=0.0,
+            include_exante_features=True,
         ),
     )
 
@@ -550,6 +553,83 @@ def test_target_label_pipeline_uses_adaptive_threshold_for_method_c() -> None:
     assert set(ADAPTIVE_LABEL_FEATURE_COLUMNS) <= set(result.columns)
     assert not any(column.startswith("realized_") for column in result.columns)
     assert set(result["trend_label"]) == {1}
+
+
+def test_target_label_pipeline_can_omit_adaptive_exante_features() -> None:
+    midprices = pd.Series(np.arange(100.0, 108.0))
+    df = pd.DataFrame(
+        {
+            "bid_price_1": midprices,
+            "ask_price_1": midprices,
+        }
+    )
+    config = make_smoothing_config(
+        method="C",
+        threshold=1.0,
+        k=1,
+        h=2,
+        adaptive_threshold=AdaptiveThresholdConfig(
+            enabled=True,
+            exit_spread_window=2,
+            volatility_window=2,
+            round_trip_fees_bps=0.0,
+            volatility_lambda=0.0,
+            include_exante_features=False,
+        ),
+    )
+
+    result = TargetLabelPipeline(config).transform(df)
+
+    assert not result.empty
+    assert set(ADAPTIVE_LABEL_FEATURE_COLUMNS).isdisjoint(result.columns)
+    assert set(result["trend_label"]) == {1}
+
+
+def test_postex_labels_do_not_require_exante_features_when_omitted() -> None:
+    midprices = pd.Series(np.arange(100.0, 108.0))
+    df = pd.DataFrame(
+        {
+            "bid_price_1": midprices - 0.5,
+            "ask_price_1": midprices + 0.5,
+        }
+    )
+    omitted_config = make_smoothing_config(
+        method="C",
+        threshold=None,
+        k=1,
+        h=2,
+        adaptive_threshold=AdaptiveThresholdConfig(
+            enabled=True,
+            exit_spread_window=100,
+            volatility_window=2,
+            round_trip_fees_bps=0.0,
+            volatility_lambda=0.0,
+            label_timing="ex_post",
+            include_exante_features=False,
+        ),
+    )
+    included_config = make_smoothing_config(
+        method="C",
+        threshold=None,
+        k=1,
+        h=2,
+        adaptive_threshold=AdaptiveThresholdConfig(
+            enabled=True,
+            exit_spread_window=100,
+            volatility_window=2,
+            round_trip_fees_bps=0.0,
+            volatility_lambda=0.0,
+            label_timing="ex_post",
+            include_exante_features=True,
+        ),
+    )
+
+    omitted_result = TargetLabelPipeline(omitted_config).transform(df)
+    included_result = TargetLabelPipeline(included_config).transform(df)
+
+    assert not omitted_result.empty
+    assert set(ADAPTIVE_LABEL_FEATURE_COLUMNS).isdisjoint(omitted_result.columns)
+    assert included_result.empty
 
 
 def test_target_label_pipeline_adds_triple_barrier_labels() -> None:

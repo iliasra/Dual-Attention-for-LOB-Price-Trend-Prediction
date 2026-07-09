@@ -52,6 +52,7 @@ preprocessing:
         round_trip_fees_bps: 0.0
         volatility_lambda: 0.0
         label_timing: ex_ante # allowed: ex_ante, ex_post; ex_post uses realized costs/vol for labels only, not model features
+        include_exante_features: false # set true to expose ex-ante adaptive label components as model features
     triple_barrier:
       horizon: 1
       upper_barrier_ticks: 0.0
@@ -82,7 +83,7 @@ preprocessing:
     position_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales *_kin_pos, fit on train only
     size_log1p_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales message-level size_log1p, fit on train only
     price_static_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales message-level price_static after opposite-best distance, fit on train only
-    adaptive_label_feature_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales ex-ante adaptive label features known at t, fit on train only
+    adaptive_label_feature_scaling_method: zscore # allowed: zscore, quantile, robust_mad; used only when include_exante_features=true
     delta_t_transform: log1p # applies log1p(delta_t) before scaling
     delta_t_scaling_method: robust_mad # allowed: zscore, quantile, robust_mad; scales transformed delta_t, fit on train only
   kinematic_tokenization:
@@ -164,6 +165,7 @@ training:
   early_stopping_warmup: 0
   early_stopping_min_delta: 0.0
   validate_every_n_batches: "epoch" # FI2010 keeps legacy validation/checkpointing at epoch boundaries
+  validate_at_epoch_end: false # ignored when validate_every_n_batches is "epoch"
   monitor: val_macro_f1 # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score, precision_at_fixed_rate
   monitor_mode: max # allowed: min, max; tailored_score and precision_at_fixed_rate require max
   top_k_checkpoints: 5 # keep the best k raw-monitor checkpoints, then select after calibration/thresholding
@@ -173,7 +175,7 @@ training:
     lambda_rate: 0.1
     fixed_rate: 0.01 # used by precision_at_fixed_rate; selects top 1% P(down) and top 1% P(up) separately
   persistent_workers: true
-  optimizer: adam
+  optimizer: adam # allowed: adam, adamw, muon
   learning_rate: 1.0e-4
   weight_decay: 0.0
   focal_gamma: 0.0

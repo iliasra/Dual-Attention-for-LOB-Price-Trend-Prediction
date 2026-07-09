@@ -87,6 +87,11 @@ def epoch_result_to_wandb_metrics(
             numeric = _optional_float(value)
             if numeric is not None:
                 payload[f"{prefix}_{key}"] = numeric
+    if result.test_pnl_metrics:
+        for key, value in result.test_pnl_metrics.items():
+            numeric = _optional_float(value)
+            if numeric is not None:
+                payload[key] = numeric
     return payload
 
 

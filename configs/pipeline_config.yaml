@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: DATA
+  name: label_ex_post
 
 data:
   raw_data_dir: ../data/LOBSTER
@@ -155,7 +155,8 @@ preprocessing:
         volatility_window: 256
         round_trip_fees_bps: 1.5 # estimated for INTC in 03/24
         volatility_lambda: 1.0
-        label_timing: ex_ante # allowed: ex_ante, ex_post; ex_post uses realized costs/vol for labels only, not model features
+        label_timing: ex_post # allowed: ex_ante, ex_post; ex_post uses realized costs/vol for labels only, not model features
+        include_exante_features: false # set true to expose ex-ante adaptive label components as model features
     triple_barrier:
       horizon: 10
       upper_barrier_ticks: 2.0
@@ -187,7 +188,7 @@ preprocessing:
     position_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales *_kin_pos, fit on train only
     size_log1p_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales message-level size_log1p, fit on train only
     price_static_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales message-level price_static after opposite-best distance, fit on train only
-    adaptive_label_feature_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales ex-ante adaptive label features known at t, fit on train only
+    adaptive_label_feature_scaling_method: zscore # allowed: zscore, quantile, robust_mad; used only when include_exante_features=true
     delta_t_transform: log1p # applies log1p(delta_t) before scaling
     delta_t_scaling_method: robust_mad # allowed: zscore, quantile, robust_mad; scales transformed delta_t, fit on train only
   kinematic_tokenization:
@@ -287,10 +288,11 @@ training:
   num_workers: 0
   prefetch_factor: null # DataLoader batches prefetched per worker; 16 workers * 4 = up to 64 queued batches
   preload_data_to_memory: true # load compact .npy shards into host RAM before DataLoader workers fork
-  validate_every_n_batches: 5000 # allowed: positive int or "epoch"; int validates/checkpoints intra-epoch
+  validate_every_n_batches: "epoch" # allowed: positive int or "epoch"; int validates/checkpoints intra-epoch
+  validate_at_epoch_end: false # used only when validate_every_n_batches is an int; false avoids extra epoch-end evals
   early_stopping_patience: 12 # counts validation intervals when validate_every_n_batches is an int
   early_stopping_warmup: 3 # counts validation intervals when validate_every_n_batches is an int
-  early_stopping_min_delta: 0.002
+  early_stopping_min_delta: 0.0005
   monitor: precision_at_fixed_rate # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score, precision_at_fixed_rate
   monitor_mode: max # allowed: min, max; tailored_score and precision_at_fixed_rate require max
   top_k_checkpoints: 3 # keep the best k raw-monitor checkpoints, then select after calibration/thresholding
@@ -300,7 +302,7 @@ training:
     lambda_rate: 0.1
     fixed_rate: 0.005 # used by precision_at_fixed_rate; selects top 1% P(down) and top 1% P(up) separately
   persistent_workers: false
-  optimizer: adamw # allowed: adam, adamw
+  optimizer: muon # allowed: adam, adamw, muon; muon uses matrix Muon + AdamW fallback for biases/norms
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   focal_gamma: 0.0

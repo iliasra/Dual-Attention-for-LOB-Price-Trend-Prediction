@@ -27,6 +27,7 @@ from configuration import (
     VolumeStaticConfig,
 )
 from kinematic_preprocessing import (
+    ADAPTIVE_LABEL_FEATURE_COLUMNS,
     DerivativeNormalizer,
     MessageFeatureProcessor,
     MessageOrderbookJoiner,
@@ -471,6 +472,27 @@ def test_derivative_normalizer_scales_adaptive_label_features() -> None:
     expected = (0.46 - train["adaptive_threshold"].mean()) / train["adaptive_threshold"].std(ddof=0)
     np.testing.assert_allclose(normalized["adaptive_threshold"], [expected])
     np.testing.assert_allclose(normalized["trend_label"], [1])
+
+
+def test_derivative_normalizer_omits_adaptive_stats_when_columns_absent() -> None:
+    artifact_dir = Path(__file__).resolve().parent / ".test_artifacts" / "adaptive_label_feature_absent"
+    if artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+    artifact_dir.mkdir(parents=True)
+    stats_path = artifact_dir / "derivatives_stats.yaml"
+    train = pd.DataFrame(
+        {
+            "bid_price_1_kin_vel": [0.1, 0.2, 0.3],
+            "trend_label": [0, 1, -1],
+        }
+    )
+
+    normalizer = DerivativeNormalizer(stats_path, adaptive_label_feature_method="zscore").fit([train])
+    stats = DerivativeNormalizer.load_stats(stats_path)
+
+    assert adaptive_label_feature_columns(train) == []
+    assert set(ADAPTIVE_LABEL_FEATURE_COLUMNS).isdisjoint(stats)
+    assert set(ADAPTIVE_LABEL_FEATURE_COLUMNS).isdisjoint(normalizer.transform(train).columns)
 
 
 def test_derivative_normalizer_accepts_quantile_alias_for_position_scaling() -> None:

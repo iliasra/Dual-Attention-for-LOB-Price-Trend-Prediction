@@ -16,6 +16,7 @@ from training import (
     EvaluationResult,
     LobTrainer,
     MovementDirectionAuxiliaryLoss,
+    MuonWithAdamW,
     class_weights_from_class_counts,
     class_weights_from_sequence_labels,
     classification_metrics_from_predictions,
@@ -34,6 +35,7 @@ def artifact_dir(request: pytest.FixtureRequest) -> Path:
 def _training_config():
     config = load_config().training
     config.validate_every_n_batches = "epoch"
+    config.validate_at_epoch_end = True
     config.sequence_supervision.mode = "last_window"
     config.sequence_supervision.loss_warmup_tokens = None
     config.sequence_supervision.chunk_stride = None
@@ -369,6 +371,74 @@ def test_lob_trainer_validates_every_n_batches_and_at_epoch_end(
     ]
     assert config.checkpoint_path(1, global_step=5).exists()
     assert config.best_model_path.exists()
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_can_skip_epoch_end_validation_with_batch_intervals(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _training_config()
+    config.epochs = 1
+    config.validate_every_n_batches = 2
+    config.validate_at_epoch_end = False
+    config.early_stopping_patience = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.device = "cpu"
+    config.use_amp = False
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    validation_losses = iter([1.0, 0.9])
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=next(validation_losses), metrics=metrics)
+
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    _, history = trainer.fit(TinySequenceClassifier(), train_loader=_tiny_batches(5), val_loader=[])
+
+    assert [(item.epoch, item.batch_in_epoch, item.global_step, item.validation_index) for item in history] == [
+        (1, 2, 2, 1),
+        (1, 4, 4, 2),
+    ]
+    assert not config.checkpoint_path(1, global_step=5).exists()
+
+
+@pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
+def test_lob_trainer_carries_training_interval_across_epoch_when_epoch_end_validation_is_disabled(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _training_config()
+    config.epochs = 2
+    config.validate_every_n_batches = 4
+    config.validate_at_epoch_end = False
+    config.early_stopping_patience = 0
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.device = "cpu"
+    config.use_amp = False
+    config.model_dir = str(artifact_dir)
+    trainer = LobTrainer(config)
+    metrics = ClassificationMetricAccumulator._zero_metrics(num_classes=3)
+    training_losses = iter([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+
+    def fake_weighted_loss(criterion, logits, targets, sample_weights):
+        del criterion, targets, sample_weights
+        return logits.sum() * 0.0 + torch.tensor(next(training_losses), device=logits.device)
+
+    def fake_evaluate(*args, **kwargs) -> EvaluationResult:
+        return EvaluationResult(loss=1.0, metrics=metrics)
+
+    monkeypatch.setattr(trainer, "_weighted_criterion_loss", fake_weighted_loss)
+    monkeypatch.setattr(trainer, "evaluate", fake_evaluate)
+
+    _, history = trainer.fit(TinySequenceClassifier(), train_loader=_tiny_batches(3), val_loader=[])
+
+    assert [(item.epoch, item.batch_in_epoch, item.global_step) for item in history] == [(2, 1, 4)]
+    assert history[0].train_loss == pytest.approx((1.0 + 2.0 + 3.0 + 4.0) / 4.0)
 
 
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
@@ -739,6 +809,34 @@ def test_lob_trainer_uses_configured_adam_optimizer() -> None:
 
     assert isinstance(optimizer, torch.optim.Adam)
     assert not isinstance(optimizer, torch.optim.AdamW)
+
+
+def test_lob_trainer_uses_configured_muon_optimizer() -> None:
+    config = _training_config()
+    config.device = "cpu"
+    config.optimizer = "muon"
+    trainer = LobTrainer(config)
+
+    optimizer = trainer._optimizer(nn.Linear(4, 3))
+
+    assert isinstance(optimizer, MuonWithAdamW)
+
+
+def test_muon_optimizer_updates_matrix_and_bias_parameters() -> None:
+    layer = nn.Linear(4, 3)
+    optimizer = MuonWithAdamW(layer.parameters(), lr=1e-3, weight_decay=1e-4)
+    x = torch.randn(5, 4)
+    loss = layer(x).pow(2).mean()
+    loss.backward()
+    weight_before = layer.weight.detach().clone()
+    bias_before = layer.bias.detach().clone()
+
+    optimizer.step()
+
+    assert not torch.allclose(layer.weight, weight_before)
+    assert not torch.allclose(layer.bias, bias_before)
+    assert "momentum_buffer" in optimizer.state[layer.weight]
+    assert "exp_avg" in optimizer.state[layer.bias]
 
 
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")

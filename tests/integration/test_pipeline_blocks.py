@@ -33,7 +33,7 @@ from configuration import (
     load_config,
 )
 from datasets import DailySequenceBuilder, LOBDataset
-from horizon import TargetLabelPipeline
+from horizon import ADAPTIVE_LABEL_FEATURE_COLUMNS, TargetLabelPipeline
 from kinematic_preprocessing import (
     DerivativeNormalizer,
     MessageFeatureProcessor,
@@ -715,7 +715,9 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
     feature_schema = yaml.safe_load(feature_schema_path.read_text(encoding="utf-8"))
     assert metadata["save_processed_dataframes"] is False
+    assert metadata["adaptive_label_features"] == {"enabled": False, "method": None}
     assert len(feature_schema["ordered_feature_columns"]) == np.load(train_features_path).shape[1]
+    assert set(ADAPTIVE_LABEL_FEATURE_COLUMNS).isdisjoint(feature_schema["ordered_feature_columns"])
     label_distribution = metadata["label_distribution"]
     assert label_distribution["method"] == "smoothing_C_adaptive"
     for split in ("train", "validation", "test"):

@@ -44,6 +44,7 @@ preprocessing:
         round_trip_fees_bps: 0.0
         volatility_lambda: 1.0
         label_timing: ex_ante
+        include_exante_features: false
     triple_barrier:
       horizon: 10
       upper_barrier_ticks: 2.0
@@ -74,7 +75,7 @@ preprocessing:
     position_scaling_method: zscore # allowed: zscore, quantile, robust_mad
     size_log1p_scaling_method: zscore # allowed: zscore, quantile, robust_mad
     price_static_scaling_method: zscore # allowed: zscore, quantile, robust_mad
-    adaptive_label_feature_scaling_method: zscore # allowed: zscore, quantile, robust_mad; ex-ante adaptive label features
+    adaptive_label_feature_scaling_method: zscore # allowed: zscore, quantile, robust_mad; used only when include_exante_features=true
     delta_t_transform: log1p
     delta_t_scaling_method: robust_mad # allowed: zscore, quantile, robust_mad
   kinematic_tokenization:

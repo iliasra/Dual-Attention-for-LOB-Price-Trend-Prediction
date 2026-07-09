@@ -22,6 +22,7 @@ if str(SRC_DIR) not in sys.path:
 from configuration import ExperimentConfig
 from datasets import LOBDataset, LOBTokenChunkDataset, sequence_window_labels
 from model import build_model
+from pnl_metrics import compute_pnl_from_prediction_outputs, resolve_raw_data_dir, save_pnl_artifacts
 from run_logging import (
     format_duration,
     save_probability_outputs,
@@ -66,6 +67,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional directional_thresholds.yaml file whose down/up thresholds define evaluation decisions.",
     )
+    parser.add_argument("--pnl", action="store_true", help="Compute realized PnL metrics for the evaluated split.")
+    parser.add_argument("--raw-dir", type=Path, default=None, help="Raw LOBSTER directory used for --pnl.")
+    parser.add_argument("--symbol", type=str, default=None, help="Optional symbol override used for --pnl alignment.")
     return parser.parse_args()
 
 
@@ -432,6 +436,7 @@ def write_evaluation_log(
     num_samples: int,
     duration_seconds: float,
     directional_thresholds_path: Path | None = None,
+    pnl_metrics_path: Path | None = None,
 ) -> None:
     """Write a compact text log for one evaluation run."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -450,6 +455,8 @@ def write_evaluation_log(
             handle.write(f"Directional thresholds: {directional_thresholds_path}\n")
         else:
             handle.write("Classification mode: argmax\n")
+        if pnl_metrics_path is not None:
+            handle.write(f"PnL metrics: {pnl_metrics_path}\n")
         handle.write(f"Duration seconds: {duration_seconds:.6f}\n")
         handle.write(f"Duration: {format_duration(duration_seconds)}\n")
 
@@ -469,10 +476,14 @@ def write_evaluation_outputs(
     duration_seconds: float,
     save_probabilities: bool,
     directional_thresholds: Mapping[str, Any] | None = None,
+    pnl_metrics: Mapping[str, Any] | None = None,
+    pnl_metrics_path: Path | None = None,
 ) -> dict[str, Any]:
     """Write metrics and optional probability artifacts."""
     row = evaluation_metrics_row(result, config, split, num_samples)
     add_directional_threshold_fields(row, directional_thresholds)
+    if pnl_metrics:
+        row.update(pnl_metrics)
     output_dir.mkdir(parents=True, exist_ok=True)
     write_metrics_csv(row, output_dir / "metrics.csv")
     with (output_dir / "metrics.yaml").open("w", encoding="utf-8") as handle:
@@ -491,6 +502,7 @@ def write_evaluation_outputs(
         num_samples=num_samples,
         duration_seconds=duration_seconds,
         directional_thresholds_path=None if directional_thresholds is None else Path(str(directional_thresholds["path"])),
+        pnl_metrics_path=pnl_metrics_path,
     )
     if save_probabilities:
         if result.prediction_outputs is None:
@@ -520,7 +532,7 @@ def main() -> None:
         args.split,
         config,
     )
-    x_sample, _, _ = dataset[0]
+    x_sample = dataset[0][0]
     model = build_model(config.model, d_input=x_sample.shape[-1])
 
     trainer = LobTrainer(config.training)
@@ -543,13 +555,33 @@ def main() -> None:
         model=model,
         data_loader=data_loader,
         description=f"Evaluate [{split_name}]",
-        collect_outputs=args.save_probabilities or directional_thresholds is not None,
+        collect_outputs=args.save_probabilities or directional_thresholds is not None or args.pnl,
         track_pr_metrics=True,
         track_expert_usage=True,
     )
     if directional_thresholds is not None:
         apply_directional_thresholds_to_result(result, config, directional_thresholds)
     duration_seconds = perf_counter() - start
+
+    pnl_result = None
+    if args.pnl:
+        if result.prediction_outputs is None:
+            raise RuntimeError("PnL metrics require collected prediction outputs.")
+        raw_dir = resolve_raw_data_dir(config, args.raw_dir)
+        pnl_result = compute_pnl_from_prediction_outputs(
+            config=config,
+            outputs=result.prediction_outputs,
+            dataset=dataset,
+            raw_dir=raw_dir,
+            split=split_name,
+            prefix=split_name,
+            symbol_override=args.symbol,
+        )
+        save_pnl_artifacts(
+            pnl_result,
+            metrics_path=args.output_dir / "pnl_metrics.yaml",
+            by_day_path=args.output_dir / "pnl_by_day.csv",
+        )
 
     row = write_evaluation_outputs(
         result=result,
@@ -565,6 +597,8 @@ def main() -> None:
         duration_seconds=duration_seconds,
         save_probabilities=args.save_probabilities,
         directional_thresholds=directional_thresholds,
+        pnl_metrics=None if pnl_result is None else pnl_result.metrics,
+        pnl_metrics_path=None if pnl_result is None else args.output_dir / "pnl_metrics.yaml",
     )
     print(
         f"Evaluation complete: split={split_name}, loss={row['loss']:.6f}, "

@@ -216,6 +216,11 @@ def test_training_optimizer_and_min_delta_are_validated(artifact_dir: Path) -> N
     with pytest.raises(ValueError, match="training\\.optimizer"):
         ExperimentConfig.from_yaml(broken_config_path)
 
+    payload["training"]["optimizer"] = "muon"
+    broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(broken_config_path)
+    assert loaded.training.optimizer == "muon"
+
     payload["training"]["optimizer"] = "adam"
     payload["training"]["early_stopping_min_delta"] = -0.001
     broken_config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
@@ -666,7 +671,32 @@ def test_adaptive_threshold_config_values_are_loaded() -> None:
     assert adaptive.volatility_window == 256
     assert adaptive.round_trip_fees_bps == 1.5
     assert adaptive.volatility_lambda == 1.0
-    assert adaptive.label_timing == "ex_ante"
+    assert adaptive.label_timing == "ex_post"
+    assert adaptive.include_exante_features is False
+
+
+def test_adaptive_threshold_include_exante_features_defaults_and_validates(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    adaptive_payload = payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]
+
+    adaptive_payload.pop("include_exante_features", None)
+    config_path = artifact_dir / "adaptive_features_default.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+    assert loaded.preprocessing.labels.smoothing.adaptive_threshold is not None
+    assert loaded.preprocessing.labels.smoothing.adaptive_threshold.include_exante_features is False
+
+    adaptive_payload["include_exante_features"] = True
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+    assert loaded.preprocessing.labels.smoothing.adaptive_threshold is not None
+    assert loaded.preprocessing.labels.smoothing.adaptive_threshold.include_exante_features is True
+
+    adaptive_payload["include_exante_features"] = "false"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="adaptive_threshold\\.include_exante_features"):
+        ExperimentConfig.from_yaml(config_path)
 
 
 def test_smoothing_threshold_string_none_is_loaded_as_none_with_adaptive_threshold_enabled(artifact_dir: Path) -> None:
@@ -1284,6 +1314,7 @@ def test_training_validate_every_n_batches_defaults_to_epoch_and_validates(artif
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
     payload["training"].pop("validate_every_n_batches", None)
+    payload["training"].pop("validate_at_epoch_end", None)
 
     config_path = artifact_dir / "legacy_without_validate_every.yaml"
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
@@ -1291,13 +1322,22 @@ def test_training_validate_every_n_batches_defaults_to_epoch_and_validates(artif
 
     assert loaded.training.validate_every_n_batches == "epoch"
     assert loaded.training.validates_by_epoch is True
+    assert loaded.training.validate_at_epoch_end is True
 
     payload["training"]["validate_every_n_batches"] = 5000
+    payload["training"]["validate_at_epoch_end"] = False
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     loaded = ExperimentConfig.from_yaml(config_path)
 
     assert loaded.training.validate_every_n_batches == 5000
     assert loaded.training.validates_by_epoch is False
+    assert loaded.training.validate_at_epoch_end is False
+
+    payload["training"]["validate_at_epoch_end"] = "nope"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="validate_at_epoch_end"):
+        ExperimentConfig.from_yaml(config_path)
+    payload["training"]["validate_at_epoch_end"] = False
 
     for bad_value in (0, -1, 1.5, "batch", "5000"):
         payload["training"]["validate_every_n_batches"] = bad_value

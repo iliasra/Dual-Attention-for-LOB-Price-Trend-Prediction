@@ -47,11 +47,12 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
                 "adaptive_threshold": {
                     "enabled": None,
                     "exit_spread_window": None,
-                "volatility_window": None,
-                "round_trip_fees_bps": None,
-                "volatility_lambda": None,
-                "label_timing": None,
-            },
+                    "volatility_window": None,
+                    "round_trip_fees_bps": None,
+                    "volatility_lambda": None,
+                    "label_timing": None,
+                    "include_exante_features": None,
+                },
             },
             "triple_barrier": {
                 "horizon": None,
@@ -193,6 +194,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "early_stopping_warmup": None,
         "early_stopping_min_delta": None,
         "validate_every_n_batches": None,
+        "validate_at_epoch_end": None,
         "monitor": None,
         "monitor_mode": None,
         "top_k_checkpoints": None,
@@ -257,6 +259,7 @@ OPTIONAL_TOP_LEVEL_KEYS = {"experiment", "folds", "run_metadata", "tracking"}
 OPTIONAL_CONFIG_KEYS = {
     "preprocessing.labels.smoothing.adaptive_threshold",
     "preprocessing.labels.smoothing.adaptive_threshold.label_timing",
+    "preprocessing.labels.smoothing.adaptive_threshold.include_exante_features",
     "preprocessing.labels.smoothing.fit_scope",
     "preprocessing.price_static.tau_clip",
     "preprocessing.price_static.tau_max",
@@ -281,6 +284,7 @@ OPTIONAL_CONFIG_KEYS = {
     "training.preload_data_to_memory",
     "training.top_k_checkpoints",
     "training.validate_every_n_batches",
+    "training.validate_at_epoch_end",
     "training.auxiliary_losses",
     "training.auxiliary_losses.movement_weight",
     "training.auxiliary_losses.direction_weight",
@@ -955,9 +959,15 @@ class AdaptiveThresholdConfig:
     round_trip_fees_bps: float
     volatility_lambda: float
     label_timing: str = "ex_ante"
+    include_exante_features: bool = False
 
     def __post_init__(self) -> None:
         """Check adaptive label-threshold parameters."""
+        if not isinstance(self.include_exante_features, bool):
+            raise ValueError(
+                "preprocessing.labels.smoothing.adaptive_threshold.include_exante_features "
+                "must be a boolean."
+            )
         self.label_timing = str(self.label_timing).strip().lower()
         if self.exit_spread_window <= 0:
             raise ValueError("preprocessing.labels.smoothing.adaptive_threshold.exit_spread_window must be > 0.")
@@ -976,6 +986,13 @@ class AdaptiveThresholdConfig:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "AdaptiveThresholdConfig":
         """Build adaptive threshold settings from a YAML subsection."""
+        include_exante_features = payload.get("include_exante_features", False)
+        if not isinstance(include_exante_features, bool):
+            raise ValueError(
+                "Invalid experiment config; "
+                "preprocessing.labels.smoothing.adaptive_threshold.include_exante_features "
+                "must be a boolean."
+            )
         return cls(
             enabled=bool(payload["enabled"]),
             exit_spread_window=int(payload["exit_spread_window"]),
@@ -983,6 +1000,7 @@ class AdaptiveThresholdConfig:
             round_trip_fees_bps=float(payload["round_trip_fees_bps"]),
             volatility_lambda=float(payload["volatility_lambda"]),
             label_timing=str(payload.get("label_timing", "ex_ante")),
+            include_exante_features=include_exante_features,
         )
 
 
@@ -2064,6 +2082,7 @@ class TrainingConfig:
     early_stopping_warmup: int
     early_stopping_min_delta: float
     validate_every_n_batches: int | str
+    validate_at_epoch_end: bool
     monitor: str
     monitor_mode: str
     monitor_params: TrainingMonitorParamsConfig
@@ -2123,11 +2142,13 @@ class TrainingConfig:
             self.validate_every_n_batches = int(self.validate_every_n_batches)
             if self.validate_every_n_batches <= 0:
                 raise ValueError("training.validate_every_n_batches must be a positive integer or 'epoch'.")
+        if not isinstance(self.validate_at_epoch_end, bool):
+            raise ValueError("training.validate_at_epoch_end must be a boolean.")
         self.monitor = self.monitor.lower()
         self.monitor_mode = self.monitor_mode.lower()
         self.optimizer = self.optimizer.lower()
-        if self.optimizer not in {"adam", "adamw"}:
-            raise ValueError("training.optimizer must be 'adam' or 'adamw'.")
+        if self.optimizer not in {"adam", "adamw", "muon"}:
+            raise ValueError("training.optimizer must be 'adam', 'adamw', or 'muon'.")
         if self.monitor not in {
             "val_loss",
             "val_macro_f1",
@@ -2268,6 +2289,11 @@ class TrainingConfig:
             early_stopping_warmup=int(payload.get("early_stopping_warmup", 0)),
             early_stopping_min_delta=float(payload.get("early_stopping_min_delta", 0.0)),
             validate_every_n_batches=payload.get("validate_every_n_batches", "epoch"),
+            validate_at_epoch_end=_optional_bool(
+                payload.get("validate_at_epoch_end"),
+                "training.validate_at_epoch_end",
+                default=True,
+            ),
             monitor=str(payload["monitor"]),
             monitor_mode=str(payload["monitor_mode"]),
             monitor_params=TrainingMonitorParamsConfig.from_dict(payload.get("monitor_params")),

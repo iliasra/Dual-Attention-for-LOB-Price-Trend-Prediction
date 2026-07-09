@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 from pathlib import Path
 import random
@@ -168,6 +169,128 @@ class TrainingStepProfiler:
         self._window_steps = 0
         self._window_samples = 0
         return payload
+
+
+def _orthogonalize_newton_schulz(update: torch.Tensor, *, steps: int, eps: float) -> torch.Tensor:
+    """Approximate the polar factor of a matrix update with Newton-Schulz iterations."""
+    if update.ndim != 2:
+        raise ValueError("Muon orthogonalization expects a 2D tensor.")
+    original_dtype = update.dtype
+    x = update.float()
+    transposed = False
+    if x.shape[0] > x.shape[1]:
+        x = x.T
+        transposed = True
+
+    x = x / x.norm().clamp_min(eps)
+    a, b, c = 3.4445, -4.7750, 2.0315
+    for _ in range(int(steps)):
+        xx_t = x @ x.T
+        x = a * x + (b * xx_t + c * (xx_t @ xx_t)) @ x
+
+    if transposed:
+        x = x.T
+    return x.to(dtype=original_dtype)
+
+
+class MuonWithAdamW(torch.optim.Optimizer):
+    """Muon for matrix parameters with AdamW fallback for non-matrix parameters.
+
+    Muon orthogonalizes a momentum update for 2D tensors. Biases, normalization
+    weights, and other non-matrix tensors keep standard AdamW-style updates.
+    """
+
+    def __init__(
+        self,
+        params: Iterable[nn.Parameter],
+        *,
+        lr: float,
+        weight_decay: float = 0.0,
+        momentum: float = 0.95,
+        nesterov: bool = True,
+        ns_steps: int = 5,
+        eps: float = 1e-8,
+        adamw_betas: tuple[float, float] = (0.9, 0.999),
+    ) -> None:
+        if lr <= 0.0:
+            raise ValueError("Muon learning rate must be > 0.")
+        if weight_decay < 0.0:
+            raise ValueError("Muon weight_decay must be >= 0.")
+        if not 0.0 <= momentum < 1.0:
+            raise ValueError("Muon momentum must be in [0, 1).")
+        if ns_steps <= 0:
+            raise ValueError("Muon ns_steps must be > 0.")
+        beta1, beta2 = adamw_betas
+        if not 0.0 <= beta1 < 1.0 or not 0.0 <= beta2 < 1.0:
+            raise ValueError("Muon AdamW fallback betas must be in [0, 1).")
+        defaults = {
+            "lr": float(lr),
+            "weight_decay": float(weight_decay),
+            "momentum": float(momentum),
+            "nesterov": bool(nesterov),
+            "ns_steps": int(ns_steps),
+            "eps": float(eps),
+            "adamw_betas": (float(beta1), float(beta2)),
+        }
+        super().__init__(list(params), defaults)
+
+    @torch.no_grad()
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = float(group["lr"])
+            weight_decay = float(group["weight_decay"])
+            momentum = float(group["momentum"])
+            nesterov = bool(group["nesterov"])
+            ns_steps = int(group["ns_steps"])
+            eps = float(group["eps"])
+            beta1, beta2 = group["adamw_betas"]
+
+            for param in group["params"]:
+                if param.grad is None:
+                    continue
+                grad = param.grad
+                if grad.is_sparse:
+                    raise RuntimeError("MuonWithAdamW does not support sparse gradients.")
+
+                if param.ndim == 2:
+                    if weight_decay != 0.0:
+                        param.mul_(1.0 - lr * weight_decay)
+                    state = self.state[param]
+                    if len(state) == 0:
+                        state["momentum_buffer"] = torch.zeros_like(param)
+                    momentum_buffer = state["momentum_buffer"]
+                    momentum_buffer.mul_(momentum).add_(grad)
+                    update = grad.add(momentum_buffer, alpha=momentum) if nesterov else momentum_buffer
+                    update = _orthogonalize_newton_schulz(update, steps=ns_steps, eps=eps)
+                    shape_scale = math.sqrt(max(1.0, param.shape[0] / max(param.shape[1], 1)))
+                    param.add_(update, alpha=-lr * shape_scale)
+                    continue
+
+                state = self.state[param]
+                if len(state) == 0:
+                    state["step"] = torch.zeros((), dtype=torch.float32, device=param.device)
+                    state["exp_avg"] = torch.zeros_like(param)
+                    state["exp_avg_sq"] = torch.zeros_like(param)
+                exp_avg = state["exp_avg"]
+                exp_avg_sq = state["exp_avg_sq"]
+                state["step"].add_(1.0)
+                step = int(state["step"].item())
+
+                if weight_decay != 0.0:
+                    param.mul_(1.0 - lr * weight_decay)
+                exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                bias_correction1 = 1.0 - beta1**step
+                bias_correction2 = 1.0 - beta2**step
+                denom = exp_avg_sq.sqrt().div_(math.sqrt(bias_correction2)).add_(eps)
+                param.addcdiv_(exp_avg, denom, value=-lr / bias_correction1)
+
+        return loss
 
 
 class FocalLoss(nn.Module):
@@ -1004,6 +1127,7 @@ class EpochResult:
     test_metrics: ClassificationMetrics | None = None
     val_threshold_metrics: dict[str, float] | None = None
     test_threshold_metrics: dict[str, float] | None = None
+    test_pnl_metrics: dict[str, float | int] | None = None
     val_argmax_metrics: ClassificationMetrics | None = None
     test_argmax_metrics: ClassificationMetrics | None = None
     train_expert_usage: dict[str, Any] | None = None
@@ -1513,12 +1637,25 @@ class LobTrainer:
     def _optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         """Build the configured optimizer."""
         optimizer_name = self.config.optimizer.lower()
-        optimizer_class = torch.optim.Adam if optimizer_name == "adam" else torch.optim.AdamW
-        return optimizer_class(
-            model.parameters(),
-            lr=self.config.learning_rate,
-            weight_decay=self.config.weight_decay,
-        )
+        if optimizer_name == "adam":
+            return torch.optim.Adam(
+                model.parameters(),
+                lr=self.config.learning_rate,
+                weight_decay=self.config.weight_decay,
+            )
+        if optimizer_name == "adamw":
+            return torch.optim.AdamW(
+                model.parameters(),
+                lr=self.config.learning_rate,
+                weight_decay=self.config.weight_decay,
+            )
+        if optimizer_name == "muon":
+            return MuonWithAdamW(
+                model.parameters(),
+                lr=self.config.learning_rate,
+                weight_decay=self.config.weight_decay,
+            )
+        raise ValueError(f"Unsupported optimizer: {self.config.optimizer}")
 
     def _rng_state(self) -> dict[str, Any]:
         """Return Python, NumPy, and torch RNG state for exact training resume."""
@@ -1678,6 +1815,7 @@ class LobTrainer:
         validate_by_epoch = bool(self.config.validates_by_epoch)
         validation_interval = None if validate_by_epoch else int(self.config.validate_every_n_batches)
         validation_unit = "epoch" if validate_by_epoch else "validation interval"
+        validate_at_epoch_end = bool(validate_by_epoch or self.config.validate_at_epoch_end)
         accumulation_steps = int(self.config.gradient_accumulation_steps)
         start_epoch_number = 1
         resume_skip_batches = 0
@@ -1853,11 +1991,15 @@ class LobTrainer:
             f"Monitoring {self.config.monitor} ({self.config.monitor_mode}); "
             f"saving top_k_checkpoints={self.config.top_k_checkpoints}; "
             f"validate_every_n_batches={self.config.validate_every_n_batches}; "
+            f"validate_at_epoch_end={validate_at_epoch_end}; "
             f"gradient_accumulation_steps={accumulation_steps}; "
             f"early stopping warmup={self.config.early_stopping_warmup} {validation_unit}(s), "
             f"min_delta={self.config.early_stopping_min_delta:.6g}; "
             f"optimizer={self.config.optimizer}."
         )
+        interval_loss = 0.0
+        interval_batches = 0
+        interval_metrics = ClassificationMetricAccumulator(device=self.device)
         for epoch_number in range(start_epoch_number, self.config.epochs + 1):
             epoch = epoch_number - 1
             self._set_epoch(train_loader, epoch)
@@ -1898,9 +2040,6 @@ class LobTrainer:
                 continue
 
             model.train()
-            interval_loss = 0.0
-            interval_batches = 0
-            interval_metrics = ClassificationMetricAccumulator(device=self.device)
             stopped = False
             last_batch_in_epoch = 0
             progress = tqdm(train_loader, desc=f"Epoch {epoch_number}/{self.config.epochs} [Train]")
@@ -2110,7 +2249,7 @@ class LobTrainer:
                 optimizer_step += 1
                 accumulation_count = 0
 
-            if interval_batches > 0:
+            if interval_batches > 0 and validate_at_epoch_end:
                 train_result = EvaluationResult(
                     loss=interval_loss / max(interval_batches, 1),
                     metrics=interval_metrics.compute(),
@@ -2133,6 +2272,9 @@ class LobTrainer:
                     val_result=val_result,
                 ):
                     break
+                interval_loss = 0.0
+                interval_batches = 0
+                interval_metrics = ClassificationMetricAccumulator(device=self.device)
             scheduler.step()
             if training_state_path is not None:
                 self._save_training_state(

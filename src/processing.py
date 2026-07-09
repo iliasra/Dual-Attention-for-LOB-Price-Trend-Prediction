@@ -1288,6 +1288,23 @@ class LobProcessingPipeline:
     def fold_feature_schema_path(self, fold_id: str) -> Path:
         return self.sequence_dir / fold_id / FEATURE_SCHEMA_FILENAME
 
+    def _adaptive_label_features_metadata(self) -> dict[str, object]:
+        smoothing_config = self.config.preprocessing.labels.smoothing
+        adaptive_config = smoothing_config.adaptive_threshold
+        enabled = bool(
+            adaptive_config is not None
+            and adaptive_config.enabled
+            and adaptive_config.include_exante_features
+        )
+        return {
+            "enabled": enabled,
+            "method": (
+                self.config.preprocessing.normalization.adaptive_label_feature_scaling_method
+                if enabled
+                else None
+            ),
+        }
+
     def fit_train_normalizer(self, train_days: list[ProcessedDay], stats_path: Path | None = None) -> DerivativeNormalizer:
         """Legacy in-memory normalizer fit; RAM-safe run_fold uses streaming fit."""
         print(f"Fitting derivative normalizer on {len(train_days)} training day(s).")
@@ -1474,9 +1491,7 @@ class LobProcessingPipeline:
                     "kinematic_positions": self.config.preprocessing.normalization.position_scaling_method,
                     "size_log1p": self.config.preprocessing.normalization.size_log1p_scaling_method,
                     "price_static": self.config.preprocessing.normalization.price_static_scaling_method,
-                    "adaptive_label_features": (
-                        self.config.preprocessing.normalization.adaptive_label_feature_scaling_method
-                    ),
+                    "adaptive_label_features": self._adaptive_label_features_metadata(),
                     "delta_t": self.config.preprocessing.normalization.delta_t_scaling_method,
                     "delta_t_transform": self.config.preprocessing.normalization.delta_t_transform,
                 }

@@ -97,6 +97,9 @@ class LOBDataset(Dataset):
             raise ValueError("sequence_window must be > 0.")
 
         self.preload_to_memory = bool(preload_to_memory)
+        self.x_paths = [Path(path) for path in x_paths]
+        self.t_paths = [Path(path) for path in t_paths]
+        self.y_paths = [Path(path) for path in y_paths]
         mmap_mode = None if self.preload_to_memory else "r"
         self.X_data = [np.load(path, mmap_mode=mmap_mode) for path in x_paths]
         self.T_data = [np.load(path, mmap_mode=mmap_mode) for path in t_paths]
@@ -192,6 +195,9 @@ class LOBTokenChunkDataset(Dataset):
             raise ValueError("chunk_stride must be > 0.")
 
         self.preload_to_memory = bool(preload_to_memory)
+        self.x_paths = [Path(path) for path in x_paths]
+        self.t_paths = [Path(path) for path in t_paths]
+        self.y_paths = [Path(path) for path in y_paths]
         mmap_mode = None if self.preload_to_memory else "r"
         self.X_data = [np.load(path, mmap_mode=mmap_mode) for path in x_paths]
         self.T_data = [np.load(path, mmap_mode=mmap_mode) for path in t_paths]

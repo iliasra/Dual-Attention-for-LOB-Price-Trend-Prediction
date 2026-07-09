@@ -33,6 +33,12 @@ from datasets import (
 )
 from model import build_model
 from monitoring import epoch_monitor_value as configured_epoch_monitor_value
+from pnl_metrics import (
+    compute_pnl_from_prediction_outputs,
+    resolve_raw_data_dir,
+    save_pnl_artifacts,
+    skipped_pnl_result,
+)
 from run_logging import (
     class_distribution,
     format_duration,
@@ -1335,6 +1341,7 @@ def select_checkpoint_after_validation_postprocessing(
         "monitor": config.training.monitor,
         "monitor_mode": config.training.monitor_mode,
         "validate_every_n_batches": config.training.validate_every_n_batches,
+        "validate_at_epoch_end": config.training.validate_at_epoch_end,
         "selection_split": "validation",
         "tie_break_order": [
             "best_postprocessed_monitor",
@@ -1444,6 +1451,8 @@ def train_fold(
     run_directional_thresholds_path = fold_log_dir / "directional_thresholds.yaml"
     run_temperature_scaling_path = fold_log_dir / "temperature_scaling.yaml"
     run_checkpoint_selection_path = fold_log_dir / "checkpoint_selection.yaml"
+    run_pnl_metrics_path = fold_log_dir / "pnl_metrics.yaml"
+    run_pnl_by_day_path = fold_log_dir / "pnl_by_day.csv"
     run_checkpoint_selection_dir = fold_log_dir / "checkpoint_selection"
     run_pr_curves_dir = fold_log_dir / "pr_curves"
     run_probabilities_dir = fold_log_dir / "probabilities"
@@ -1888,6 +1897,33 @@ def train_fold(
         checkpoint_label=best_checkpoint_label,
         fold=fold_id,
     )
+    pnl_result = skipped_pnl_result("fold has no configured test split")
+    if test_outputs_for_artifacts is not None and test_dataset is not None:
+        try:
+            pnl_result = compute_pnl_from_prediction_outputs(
+                config=config,
+                outputs=test_outputs_for_artifacts,
+                dataset=test_dataset,
+                raw_dir=resolve_raw_data_dir(config),
+                split="test",
+                prefix="test",
+            )
+            best_history.test_pnl_metrics = pnl_result.metrics
+            print(
+                f"Fold {fold_id} test PnL: "
+                f"net_cross_mean={pnl_result.metrics['test_pnl_net_cross_ticks_mean']:.6f} ticks/trade, "
+                f"net_cross_total={pnl_result.metrics['test_pnl_net_cross_ticks_total']:.6f} ticks, "
+                f"trades={int(pnl_result.metrics['test_pnl_n_trades'])}, "
+                f"trade_rate={pnl_result.metrics['test_pnl_trade_rate']:.4f}."
+            )
+        except Exception as exc:
+            pnl_result = skipped_pnl_result(str(exc))
+            print(f"Fold {fold_id} test PnL skipped: {exc}")
+    save_pnl_artifacts(
+        pnl_result,
+        metrics_path=run_pnl_metrics_path,
+        by_day_path=run_pnl_by_day_path,
+    )
     final_postprocessed_monitor_value = monitor_value_after_postprocessing(
         config=config,
         raw_monitor_value=float(selected_candidate["raw_monitor_value"]),
@@ -1915,6 +1951,8 @@ def train_fold(
         "test_probabilities": None if test_probabilities_path is None else str(test_probabilities_path),
         "pr_thresholds": str(run_pr_thresholds_path),
         "pr_curves_dir": str(run_pr_curves_dir),
+        "pnl_metrics": str(run_pnl_metrics_path),
+        "pnl_by_day": str(run_pnl_by_day_path),
     }
     save_run_summary(checkpoint_selection_summary, run_checkpoint_selection_path)
     wandb_tracker.log_validation(
@@ -1976,6 +2014,9 @@ def train_fold(
         pr_thresholds_path=run_pr_thresholds_path,
         pr_curves_dir=run_pr_curves_dir,
         probabilities_dir=run_probabilities_dir,
+        pnl_metrics_path=run_pnl_metrics_path,
+        pnl_by_day_path=run_pnl_by_day_path,
+        pnl_summary=pnl_result.summary,
         temperature_scaling_path=(
             run_temperature_scaling_path if temperature_scaling_summary.get("enabled") else None
         ),
@@ -2061,6 +2102,8 @@ def train_fold(
         run_confusion_matrices_path,
         run_expert_usage_path,
         run_pr_thresholds_path,
+        run_pnl_metrics_path,
+        run_pnl_by_day_path,
     ]
     if temperature_scaling_summary.get("enabled"):
         wandb_artifact_paths.append(run_temperature_scaling_path)
@@ -2115,8 +2158,11 @@ def train_fold(
             "pr_curves_dir": str(run_pr_curves_dir),
             "validation_probabilities": str(validation_probabilities_path),
             "test_probabilities": None if test_probabilities_path is None else str(test_probabilities_path),
+            "pnl_metrics": str(run_pnl_metrics_path),
+            "pnl_by_day": str(run_pnl_by_day_path),
         },
         "pr_artifacts": pr_artifacts,
+        "pnl": pnl_result.summary,
         "checkpoint_selection": checkpoint_selection_summary,
         "temperature_scaling": temperature_scaling_summary,
         "directional_thresholds": directional_threshold_summary,
