@@ -139,6 +139,18 @@ def test_config_loader_rejects_unknown_delta_t_scaling(artifact_dir: Path) -> No
         ExperimentConfig.from_yaml(broken_config_path)
 
 
+def test_causal_market_feature_config_is_loaded() -> None:
+    config = load_config()
+    market = config.preprocessing.causal_market_features
+
+    assert market.enabled is True
+    assert market.volatility_windows == (32, 128, 256)
+    assert market.imbalance_levels == (1, 5)
+    assert market.ofi_windows == (10, 50, 100)
+    assert market.momentum_windows == (5, 20, 100)
+    assert config.preprocessing.normalization.causal_market_feature_scaling_method == "robust_mad"
+
+
 def test_config_loader_rejects_unknown_adaptive_label_feature_scaling(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
@@ -155,17 +167,17 @@ def test_training_sampling_ratio_is_loaded() -> None:
     config = load_config()
 
     assert config.training.sampling.enabled
-    assert config.training.sampling.neutral_to_directional_ratio == 8.0
+    assert config.training.sampling.neutral_to_directional_ratio == 20.0
 
 
 def test_training_class_weight_parameters_are_loaded() -> None:
     config = load_config()
 
-    assert config.training.class_weight_beta == 0.1
-    assert config.training.class_weight_min == 0.5
-    assert config.training.class_weight_max == 3.0
+    assert config.training.class_weight_beta == 0.25
+    assert config.training.class_weight_min == 0.75
+    assert config.training.class_weight_max == 1.5
     assert config.training.deterministic_torch is False
-    assert config.training.optimizer == "adamw"
+    assert config.training.optimizer == "muon"
     assert config.training.early_stopping_min_delta == 0.0
 
 
@@ -173,15 +185,15 @@ def test_tlob_fi2010_config_loads() -> None:
     config_path = Path(__file__).resolve().parents[2] / "configs" / "config_TLOB_F1_2010.yaml"
     config = ExperimentConfig.from_yaml(config_path)
 
-    assert config.folds[0].id == "fi2010_tlob"
+    assert config.folds[0].id == "fi2010_tlob_h100"
     assert config.experiment.name
     assert config.data.sequence_window == 128
     assert config.data.label_mapping == {-1: 2, 0: 1, 1: 0}
     assert config.model.d_input == 144
-    assert config.model.d_model == 128
-    assert config.training.optimizer == "adam"
+    assert config.model.d_model == 256
+    assert config.training.optimizer == "adamw"
     assert config.training.early_stopping_min_delta >= 0.0
-    assert config.training.monitor == "val_loss"
+    assert config.training.monitor == "tailored_score"
     assert isinstance(config.training.temperature_scaling.enabled, bool)
 
 
@@ -315,10 +327,10 @@ def test_training_sequence_supervision_rejects_invalid_values(artifact_dir: Path
 def test_wandb_tracking_defaults_are_loaded() -> None:
     config = load_config()
 
-    assert config.tracking.wandb.enabled is False
+    assert config.tracking.wandb.enabled is True
     assert config.tracking.wandb.project == "lob-price-trend"
     assert config.tracking.wandb.mode == "auto"
-    assert config.tracking.wandb.tags == []
+    assert config.tracking.wandb.tags == ["INTC24"]
     assert config.tracking.wandb.log_best_checkpoint is True
     assert config.tracking.wandb.log_top_k_checkpoints is False
 
@@ -362,7 +374,7 @@ def test_fast_kinematic_config_values_are_loaded() -> None:
     assert config.preprocessing.kinematic_tokenization.orderbook_top_k_levels == 5
     assert config.preprocessing.sample_clock.mode == "event"
     assert config.preprocessing.sample_clock.enabled is False
-    assert config.preprocessing.sample_clock.volume_step_shares is None
+    assert config.preprocessing.sample_clock.volume_step_shares == 500.0
     assert config.preprocessing.sample_clock.volume_source == "traded"
     assert config.preprocessing.sample_clock.trade_type_values == [4, 5]
     assert config.preprocessing.microprice.enabled is True
@@ -396,8 +408,8 @@ def test_volume_static_exp_scaling_train_fitted_config_values_are_loaded() -> No
 def test_model_max_dt_quantile_is_loaded_and_max_dt_is_resolved_later() -> None:
     config = load_config()
 
-    assert config.model.num_layers == 1
-    assert config.model.latent_spatial_embed_dim is None
+    assert config.model.num_layers == 2
+    assert config.model.latent_spatial_embed_dim == 16
     assert config.model.use_moe is True
     assert config.model.max_dt_quantile == 95.0
     assert config.model.max_dt is None
@@ -908,13 +920,12 @@ def test_adaptive_threshold_config_loads_and_validates_label_timing(artifact_dir
 def test_explicit_folds_are_loaded() -> None:
     config = load_config()
 
-    assert [fold.id for fold in config.folds] == ["fold_001", "fold_002", "fold_003", "fold_004"]
-    assert config.folds[0].train_dates == ["2024-03-04", "2024-03-05", "2024-03-06"]
-    assert config.folds[0].validation_dates == ["2024-03-07", "2024-03-08"]
-    assert config.folds[0].test_dates == []
+    assert [fold.id for fold in config.folds] == ["fold2324"]
+    assert len(config.folds[0].train_dates) == 89
+    assert config.folds[0].train_dates[:3] == ["2023-11-01", "2023-11-02", "2023-11-03"]
     assert config.folds[-1].validation_dates == ["2024-03-12", "2024-03-13"]
-    assert config.folds[-1].test_dates == []
-    assert all(not fold.has_test_dates for fold in config.folds)
+    assert config.folds[-1].test_dates == ["2024-03-14", "2024-03-15"]
+    assert all(fold.has_test_dates for fold in config.folds)
 
 
 def test_folds_fallback_to_dataset_splits_when_missing(artifact_dir: Path) -> None:
@@ -1172,29 +1183,29 @@ def test_training_data_loader_settings_are_loaded() -> None:
 
     assert config.training.num_workers >= 0
     assert config.training.early_stopping_patience >= 0
-    assert config.training.early_stopping_warmup == 3
-    assert config.training.monitor == "tailored_score"
+    assert config.training.early_stopping_warmup == 0
+    assert config.training.monitor == "precision_at_fixed_rate"
     assert config.training.monitor_mode == "max"
-    assert config.training.monitor_params.lambda_ece == 0.1
-    assert config.training.monitor_params.lambda_rate == 0.2
+    assert config.training.monitor_params.lambda_ece == 0.0
+    assert config.training.monitor_params.lambda_rate == 0.1
     assert isinstance(config.training.temperature_scaling.enabled, bool)
     assert config.training.directional_thresholds.enabled is True
-    assert config.training.directional_thresholds.method == "joint_up_down"
+    assert config.training.directional_thresholds.method == "top_x_quantile"
     assert config.training.directional_thresholds.score in {
         "macro_f1",
         "directional_macro_f1",
         "tailored_score",
         "precision_at_fixed_rate",
     }
-    assert config.training.directional_thresholds.min_threshold == 0.05
+    assert config.training.directional_thresholds.min_threshold == 0.1
     assert config.training.directional_thresholds.max_threshold == 0.95
     assert config.training.directional_thresholds.step == 0.05
     assert config.training.directional_thresholds.delta == 0.0
     assert config.training.directional_thresholds.up_precision_floor is None
     assert config.training.directional_thresholds.down_precision_floor is None
-    assert config.training.directional_thresholds.up_quantile is None
-    assert config.training.directional_thresholds.down_quantile is None
-    assert config.training.eval_batch_size == 256
+    assert config.training.directional_thresholds.up_quantile == 0.005
+    assert config.training.directional_thresholds.down_quantile == 0.005
+    assert config.training.eval_batch_size == 128
     assert config.training.class_weights is None
     assert config.training.pin_memory is pin_memory
     assert config.training.data_loader_kwargs() == {
@@ -1244,6 +1255,7 @@ def test_training_prefetch_factor_is_optional_and_validated(artifact_dir: Path) 
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
     payload["training"]["prefetch_factor"] = 8
+    payload["training"]["num_workers"] = 1
     payload["training"]["preload_data_to_memory"] = True
 
     config_path = artifact_dir / "prefetch_factor.yaml"
@@ -1385,6 +1397,7 @@ def test_training_tailored_monitor_requires_params_and_max_mode(artifact_dir: Pa
         "base_metric": "val_macro_f1",
         "lambda_ece": 0.1,
         "lambda_rate": 0.5,
+        "fixed_rate": 0.01,
     }
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     loaded = ExperimentConfig.from_yaml(config_path)
@@ -1647,17 +1660,17 @@ def test_training_top_k_checkpoints_defaults_to_one_and_validates(artifact_dir: 
 
 
 @pytest.mark.parametrize(
-    "config_path",
+    ("config_path", "expected_top_k"),
     [
-        Path("configs/pipeline_config.yaml"),
-        Path("configs/config_TLOB_F1_2010.yaml"),
-        Path("configs/config_TLOB_F1_2010_2.yaml"),
+        (Path("configs/pipeline_config.yaml"), 3),
+        (Path("configs/config_TLOB_F1_2010.yaml"), 5),
+        (Path("configs/config_TLOB_F1_2010_2.yaml"), 5),
     ],
 )
-def test_active_configs_use_top_five_checkpoints(config_path: Path) -> None:
+def test_active_configs_use_configured_top_checkpoints(config_path: Path, expected_top_k: int) -> None:
     loaded = ExperimentConfig.from_yaml(config_path)
 
-    assert loaded.training.top_k_checkpoints == 5
+    assert loaded.training.top_k_checkpoints == expected_top_k
 
 
 def test_active_configs_use_expected_validation_schedule() -> None:
@@ -1665,11 +1678,44 @@ def test_active_configs_use_expected_validation_schedule() -> None:
     fi2010 = ExperimentConfig.from_yaml(Path("configs/config_TLOB_F1_2010.yaml"))
     fi2010_2 = ExperimentConfig.from_yaml(Path("configs/config_TLOB_F1_2010_2.yaml"))
 
-    assert pipeline.training.validate_every_n_batches == 5000
-    assert pipeline.training.early_stopping_patience == 8
-    assert pipeline.training.early_stopping_warmup == 1
+    assert pipeline.training.validate_every_n_batches == "epoch"
+    assert pipeline.training.early_stopping_patience == 0
+    assert pipeline.training.early_stopping_warmup == 0
     assert fi2010.training.validate_every_n_batches == "epoch"
     assert fi2010_2.training.validate_every_n_batches == "epoch"
+
+
+def test_action_value_regression_config_is_cross_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["data"]["target_columns"] = ["long_net_return_ticks", "short_net_return_ticks"]
+    payload["preprocessing"]["labels"]["strategy"] = "executable_return"
+    payload["model"]["auxiliary_heads"]["enabled"] = False
+    payload["training"]["monitor"] = "val_pnl"
+    payload["training"]["monitor_mode"] = "max"
+    payload["training"]["temperature_scaling"]["enabled"] = False
+    payload["training"]["directional_thresholds"]["enabled"] = False
+    payload["training"]["objective"]["type"] = "action_value_regression"
+    path = artifact_dir / "action_value.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(path)
+
+    assert loaded.training.objective.is_regression
+    assert loaded.preprocessing.labels.executable_return.entry_lag_events == 1
+    assert loaded.data.target_columns == ["long_net_return_ticks", "short_net_return_ticks"]
+
+    payload["training"]["objective"]["loss"] = "huber_quantile"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    quantile_loaded = ExperimentConfig.from_yaml(path)
+    assert quantile_loaded.training.objective.uses_quantiles
+    assert quantile_loaded.training.objective.regression_output_dim == 8
+    assert quantile_loaded.training.objective.quantiles == (0.1, 0.5, 0.9)
+
+    payload["data"]["target_columns"] = None
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="target_columns"):
+        ExperimentConfig.from_yaml(path)
 
 
 def test_directional_threshold_config_validates_methods_and_floors(artifact_dir: Path) -> None:

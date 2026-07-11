@@ -2,8 +2,7 @@
 #PBS -N lob_preprocess_fold
 #PBS -l walltime=14:00:00
 #PBS -l select=1:ncpus=8:mem=64gb:ompthreads=8
-# Keep this range aligned with the non-empty, non-comment lines in configs/folds.txt.
-#PBS -J 1-6
+# Submit with: qsub -J 1-<number_of_folds> preprocess_folds_array.pbs
 
 set -euo pipefail
 SCRIPT_START_EPOCH="$(date +%s)"
@@ -38,6 +37,23 @@ format_duration() {
   fi
 }
 
+resolve_configured_path() {
+  config_path="$1"
+  dotted_key="$2"
+  python - "$config_path" "$dotted_key" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+config_path = Path(sys.argv[1]).resolve()
+value = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+for key in sys.argv[2].split("."):
+    value = value[key]
+path = Path(value)
+print(path if path.is_absolute() else (config_path.parent / path).resolve())
+PY
+}
+
 finish() {
   status=$?
   end_epoch="$(date +%s)"
@@ -59,6 +75,10 @@ fi
 
 if [ ! -f "$PROJECT_DIR/$TRAINING_CONFIG" ]; then
   echo "Training config not found: $PROJECT_DIR/$TRAINING_CONFIG" >&2
+  exit 1
+fi
+if [ -z "${PBS_ARRAY_INDEX:-}" ]; then
+  echo "PBS_ARRAY_INDEX is unset. Submit with qsub -J 1-<number_of_folds>." >&2
   exit 1
 fi
 
@@ -110,6 +130,13 @@ echo "===== COPYING PROJECT TO TMPDIR ====="
 cp -r "$PROJECT_DIR" "$TMPDIR/"
 cd "$WORK_DIR"
 
+PROJECT_SEQUENCE_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" data.sequence_data_dir)"
+WORK_SEQUENCE_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" data.sequence_data_dir)"
+PROJECT_PROCESSED_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" data.processed_data_dir)"
+WORK_PROCESSED_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" data.processed_data_dir)"
+PROJECT_DERIVATIVES_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" preprocessing.normalization.derivatives_stats_dir)"
+WORK_DERIVATIVES_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" preprocessing.normalization.derivatives_stats_dir)"
+
 echo "===== RUNNING PREPROCESSING FOR $FOLD_ID ====="
 PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" \
 python scripts/process_data.py \
@@ -119,21 +146,21 @@ python scripts/process_data.py \
   --require-lambda-cache
 
 echo "===== COPYING OUTPUTS BACK ====="
-mkdir -p "$OUTPUT_ROOT/data/sequences/$FOLD_ID"
-mkdir -p "$OUTPUT_ROOT/data/derivatives_z_scores/$FOLD_ID"
+mkdir -p "$PROJECT_SEQUENCE_DIR/$FOLD_ID"
+mkdir -p "$PROJECT_DERIVATIVES_DIR/$FOLD_ID"
 
-rsync -a "$WORK_DIR/data/sequences/$FOLD_ID/" \
-  "$OUTPUT_ROOT/data/sequences/$FOLD_ID/"
+rsync -a "$WORK_SEQUENCE_DIR/$FOLD_ID/" \
+  "$PROJECT_SEQUENCE_DIR/$FOLD_ID/"
 
-if [ -d "$WORK_DIR/data/processed_dataframes/$FOLD_ID" ]; then
-  mkdir -p "$OUTPUT_ROOT/data/processed_dataframes/$FOLD_ID"
-  rsync -a "$WORK_DIR/data/processed_dataframes/$FOLD_ID/" \
-    "$OUTPUT_ROOT/data/processed_dataframes/$FOLD_ID/"
+if [ -d "$WORK_PROCESSED_DIR/$FOLD_ID" ]; then
+  mkdir -p "$PROJECT_PROCESSED_DIR/$FOLD_ID"
+  rsync -a "$WORK_PROCESSED_DIR/$FOLD_ID/" \
+    "$PROJECT_PROCESSED_DIR/$FOLD_ID/"
 else
   echo "No processed dataframe CSV directory to copy for $FOLD_ID (save_processed_dataframes=false)."
 fi
 
-rsync -a "$WORK_DIR/data/derivatives_z_scores/$FOLD_ID/" \
-  "$OUTPUT_ROOT/data/derivatives_z_scores/$FOLD_ID/"
+rsync -a "$WORK_DERIVATIVES_DIR/$FOLD_ID/" \
+  "$PROJECT_DERIVATIVES_DIR/$FOLD_ID/"
 
 echo "===== DONE $FOLD_ID ====="

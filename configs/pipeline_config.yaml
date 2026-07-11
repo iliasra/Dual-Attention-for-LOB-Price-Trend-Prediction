@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: label_ex_post
+  name: DATA
 
 data:
   raw_data_dir: ../data/LOBSTER
@@ -12,6 +12,7 @@ data:
   time_column: time
   label_column: trend_label
   label_mapping: {-1: 0, 0: 1, 1: 2}
+  target_columns: null # regression: [long_net_return_ticks, short_net_return_ticks]
   price_columns: auto
   volume_columns: auto
   # used to exclude specific columns when features.npy is created
@@ -140,7 +141,7 @@ preprocessing:
   snapshot_window: 100
   save_processed_dataframes: false # set true to also save large normalized CSV debug/audit files
   labels:
-    strategy: smoothing # allowed: smoothing, triple_barrier
+    strategy: smoothing # allowed: smoothing, triple_barrier, executable_return
     smoothing:
       method: C # allowed: A, B, C
       threshold: null # allowed: numeric fixed threshold, null for adaptive_threshold.enabled=true, or fitted modes mean_spread/mean_pct/mean_pct_2
@@ -165,6 +166,15 @@ preprocessing:
       ask_column: ask_price_1
       # if price_column null, computes the midprice based on level 1 bid/ask prices
       price_column:
+    executable_return:
+      horizon_events: 100 # exit at decision event + horizon; tail is censored/dropped
+      entry_lag_events: 1 # conservative latency in events before crossing the spread
+      round_trip_fees_bps: 1.5
+      slippage_ticks_per_side: 0.0
+      minimum_edge_ticks: 0.0 # class is neutral unless the best realized action clears this edge
+      clip_target_ticks: null # keep realized PnL exact; Huber handles outliers during training
+      bid_column: bid_price_1
+      ask_column: ask_price_1
   message:
     size_column: size
     price_column: price
@@ -181,6 +191,18 @@ preprocessing:
     market_close_seconds: 57600 # 57600 = 4 pm for NYSE closing
     start_offset_minutes: 0
     end_offset_minutes: 0
+  # Explicit causal microstructure features. time_day_sin/cos and the
+  # microprice kinematic stream already exist and are not duplicated here.
+  causal_market_features:
+    enabled: true
+    volatility_windows: [32, 128, 256]
+    spread_regime_window: 128
+    imbalance_levels: [1, 5]
+    microprice_levels: 5 # only adds microprice-midprice; the microprice kinematic stream remains separate
+    ofi_windows: [10, 50, 100]
+    intensity_windows: [10, 50, 100]
+    momentum_windows: [5, 20, 100]
+    trade_type_values: [4, 5]
   normalization:
     derivatives_stats_dir: ../data/derivatives_z_scores
     scope: train_only # allowed: train_only (used for readiness only)
@@ -189,6 +211,7 @@ preprocessing:
     size_log1p_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales message-level size_log1p, fit on train only
     price_static_scaling_method: zscore # allowed: zscore, quantile, robust_mad; scales message-level price_static after opposite-best distance, fit on train only
     adaptive_label_feature_scaling_method: zscore # allowed: zscore, quantile, robust_mad; used only when include_exante_features=true
+    causal_market_feature_scaling_method: robust_mad # train-only scaling for explicit causal microstructure features
     delta_t_transform: log1p # applies log1p(delta_t) before scaling
     delta_t_scaling_method: robust_mad # allowed: zscore, quantile, robust_mad; scales transformed delta_t, fit on train only
   kinematic_tokenization:
@@ -250,12 +273,15 @@ model:
   feature_embed_dim: 32
   feature_num_frequencies: 8
   feature_sigma: 1.0
+  feature_include_raw_value: true # monotone path alongside Fourier sin/cos features
   num_layers: 2
   latent_spatial_embed_dim: 16
   num_heads: 4
   # Quantile (0-100) of train sequence time spans used as temporal attention max_dt per fold.
   max_dt_quantile: 95.0
   use_moe: true # false = replace the final MoE tail with a dense FNN
+  use_spatial_attention: true # false = ablation without feature/latent spatial attention
+  use_temporal_attention: true # false = ablation without causal time attention
   # MoE-only router/expert selection parameters; ignored when use_moe=false.
   num_experts: 4
   top_k: 2
@@ -268,6 +294,7 @@ model:
   moe_expansion_factor: 4 # shared by dense FNN tails and MoE expert networks
   moe_router_noise: 0.01
   moe_load_balancing_weight: 0.01
+  moe_router_z_loss_weight: 0.001 # stabilizes router logits; ignored when use_moe=false
   classifier_dropout: 0.1
   local_attention_context_tokens: 128 # null = full causal attention; 128 = current token + 127 previous tokens
   classifier_pooling:
@@ -280,19 +307,28 @@ model:
     hidden_dim: null # null = d_model // 2 shared classifier trunk
 
 training:
+  objective:
+    type: classification # classification or action_value_regression
+    loss: huber_quantile # regression only; use huber/mse for L0/L1 ablations
+    huber_delta: 1.0
+    quantiles: [0.1, 0.5, 0.9] # used by huber_quantile; separate heads per action and quantile
+    quantile_loss_weight: 0.25
+    quantile_crossing_weight: 0.1
+    decision_threshold_ticks: 0.0 # trade only when predicted best action exceeds this net edge
+    fixed_rate: 0.005 # regression ranking/PnL audit: capacity per side, overlap resolved exclusively
   device: cuda # allowed: cpu, cuda
-  epochs: 30
+  epochs: 40
   batch_size: 32 # token_chunk L=256; start conservative on L40S, try 64 after VRAM dry-run
   gradient_accumulation_steps: 2 # 2 => effective optimizer batch ~= 64 chunks without extra activation memory
   eval_batch_size: 128 # evaluation only; no backward pass
   num_workers: 0
   prefetch_factor: null # DataLoader batches prefetched per worker; 16 workers * 4 = up to 64 queued batches
-  preload_data_to_memory: true # load compact .npy shards into host RAM before DataLoader workers fork
+  preload_data_to_memory: false # memmap shards; avoids ~87 GiB host-RAM preload on the current fold
   validate_every_n_batches: "epoch" # allowed: positive int or "epoch"; int validates/checkpoints intra-epoch
   validate_at_epoch_end: false # used only when validate_every_n_batches is an int; false avoids extra epoch-end evals
-  early_stopping_patience: 12 # counts validation intervals when validate_every_n_batches is an int
-  early_stopping_warmup: 3 # counts validation intervals when validate_every_n_batches is an int
-  early_stopping_min_delta: 0.0005
+  early_stopping_patience: 0 # counts validation intervals when validate_every_n_batches is an int
+  early_stopping_warmup: 0 # counts validation intervals when validate_every_n_batches is an int
+  early_stopping_min_delta: 0
   monitor: precision_at_fixed_rate # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score, precision_at_fixed_rate
   monitor_mode: max # allowed: min, max; tailored_score and precision_at_fixed_rate require max
   top_k_checkpoints: 3 # keep the best k raw-monitor checkpoints, then select after calibration/thresholding
@@ -300,7 +336,7 @@ training:
     base_metric: val_macro_f1 # used by tailored_score monitor/thresholds; allowed: val_macro_f1, val_directional_macro_f1
     lambda_ece: 0.0
     lambda_rate: 0.1
-    fixed_rate: 0.005 # used by precision_at_fixed_rate; selects top 1% P(down) and top 1% P(up) separately
+    fixed_rate: 0.005 # capacity per side; selections are disjoint, so total coverage is at most 1%
   persistent_workers: false
   optimizer: muon # allowed: adam, adamw, muon; muon uses matrix Muon + AdamW fallback for biases/norms
   learning_rate: 1.0e-4

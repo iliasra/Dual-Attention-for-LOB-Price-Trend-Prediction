@@ -42,13 +42,17 @@ class TailoredScoreComponents:
 
 @dataclass(frozen=True, slots=True)
 class DirectionalPrecisionAtFixedRate:
-    """Store precision over per-side top down/up probability scores."""
+    """Store precision over an executable, mutually-exclusive directional budget."""
 
     precision: float
     fixed_rate: float
     actual_rate: float
     k: int
     n: int
+    selected_count: int = 0
+    down_count: int = 0
+    up_count: int = 0
+    overlap_resolved_count: int = 0
 
     def prefixed(self, prefix: str) -> dict[str, float | int]:
         """Return fields named for CSV/logging output."""
@@ -56,6 +60,10 @@ class DirectionalPrecisionAtFixedRate:
             f"{prefix}_directional_precision_at_fixed_rate": self.precision,
             f"{prefix}_directional_precision_at_fixed_rate_k": self.k,
             f"{prefix}_directional_precision_at_fixed_rate_actual_rate": self.actual_rate,
+            f"{prefix}_directional_precision_at_fixed_rate_selected_count": self.selected_count,
+            f"{prefix}_directional_precision_at_fixed_rate_down_count": self.down_count,
+            f"{prefix}_directional_precision_at_fixed_rate_up_count": self.up_count,
+            f"{prefix}_directional_precision_at_fixed_rate_overlap_resolved_count": self.overlap_resolved_count,
         }
 
 
@@ -126,6 +134,62 @@ def directional_class_ids(
     return down_id, up_id
 
 
+def exclusive_directional_top_k(
+    down_scores: np.ndarray,
+    up_scores: np.ndarray,
+    *,
+    k_per_side: int,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Select disjoint down/up indices with at most ``k_per_side`` actions each.
+
+    Candidate actions are ranked globally by their side probability. Once a row
+    is assigned to one action, it cannot be assigned to the opposite action. A
+    displaced side continues down its ranking, so small fixed-rate budgets still
+    fill both sides without double-counting an event.
+    """
+    down = np.asarray(down_scores, dtype=np.float64).reshape(-1)
+    up = np.asarray(up_scores, dtype=np.float64).reshape(-1)
+    if down.shape != up.shape:
+        raise ValueError("down_scores and up_scores must have the same shape.")
+    if k_per_side < 0:
+        raise ValueError("k_per_side must be >= 0.")
+    if k_per_side == 0 or down.size == 0:
+        empty = np.asarray([], dtype=np.int64)
+        return empty, empty, 0
+
+    n_samples = int(down.size)
+    requested = min(int(k_per_side), n_samples)
+    naive_down = np.argsort(-down, kind="mergesort")[:requested]
+    naive_up = np.argsort(-up, kind="mergesort")[:requested]
+    overlap_count = int(np.intersect1d(naive_down, naive_up, assume_unique=False).size)
+
+    sample_ids = np.arange(n_samples, dtype=np.int64)
+    candidate_samples = np.concatenate([sample_ids, sample_ids])
+    candidate_sides = np.concatenate(
+        [np.zeros(n_samples, dtype=np.int8), np.ones(n_samples, dtype=np.int8)]
+    )
+    candidate_scores = np.concatenate([down, up])
+    order = np.lexsort((candidate_sides, candidate_samples, -candidate_scores))
+
+    assigned = np.zeros(n_samples, dtype=bool)
+    selected: list[list[int]] = [[], []]
+    for candidate_index in order:
+        side = int(candidate_sides[candidate_index])
+        sample = int(candidate_samples[candidate_index])
+        if len(selected[side]) >= requested or assigned[sample]:
+            continue
+        selected[side].append(sample)
+        assigned[sample] = True
+        if len(selected[0]) >= requested and len(selected[1]) >= requested:
+            break
+
+    return (
+        np.asarray(selected[0], dtype=np.int64),
+        np.asarray(selected[1], dtype=np.int64),
+        overlap_count,
+    )
+
+
 def directional_precision_at_fixed_rate(
     probabilities: np.ndarray,
     targets: np.ndarray,
@@ -170,17 +234,25 @@ def directional_precision_at_fixed_rate(
 
     n_samples = int(valid_targets.shape[0])
     k = min(n_samples, max(1, int(np.ceil(fixed_rate * n_samples))))
-    top_down_indices = np.argsort(-down_scores, kind="mergesort")[:k]
-    top_up_indices = np.argsort(-up_scores, kind="mergesort")[:k]
+    top_down_indices, top_up_indices, overlap_count = exclusive_directional_top_k(
+        down_scores,
+        up_scores,
+        k_per_side=k,
+    )
     correct_down = int(np.sum(valid_targets[top_down_indices] == int(down_id)))
     correct_up = int(np.sum(valid_targets[top_up_indices] == int(up_id)))
-    precision = float((correct_down + correct_up) / max(2 * k, 1))
+    selected_count = int(top_down_indices.size + top_up_indices.size)
+    precision = float((correct_down + correct_up) / max(selected_count, 1))
     return DirectionalPrecisionAtFixedRate(
         precision=precision,
         fixed_rate=fixed_rate,
-        actual_rate=float(k / n_samples),
+        actual_rate=float(selected_count / n_samples),
         k=int(k),
         n=n_samples,
+        selected_count=selected_count,
+        down_count=int(top_down_indices.size),
+        up_count=int(top_up_indices.size),
+        overlap_resolved_count=overlap_count,
     )
 
 

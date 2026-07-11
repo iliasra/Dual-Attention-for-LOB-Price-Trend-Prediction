@@ -10,6 +10,7 @@ import yaml
 
 from configuration import (
     BasisKinematicConfig,
+    CausalMarketFeaturesConfig,
     DataConfig,
     FastKinematicConfig,
     KinematicTokenizationConfig,
@@ -37,6 +38,7 @@ from kinematic_preprocessing import (
     _fast_price_tokens,
     _static_centering,
     adaptive_label_feature_columns,
+    add_causal_market_features,
     calculate_microprice,
     derivative_feature_columns,
     fit_exp_scaling_parameters,
@@ -49,6 +51,15 @@ from kinematic_preprocessing import (
 )
 from fast_kinematic_preprocessing import PenalizedBSplineKinematicTokenizer
 from lobster_io import read_lobster_message_csv
+
+
+@pytest.fixture()
+def artifact_dir(request: pytest.FixtureRequest) -> Path:
+    path = Path(__file__).resolve().parent / ".test_artifacts" / request.node.name
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
 
 
 def test_handle_abnormal_prices_drops_complete_ghost_levels() -> None:
@@ -670,6 +681,78 @@ def test_message_feature_processor_adds_log_static_and_one_hot_features() -> Non
     assert {"size_log1p", "price_static", "type_1", "type_5", "direction_1", "direction_-1"} <= set(result.columns)
     assert {"size", "price", "type", "direction", "order_id"}.isdisjoint(result.columns)
     np.testing.assert_allclose(result["size_log1p"], np.log1p([9.0, 99.0]))
+
+
+def test_causal_market_features_cover_missing_signals_without_future_leakage() -> None:
+    rows = 8
+    time = np.arange(rows, dtype=float) + 1.0
+    frame = pd.DataFrame(
+        {
+            "time": time,
+            "bid_price_1": 100.0 + np.arange(rows),
+            "ask_price_1": 102.0 + np.arange(rows),
+            "bid_size_1": 10.0 + np.arange(rows),
+            "ask_size_1": 20.0 + np.arange(rows),
+            "bid_price_2": 99.0 + np.arange(rows),
+            "ask_price_2": 103.0 + np.arange(rows),
+            "bid_size_2": 5.0 + np.arange(rows),
+            "ask_size_2": 8.0 + np.arange(rows),
+            "size": 10.0 + np.arange(rows),
+            "type": [1, 4, 1, 5, 2, 4, 1, 5],
+        }
+    )
+    config = CausalMarketFeaturesConfig(
+        enabled=True,
+        volatility_windows=(3,),
+        spread_regime_window=3,
+        imbalance_levels=(1, 2),
+        microprice_levels=2,
+        ofi_windows=(2, 3),
+        intensity_windows=(3,),
+        momentum_windows=(2, 3),
+        trade_type_values=(4, 5),
+    )
+
+    original = add_causal_market_features(frame, time_column="time", tick_size=1.0, config=config)
+    changed_future = frame.copy()
+    changed_future.loc[5:, ["bid_price_1", "ask_price_1", "bid_size_1", "ask_size_1"]] *= 10.0
+    mutated = add_causal_market_features(changed_future, time_column="time", tick_size=1.0, config=config)
+
+    expected = {
+        "causal_spread_ticks",
+        "causal_spread_zscore_3",
+        "causal_volatility_ticks_3",
+        "causal_book_imbalance_l1",
+        "causal_book_imbalance_l2",
+        "causal_microprice_minus_mid_ticks_l2",
+        "causal_ofi_l1_norm_2",
+        "causal_event_intensity_log_3",
+        "causal_traded_volume_intensity_log_3",
+        "causal_midprice_momentum_ticks_2",
+    }
+    assert expected <= set(original.columns)
+    assert np.isfinite(original[list(expected)].to_numpy(dtype=float)).all()
+    np.testing.assert_allclose(original.loc[:4, list(expected)], mutated.loc[:4, list(expected)])
+
+
+def test_causal_market_features_are_train_only_normalized(artifact_dir: Path) -> None:
+    train = pd.DataFrame(
+        {
+            "causal_spread_ticks": [1.0, 2.0, 3.0],
+            "causal_book_imbalance_l1": [-0.5, 0.0, 0.5],
+            "untouched": [10.0, 20.0, 30.0],
+        }
+    )
+
+    normalizer = DerivativeNormalizer(
+        artifact_dir / "causal_stats.yaml",
+        causal_market_feature_method="zscore",
+    ).fit([train])
+    transformed = normalizer.transform(train)
+
+    assert normalizer.stats_["causal_spread_ticks"]["family"] == "causal_market_feature"
+    assert transformed["causal_spread_ticks"].mean() == pytest.approx(0.0)
+    np.testing.assert_allclose(transformed["untouched"], train["untouched"])
 
 
 def test_message_price_static_uses_directional_distance_to_opposite_best() -> None:

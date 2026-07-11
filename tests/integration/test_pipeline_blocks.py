@@ -80,6 +80,18 @@ def make_synthetic_lob_frames(rows: int = 14) -> tuple[pd.DataFrame, pd.DataFram
             "ask_size_2": 140 + np.arange(rows),
             "bid_price_2": bid_price_1 - 0.5,
             "bid_size_2": 80 + np.arange(rows),
+            "ask_price_3": ask_price_1 + 1.0,
+            "ask_size_3": 150 + np.arange(rows),
+            "bid_price_3": bid_price_1 - 1.0,
+            "bid_size_3": 70 + np.arange(rows),
+            "ask_price_4": ask_price_1 + 1.5,
+            "ask_size_4": 160 + np.arange(rows),
+            "bid_price_4": bid_price_1 - 1.5,
+            "bid_size_4": 60 + np.arange(rows),
+            "ask_price_5": ask_price_1 + 2.0,
+            "ask_size_5": 170 + np.arange(rows),
+            "bid_price_5": bid_price_1 - 2.0,
+            "bid_size_5": 50 + np.arange(rows),
         }
     )
     return message_df, orderbook_df
@@ -871,6 +883,103 @@ def test_processing_pipeline_volume_clock_writes_bar_features(artifact_dir: Path
     assert metadata["sample_clock_counts"]["train"]["TEST_2020-01-01"]["sampled_rows"] > 0
     assert "volume_bar_scaling" in metadata
     assert derivative_stats["__metadata__"]["sample_clock"]["mode"] == "volume"
+
+
+def test_processing_pipeline_writes_executable_action_value_targets(artifact_dir: Path) -> None:
+    raw_dir = artifact_dir / "raw"
+    for date in ("2020-01-01", "2020-01-02", "2020-01-03"):
+        write_lobster_day(raw_dir, "TEST", date, rows=24)
+
+    base_config = load_config()
+    payload = yaml.safe_load(base_config.path.read_text(encoding="utf-8"))
+    payload["data"].update(
+        {
+            "raw_data_dir": "raw",
+            "processed_data_dir": "processed",
+            "sequence_data_dir": "sequences",
+            "logs_dir": "logs",
+            "tick_size": 1.0,
+            "sequence_window": 2,
+            "target_columns": ["long_net_return_ticks", "short_net_return_ticks"],
+        }
+    )
+    payload["dataset_splits"] = {
+        "train_dates": ["2020-01-01"],
+        "validation_dates": ["2020-01-02"],
+        "test_dates": ["2020-01-03"],
+    }
+    payload["folds"] = [
+        {
+            "id": "fold_001",
+            "train_dates": ["2020-01-01"],
+            "validation_dates": ["2020-01-02"],
+            "test_dates": ["2020-01-03"],
+        }
+    ]
+    payload["preprocessing"]["snapshot_window"] = 2
+    payload["preprocessing"]["labels"]["strategy"] = "executable_return"
+    payload["preprocessing"]["labels"]["executable_return"].update(
+        {
+            "horizon_events": 2,
+            "entry_lag_events": 0,
+            "round_trip_fees_bps": 0.0,
+            "slippage_ticks_per_side": 0.0,
+            "minimum_edge_ticks": 0.0,
+            "clip_target_ticks": None,
+        }
+    )
+    payload["preprocessing"]["temporal_features"].update(
+        {
+            "market_open_seconds": 0,
+            "market_close_seconds": 100000,
+            "start_offset_minutes": 0,
+            "end_offset_minutes": 0,
+        }
+    )
+    payload["preprocessing"]["normalization"]["derivatives_stats_dir"] = "derivatives"
+    payload["preprocessing"]["kinematic_tokenization"]["method"] = "basis"
+    payload["preprocessing"]["microprice"]["enabled"] = False
+    payload["model"]["auxiliary_heads"]["enabled"] = False
+    payload["training"]["monitor"] = "val_loss"
+    payload["training"]["monitor_mode"] = "min"
+    payload["training"]["validate_every_n_batches"] = "epoch"
+    payload["training"]["sequence_supervision"] = {
+        "mode": "last_window",
+        "loss_warmup_tokens": None,
+        "chunk_stride": None,
+        "neutral_weighting": "none",
+    }
+    payload["training"]["temperature_scaling"]["enabled"] = False
+    payload["training"]["directional_thresholds"]["enabled"] = False
+    payload["training"]["objective"]["type"] = "action_value_regression"
+
+    config_path = artifact_dir / "action_values.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    LobProcessingPipeline(ExperimentConfig.from_yaml(config_path)).run()
+
+    target_path = artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-01_labels.npy"
+    targets = np.load(target_path)
+    features = np.load(target_path.with_name("TEST_2020-01-01_features.npy"))
+    feature_schema = yaml.safe_load(
+        (artifact_dir / "sequences" / "fold_001" / "feature_schema.yaml").read_text(encoding="utf-8")
+    )
+
+    assert targets.ndim == 2
+    assert targets.shape[1] == 2
+    assert targets.dtype == np.float32
+    assert np.isfinite(targets).all()
+    assert features.shape[0] == targets.shape[0]
+    assert {
+        "causal_spread_ticks",
+        "causal_volatility_ticks_32",
+        "causal_book_imbalance_l5",
+        "causal_microprice_minus_mid_ticks_l5",
+        "causal_ofi_l1_norm_10",
+        "causal_event_intensity_log_10",
+        "causal_midprice_momentum_ticks_5",
+        "time_day_sin",
+        "time_day_cos",
+    } <= set(feature_schema["ordered_feature_columns"])
 
 
 def test_feature_schema_rejects_missing_or_extra_split_columns(artifact_dir: Path) -> None:

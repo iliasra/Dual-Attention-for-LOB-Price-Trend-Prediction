@@ -170,12 +170,15 @@ def calculate_adaptive_method_c_threshold_components(
         local_sigma = pd.Series(0.0, index=midprices.index)
         volatility_floor = pd.Series(0.0, index=midprices.index)
     else:
-        realized_c_returns = w_minus.pct_change(periods=h)
+        # Use the same one-step-volatility estimator and sqrt(h) scaling as the
+        # ex-post diagnostic. Ex-ante uses only past observations; ex-post uses
+        # the future holding window, but both quantities now have identical units.
+        realized_c_returns = midprices.pct_change()
         volatility_min_periods = min(config.volatility_window, max(32, config.volatility_window // 10))
         local_sigma = realized_c_returns.rolling(
             window=config.volatility_window,
             min_periods=volatility_min_periods,
-        ).std(ddof=0)
+        ).std(ddof=0) * np.sqrt(float(h))
         volatility_floor = config.volatility_lambda * local_sigma
 
     exante_threshold_values = np.maximum(cost_floor.to_numpy(dtype=float), volatility_floor.to_numpy(dtype=float))
@@ -366,15 +369,24 @@ class TripleBarrierLabeler:
     upper_barrier_ticks: float = 2.0
     lower_barrier_ticks: float = 3.0
     price_col: str = "midprice"
+    tick_size: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.horizon <= 0:
+            raise ValueError("TripleBarrierLabeler horizon must be > 0.")
+        if self.upper_barrier_ticks <= 0.0 or self.lower_barrier_ticks <= 0.0:
+            raise ValueError("TripleBarrierLabeler barriers must be positive tick counts.")
+        if self.tick_size <= 0.0:
+            raise ValueError("TripleBarrierLabeler tick_size must be > 0.")
 
     def __call__(self, df: pd.DataFrame) -> pd.Series:
         prices = df[self.price_col]
-        labels = pd.Series(0, index=prices.index, dtype=int)
+        labels = pd.Series(pd.NA, index=prices.index, dtype="Int8")
 
         for index in range(len(prices) - self.horizon):
             current_price = prices.iloc[index]
-            upper_barrier = current_price + self.upper_barrier_ticks
-            lower_barrier = current_price - self.lower_barrier_ticks
+            upper_barrier = current_price + self.upper_barrier_ticks * self.tick_size
+            lower_barrier = current_price - self.lower_barrier_ticks * self.tick_size
             future_prices = prices.iloc[index + 1 : index + self.horizon + 1]
 
             upper_candidates = future_prices[future_prices >= upper_barrier]
@@ -388,6 +400,9 @@ class TripleBarrierLabeler:
                 labels.iloc[index] = 1
             elif lower_hit_idx is not None:
                 labels.iloc[index] = -1
+
+            if upper_hit_idx is None and lower_hit_idx is None:
+                labels.iloc[index] = 0
 
         return labels
 
@@ -427,7 +442,51 @@ class TargetLabelPipeline:
             )
         if strategy == "triple_barrier":
             return self._add_triple_barrier_labels(df, self.config.triple_barrier)
+        if strategy == "executable_return":
+            return self._add_executable_return_targets(df)
         raise ValueError(f"Unsupported labeling strategy: {self.config.strategy}")
+
+    def _add_executable_return_targets(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add net long/short action values using one consistent execution model."""
+        config = self.config.executable_return
+        result = df.copy()
+        entry_bid = result[config.bid_column].shift(-config.entry_lag_events)
+        entry_ask = result[config.ask_column].shift(-config.entry_lag_events)
+        exit_bid = result[config.bid_column].shift(-config.horizon_events)
+        exit_ask = result[config.ask_column].shift(-config.horizon_events)
+        entry_mid = (entry_bid + entry_ask) / 2.0
+
+        fee_ticks = (entry_mid * config.round_trip_fees_bps / 10_000.0) / config.tick_size
+        slippage_ticks = 2.0 * config.slippage_ticks_per_side
+        long_value = (exit_bid - entry_ask) / config.tick_size - fee_ticks - slippage_ticks
+        short_value = (entry_bid - exit_ask) / config.tick_size - fee_ticks - slippage_ticks
+
+        valid_mask = (
+            np.isfinite(long_value)
+            & np.isfinite(short_value)
+            & np.isfinite(entry_bid)
+            & np.isfinite(entry_ask)
+            & np.isfinite(exit_bid)
+            & np.isfinite(exit_ask)
+        )
+        result = result.loc[valid_mask].copy()
+        long_value = long_value.loc[valid_mask]
+        short_value = short_value.loc[valid_mask]
+        if config.clip_target_ticks is not None:
+            clip = float(config.clip_target_ticks)
+            long_value = long_value.clip(-clip, clip)
+            short_value = short_value.clip(-clip, clip)
+
+        result["long_net_return_ticks"] = long_value.to_numpy(dtype=np.float64)
+        result["short_net_return_ticks"] = short_value.to_numpy(dtype=np.float64)
+        labels = np.zeros(len(result), dtype=np.int8)
+        long_array = result["long_net_return_ticks"].to_numpy(dtype=np.float64)
+        short_array = result["short_net_return_ticks"].to_numpy(dtype=np.float64)
+        edge = float(config.minimum_edge_ticks)
+        labels[(long_array > edge) & (long_array > short_array)] = 1
+        labels[(short_array > edge) & (short_array > long_array)] = -1
+        result["trend_label"] = labels
+        return result.reset_index(drop=True)
 
     def _add_smoothing_labels(
         self,
@@ -513,8 +572,9 @@ class TargetLabelPipeline:
             upper_barrier_ticks=config.upper_barrier_ticks,
             lower_barrier_ticks=config.lower_barrier_ticks,
             price_col=price_column,
+            tick_size=config.tick_size,
         )(result)
-        return result
+        return result.loc[result["trend_label"].notna()].reset_index(drop=True).astype({"trend_label": int})
 
 
 def add_target_labels_smoothing(

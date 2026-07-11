@@ -48,6 +48,14 @@ def _env_positive_int(name: str, *, default: int) -> int:
     return parsed
 
 
+def atomic_torch_save(payload: object, path: Path) -> None:
+    """Atomically replace a checkpoint after a complete sibling-file write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temporary_path)
+    temporary_path.replace(path)
+
+
 class TrainingStepProfiler:
     """Lightweight wall-clock profiler for diagnosing slow HPC training steps."""
 
@@ -211,6 +219,8 @@ class MuonWithAdamW(torch.optim.Optimizer):
         ns_steps: int = 5,
         eps: float = 1e-8,
         adamw_betas: tuple[float, float] = (0.9, 0.999),
+        adamw_params: Iterable[nn.Parameter] | None = None,
+        no_weight_decay_params: Iterable[nn.Parameter] | None = None,
     ) -> None:
         if lr <= 0.0:
             raise ValueError("Muon learning rate must be > 0.")
@@ -233,6 +243,10 @@ class MuonWithAdamW(torch.optim.Optimizer):
             "adamw_betas": (float(beta1), float(beta2)),
         }
         super().__init__(list(params), defaults)
+        self._adamw_parameter_ids = {id(parameter) for parameter in (adamw_params or [])}
+        self._no_weight_decay_parameter_ids = {
+            id(parameter) for parameter in (no_weight_decay_params or [])
+        }
 
     @torch.no_grad()
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
@@ -257,8 +271,10 @@ class MuonWithAdamW(torch.optim.Optimizer):
                 if grad.is_sparse:
                     raise RuntimeError("MuonWithAdamW does not support sparse gradients.")
 
-                if param.ndim == 2:
-                    if weight_decay != 0.0:
+                use_muon = param.ndim == 2 and id(param) not in self._adamw_parameter_ids
+                apply_weight_decay = weight_decay != 0.0 and id(param) not in self._no_weight_decay_parameter_ids
+                if use_muon:
+                    if apply_weight_decay:
                         param.mul_(1.0 - lr * weight_decay)
                     state = self.state[param]
                     if len(state) == 0:
@@ -273,15 +289,15 @@ class MuonWithAdamW(torch.optim.Optimizer):
 
                 state = self.state[param]
                 if len(state) == 0:
-                    state["step"] = torch.zeros((), dtype=torch.float32, device=param.device)
+                    state["step"] = 0
                     state["exp_avg"] = torch.zeros_like(param)
                     state["exp_avg_sq"] = torch.zeros_like(param)
                 exp_avg = state["exp_avg"]
                 exp_avg_sq = state["exp_avg_sq"]
-                state["step"].add_(1.0)
-                step = int(state["step"].item())
+                state["step"] = int(state["step"]) + 1
+                step = int(state["step"])
 
-                if weight_decay != 0.0:
+                if apply_weight_decay:
                     param.mul_(1.0 - lr * weight_decay)
                 exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
@@ -1628,7 +1644,7 @@ class LobTrainer:
         dropped = ranked[self.config.top_k_checkpoints :]
         if any(item.checkpoint_label == candidate.checkpoint_label for item in kept):
             candidate.path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(model.state_dict(), candidate.path)
+            atomic_torch_save(model.state_dict(), candidate.path)
         for item in dropped:
             if item.path.exists():
                 item.path.unlink()
@@ -1650,10 +1666,36 @@ class LobTrainer:
                 weight_decay=self.config.weight_decay,
             )
         if optimizer_name == "muon":
+            named_parameters = [(name, parameter) for name, parameter in model.named_parameters() if parameter.requires_grad]
+            adamw_tokens = (
+                "frequencies",
+                "spatial_pe",
+                ".rotary.",
+                ".gate.",
+                "class_head",
+                "movement_head",
+                "direction_head",
+            )
+            adamw_parameters = [
+                parameter
+                for name, parameter in named_parameters
+                if parameter.ndim != 2 or any(token in name for token in adamw_tokens)
+            ]
+            no_decay_parameters = [
+                parameter
+                for name, parameter in named_parameters
+                if name.endswith(".bias")
+                or "norm" in name.lower()
+                or "frequencies" in name
+                or "spatial_pe" in name
+                or ".rotary." in name
+            ]
             return MuonWithAdamW(
-                model.parameters(),
+                (parameter for _name, parameter in named_parameters),
                 lr=self.config.learning_rate,
                 weight_decay=self.config.weight_decay,
+                adamw_params=adamw_parameters,
+                no_weight_decay_params=no_decay_parameters,
             )
         raise ValueError(f"Unsupported optimizer: {self.config.optimizer}")
 
@@ -1701,8 +1743,7 @@ class LobTrainer:
         wandb_run_id: str | None,
     ) -> None:
         """Persist a complete training state that can resume optimizer progress."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
+        atomic_torch_save(
             {
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
@@ -1914,7 +1955,7 @@ class LobTrainer:
                 validations_without_improvement = 0
                 best_path = Path(self.config.best_model_path)
                 best_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(model.state_dict(), best_path)
+                atomic_torch_save(model.state_dict(), best_path)
                 print(
                     f"Saved new best model to {best_path} from {checkpoint_label} "
                     f"with {self.config.monitor}={best_monitor_value:.6f}."
@@ -2123,7 +2164,19 @@ class LobTrainer:
                     stage_start = stage_end
                 accumulation_count += 1
                 is_last_batch = train_loader_length is not None and batch_in_epoch >= train_loader_length
-                optimizer_step_completed = accumulation_count >= accumulation_steps or is_last_batch
+                validation_boundary = (
+                    validation_interval is not None
+                    and (global_step + 1) % validation_interval == 0
+                )
+                # Never validate or checkpoint a model while it still owns
+                # unapplied accumulated gradients.  A validation boundary is
+                # therefore also an optimizer boundary, even when the final
+                # accumulation group is shorter than the configured size.
+                optimizer_step_completed = (
+                    accumulation_count >= accumulation_steps
+                    or is_last_batch
+                    or validation_boundary
+                )
                 grad_norm = None
                 if optimizer_step_completed:
                     self.scaler.unscale_(optimizer)
@@ -2329,7 +2382,7 @@ class LobTrainer:
             model.load_state_dict(state_dict)
             if load_path != best_path:
                 best_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(state_dict, best_path)
+                atomic_torch_save(state_dict, best_path)
                 print(
                     f"Best model path {best_path} was missing; restored it from "
                     f"{load_path}."

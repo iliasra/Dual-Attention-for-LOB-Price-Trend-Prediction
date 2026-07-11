@@ -220,11 +220,11 @@ def label_components(frame: pd.DataFrame, config: dict[str, Any]) -> LabelCompon
         else:
             volatility_window = int(adaptive.get("volatility_window", 256))
             volatility_min_periods = min(volatility_window, max(32, volatility_window // 10))
-            past_h_returns = w_minus.pct_change(periods=h)
-            past_sigma = past_h_returns.rolling(
+            past_one_step_returns = mid.pct_change()
+            past_sigma = past_one_step_returns.rolling(
                 window=volatility_window,
                 min_periods=volatility_min_periods,
-            ).std(ddof=0)
+            ).std(ddof=0) * math.sqrt(float(h))
             past_vol_threshold = volatility_lambda * past_sigma
         threshold_exante = np.maximum(
             exante_cost_floor.to_numpy(dtype=np.float64),

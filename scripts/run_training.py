@@ -110,6 +110,29 @@ def sequence_paths(sequence_dir: Path, split: str) -> tuple[list[str], list[str]
     t_paths: list[str] = []
     y_paths: list[str] = []
 
+    manifest_path = sequence_dir / "sequence_manifest.yaml"
+    if manifest_path.exists():
+        manifest = load_yaml(manifest_path)
+        split_entries = ((manifest.get("splits") or {}).get(split) or [])
+        if not isinstance(split_entries, list):
+            raise ValueError(f"Invalid shard manifest split '{split}' in {manifest_path}.")
+        for entry in split_entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"Invalid shard manifest entry in {manifest_path}: {entry!r}.")
+            try:
+                x_path = sequence_dir / str(entry["features"])
+                t_path = sequence_dir / str(entry["times"])
+                y_path = sequence_dir / str(entry["labels"])
+            except KeyError as exc:
+                raise ValueError(f"Shard manifest entry is missing {exc.args[0]}: {manifest_path}.") from exc
+            missing = [path for path in (x_path, t_path, y_path) if not path.exists()]
+            if missing:
+                raise FileNotFoundError(f"Manifest references missing shard file(s): {missing}.")
+            x_paths.append(str(x_path))
+            t_paths.append(str(t_path))
+            y_paths.append(str(y_path))
+        return x_paths, t_paths, y_paths
+
     for x_path in sorted(split_dir.glob("*_features.npy")):
         prefix = x_path.name.removesuffix("_features.npy")
         t_path = x_path.with_name(f"{prefix}_times.npy")
@@ -2227,18 +2250,33 @@ def main() -> None:
             fold_id=fold.id,
         )
 
-        fold_summary = train_fold(
-            config=fold_config,
-            fold_id=fold.id,
-            fold_sequence_dir=paths["sequence_dir"],
-            fold_log_dir=paths["log_dir"],
-            fold_result_dir=paths["result_dir"],
-            run_stem=run_stem,
-            seed=fold_config.seed,
-            fold_has_test_split=fold.has_test_dates,
-            resume_latest=bool(args.resume_latest),
-            resume_from=args.resume_from,
-        )
+        if fold_config.training.objective.is_regression:
+            from run_action_value_regression import train_action_value_fold
+
+            fold_summary = train_action_value_fold(
+                config=fold_config,
+                fold_id=fold.id,
+                fold_sequence_dir=paths["sequence_dir"],
+                fold_log_dir=paths["log_dir"],
+                fold_result_dir=paths["result_dir"],
+                seed=fold_config.seed,
+                fold_has_test_split=fold.has_test_dates,
+                resume_latest=bool(args.resume_latest),
+                resume_from=args.resume_from,
+            )
+        else:
+            fold_summary = train_fold(
+                config=fold_config,
+                fold_id=fold.id,
+                fold_sequence_dir=paths["sequence_dir"],
+                fold_log_dir=paths["log_dir"],
+                fold_result_dir=paths["result_dir"],
+                run_stem=run_stem,
+                seed=fold_config.seed,
+                fold_has_test_split=fold.has_test_dates,
+                resume_latest=bool(args.resume_latest),
+                resume_from=args.resume_from,
+            )
         summary["folds"][fold.id] = fold_summary
 
     training_duration_seconds = perf_counter() - training_start

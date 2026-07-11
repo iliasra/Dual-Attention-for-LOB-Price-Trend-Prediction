@@ -20,6 +20,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from configuration import ExperimentConfig
+from calibration import apply_logit_calibration_to_outputs
 from datasets import LOBDataset, LOBTokenChunkDataset, sequence_window_labels
 from model import build_model
 from pnl_metrics import compute_pnl_from_prediction_outputs, resolve_raw_data_dir, save_pnl_artifacts
@@ -62,6 +63,12 @@ def parse_args() -> argparse.Namespace:
         help="Also write per-sample post-softmax probabilities to probabilities.csv.",
     )
     parser.add_argument(
+        "--temperature-scaling",
+        type=Path,
+        default=None,
+        help="Optional temperature_scaling.yaml; applied before directional thresholds.",
+    )
+    parser.add_argument(
         "--directional-thresholds",
         type=Path,
         default=None,
@@ -80,6 +87,58 @@ def load_yaml_payload(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"Config must contain a YAML mapping: {path}")
     return payload
+
+
+def load_logit_calibration(path: Path, config: ExperimentConfig) -> dict[str, Any]:
+    """Load and validate a saved temperature/class-bias calibration artifact."""
+    payload = load_yaml_payload(path)
+    if "temperature_scaling" in payload and isinstance(payload["temperature_scaling"], Mapping):
+        payload = dict(payload["temperature_scaling"])
+    temperature = float(payload.get("temperature", 1.0))
+    if not np.isfinite(temperature) or temperature <= 0.0:
+        raise ValueError("Calibration temperature must be finite and > 0.")
+    raw_biases = payload.get("class_biases")
+    class_biases = None if raw_biases is None else np.asarray(raw_biases, dtype=np.float32).reshape(-1)
+    if class_biases is not None:
+        if class_biases.shape[0] != config.model.num_classes:
+            raise ValueError("Calibration class_biases length must match model.num_classes.")
+        if not np.isfinite(class_biases).all():
+            raise ValueError("Calibration class_biases must be finite.")
+    return {
+        "path": str(path),
+        "temperature": temperature,
+        "class_biases": class_biases,
+        "source_payload": payload,
+    }
+
+
+def apply_logit_calibration_to_result(
+    result: Any,
+    config: ExperimentConfig,
+    calibration: Mapping[str, Any],
+) -> None:
+    """Apply saved logit calibration and recompute every dependent metric."""
+    if result.prediction_outputs is None:
+        raise RuntimeError("Logit calibration requires collected prediction outputs.")
+    outputs = apply_logit_calibration_to_outputs(
+        result.prediction_outputs,
+        float(calibration["temperature"]),
+        class_biases=calibration.get("class_biases"),
+    )
+    targets = np.asarray(outputs["targets"], dtype=np.int64).reshape(-1)
+    probabilities = np.asarray(outputs["probabilities"], dtype=np.float32)
+    predictions = np.asarray(outputs["predictions"], dtype=np.int64)
+    result.prediction_outputs = outputs
+    result.metrics = classification_metrics_from_predictions(
+        targets,
+        predictions,
+        num_classes=config.model.num_classes,
+        probabilities=probabilities,
+        directional_precision_fixed_rate=config.training.monitor_params.fixed_rate,
+    )
+    if len(targets):
+        chosen = probabilities[np.arange(len(targets)), targets]
+        result.loss = float(-np.log(np.clip(chosen, np.finfo(np.float32).tiny, 1.0)).mean())
 
 
 def resolve_snapshot_max_dt(payload: Mapping[str, Any]) -> float | None:
@@ -329,10 +388,12 @@ def evaluation_metrics_row(result: Any, config: ExperimentConfig, split: str, nu
         "macro_recall": float(metrics.macro_recall),
         "macro_f1": float(metrics.macro_f1),
         "directional_macro_f1": float(metrics.directional_macro_f1),
-        "directional_precision_at_fixed_rate": metrics.directional_precision_at_fixed_rate,
-        "directional_precision_at_fixed_rate_k": int(metrics.directional_precision_at_fixed_rate_k),
+        "directional_precision_at_fixed_rate": getattr(metrics, "directional_precision_at_fixed_rate", None),
+        "directional_precision_at_fixed_rate_k": int(
+            getattr(metrics, "directional_precision_at_fixed_rate_k", 0)
+        ),
         "directional_precision_at_fixed_rate_actual_rate": float(
-            metrics.directional_precision_at_fixed_rate_actual_rate
+            getattr(metrics, "directional_precision_at_fixed_rate_actual_rate", 0.0)
         ),
         "weighted_f1": float(metrics.weighted_f1),
         "balanced_accuracy": float(metrics.balanced_accuracy),
@@ -526,6 +587,11 @@ def main() -> None:
         if args.directional_thresholds is None
         else load_directional_thresholds(args.directional_thresholds, config)
     )
+    logit_calibration = (
+        None
+        if args.temperature_scaling is None
+        else load_logit_calibration(args.temperature_scaling, config)
+    )
 
     dataset, resolved_sequence_path = build_evaluation_dataset(
         args.sequence_dir,
@@ -555,10 +621,17 @@ def main() -> None:
         model=model,
         data_loader=data_loader,
         description=f"Evaluate [{split_name}]",
-        collect_outputs=args.save_probabilities or directional_thresholds is not None or args.pnl,
+        collect_outputs=(
+            args.save_probabilities
+            or logit_calibration is not None
+            or directional_thresholds is not None
+            or args.pnl
+        ),
         track_pr_metrics=True,
         track_expert_usage=True,
     )
+    if logit_calibration is not None:
+        apply_logit_calibration_to_result(result, config, logit_calibration)
     if directional_thresholds is not None:
         apply_directional_thresholds_to_result(result, config, directional_thresholds)
     duration_seconds = perf_counter() - start

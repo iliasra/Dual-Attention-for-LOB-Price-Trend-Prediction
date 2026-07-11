@@ -86,7 +86,7 @@ def test_epoch_history_contains_tailored_monitor_columns(artifact_dir: Path) -> 
     with target.open("r", newline="", encoding="utf-8") as handle:
         row = next(csv.DictReader(handle))
 
-    assert float(row["val_tailored_score"]) == pytest.approx(0.6375)
+    assert float(row["val_tailored_score"]) == pytest.approx(-0.0025)
     assert row["val_tailored_ece_dir"] == "0.3"
     assert row["val_tailored_rate_penalty"] == "0.025"
 

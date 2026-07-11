@@ -229,10 +229,13 @@ class VolumeClockSampler:
             accumulator["bar_trade_count"] += float(fraction)
             accumulator["bar_execution_size"] += size
             accumulator["bar_total_trade_volume"] += size
-            if direction == 1:
+            # LOBSTER direction is the passive limit-order side. Executions
+            # against a sell limit order (direction=-1) are buyer-initiated;
+            # executions against a buy limit order are seller-initiated.
+            if direction == -1:
                 accumulator["bar_buy_trade_volume"] += size
                 accumulator["bar_signed_trade_volume"] += size
-            elif direction == -1:
+            elif direction == 1:
                 accumulator["bar_sell_trade_volume"] += size
                 accumulator["bar_signed_trade_volume"] -= size
 

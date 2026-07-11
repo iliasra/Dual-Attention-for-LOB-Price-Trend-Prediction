@@ -21,6 +21,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "time_column": None,
         "label_column": None,
         "label_mapping": None,
+        "target_columns": None,
         "price_columns": None,
         "volume_columns": None,
         "feature_exclude_columns": None,
@@ -62,6 +63,16 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
                 "ask_column": None,
                 "price_column": None,
             },
+            "executable_return": {
+                "horizon_events": None,
+                "entry_lag_events": None,
+                "round_trip_fees_bps": None,
+                "slippage_ticks_per_side": None,
+                "minimum_edge_ticks": None,
+                "clip_target_ticks": None,
+                "bid_column": None,
+                "ask_column": None,
+            },
         },
         "message": {
             "size_column": None,
@@ -79,6 +90,17 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "start_offset_minutes": None,
             "end_offset_minutes": None,
         },
+        "causal_market_features": {
+            "enabled": None,
+            "volatility_windows": None,
+            "spread_regime_window": None,
+            "imbalance_levels": None,
+            "microprice_levels": None,
+            "ofi_windows": None,
+            "intensity_windows": None,
+            "momentum_windows": None,
+            "trade_type_values": None,
+        },
         "normalization": {
             "derivatives_stats_dir": None,
             "scope": None,
@@ -87,6 +109,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "size_log1p_scaling_method": None,
             "price_static_scaling_method": None,
             "adaptive_label_feature_scaling_method": None,
+            "causal_market_feature_scaling_method": None,
             "delta_t_transform": None,
             "delta_t_scaling_method": None,
         },
@@ -152,9 +175,12 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "feature_embed_dim": None,
         "feature_num_frequencies": None,
         "feature_sigma": None,
+        "feature_include_raw_value": None,
         "num_layers": None,
         "latent_spatial_embed_dim": None,
         "use_moe": None,
+        "use_spatial_attention": None,
+        "use_temporal_attention": None,
         "num_heads": None,
         "max_dt_quantile": None,
         "max_dt": None,
@@ -168,6 +194,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "moe_expansion_factor": None,
         "moe_router_noise": None,
         "moe_load_balancing_weight": None,
+        "moe_router_z_loss_weight": None,
         "classifier_dropout": None,
         "local_attention_context_tokens": None,
         "classifier_pooling": {
@@ -252,15 +279,28 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "neutral_weighting": None,
             "neutral_sampling": None,
         },
+        "objective": {
+            "type": None,
+            "loss": None,
+            "huber_delta": None,
+            "quantiles": None,
+            "quantile_loss_weight": None,
+            "quantile_crossing_weight": None,
+            "decision_threshold_ticks": None,
+            "fixed_rate": None,
+        },
     },
 }
 
 OPTIONAL_TOP_LEVEL_KEYS = {"experiment", "folds", "run_metadata", "tracking"}
 OPTIONAL_CONFIG_KEYS = {
+    "preprocessing.causal_market_features",
     "preprocessing.labels.smoothing.adaptive_threshold",
     "preprocessing.labels.smoothing.adaptive_threshold.label_timing",
     "preprocessing.labels.smoothing.adaptive_threshold.include_exante_features",
     "preprocessing.labels.smoothing.fit_scope",
+    "preprocessing.labels.executable_return",
+    "data.target_columns",
     "preprocessing.price_static.tau_clip",
     "preprocessing.price_static.tau_max",
     "model.max_dt",
@@ -268,6 +308,10 @@ OPTIONAL_CONFIG_KEYS = {
     "model.num_layers",
     "model.latent_spatial_embed_dim",
     "model.use_moe",
+    "model.use_spatial_attention",
+    "model.use_temporal_attention",
+    "model.moe_router_z_loss_weight",
+    "model.feature_include_raw_value",
     "model.classifier_pooling",
     "model.auxiliary_heads",
     "model.auxiliary_heads.enabled",
@@ -307,6 +351,7 @@ OPTIONAL_CONFIG_KEYS = {
     "preprocessing.normalization.size_log1p_scaling_method",
     "preprocessing.normalization.price_static_scaling_method",
     "preprocessing.normalization.adaptive_label_feature_scaling_method",
+    "preprocessing.normalization.causal_market_feature_scaling_method",
     "preprocessing.normalization.delta_t_transform",
     "preprocessing.normalization.delta_t_scaling_method",
     "training.early_stopping_warmup",
@@ -334,6 +379,10 @@ OPTIONAL_CONFIG_KEYS = {
     "training.sequence_supervision.chunk_stride",
     "training.sequence_supervision.neutral_weighting",
     "training.sequence_supervision.neutral_sampling",
+    "training.objective",
+    "training.objective.quantiles",
+    "training.objective.quantile_loss_weight",
+    "training.objective.quantile_crossing_weight",
 }
 LEGACY_IGNORED_CONFIG_KEYS = {
     "model.auxiliary_heads.dropout",
@@ -344,7 +393,7 @@ NORMALIZATION_SCALING_METHODS = {"zscore", "robust_mad", "quantile", "quantile_s
 
 
 ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
-    "preprocessing.labels.strategy": {"smoothing", "triple_barrier"},
+    "preprocessing.labels.strategy": {"smoothing", "triple_barrier", "executable_return"},
     "preprocessing.labels.smoothing.method": {"A", "B", "C"},
     "preprocessing.normalization.scope": {"train_only"},
     "preprocessing.normalization.derivative_scaling_method": NORMALIZATION_SCALING_METHODS,
@@ -352,6 +401,7 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
     "preprocessing.normalization.size_log1p_scaling_method": NORMALIZATION_SCALING_METHODS,
     "preprocessing.normalization.price_static_scaling_method": NORMALIZATION_SCALING_METHODS,
     "preprocessing.normalization.adaptive_label_feature_scaling_method": NORMALIZATION_SCALING_METHODS,
+    "preprocessing.normalization.causal_market_feature_scaling_method": NORMALIZATION_SCALING_METHODS,
     "preprocessing.normalization.delta_t_transform": {"log1p"},
     "preprocessing.normalization.delta_t_scaling_method": NORMALIZATION_SCALING_METHODS,
     "preprocessing.labels.smoothing.adaptive_threshold.label_timing": {"ex_ante", "ex_post"},
@@ -365,6 +415,8 @@ ALLOWED_CONFIG_VALUES: dict[str, set[Any]] = {
         "val_directional_macro_f1",
         "tailored_score",
         "precision_at_fixed_rate",
+        "val_pnl",
+        "val_rank_ic",
     },
     "training.monitor_mode": {"min", "max"},
     "training.sequence_supervision.mode": {"last_window", "token_chunk"},
@@ -658,6 +710,7 @@ class DataConfig:
     volume_columns: list[str] | None
     feature_exclude_columns: list[str]
     sequence_window: int
+    target_columns: list[str] | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "DataConfig":
@@ -682,6 +735,7 @@ class DataConfig:
             volume_columns=_ensure_list(payload["volume_columns"]),
             feature_exclude_columns=list(payload["feature_exclude_columns"]),
             sequence_window=int(payload["sequence_window"]),
+            target_columns=_ensure_list(payload.get("target_columns")),
         )
 
 
@@ -1078,9 +1132,14 @@ class TripleBarrierLabelConfig:
     bid_column: str
     ask_column: str
     price_column: str | None
+    tick_size: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.tick_size <= 0.0:
+            raise ValueError("data.tick_size must be > 0 for triple-barrier labels.")
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "TripleBarrierLabelConfig":
+    def from_dict(cls, payload: dict[str, Any], *, tick_size: float = 1.0) -> "TripleBarrierLabelConfig":
         """Build triple-barrier label settings from a YAML subsection."""
         return cls(
             horizon=int(payload["horizon"]),
@@ -1089,6 +1148,60 @@ class TripleBarrierLabelConfig:
             bid_column=str(payload["bid_column"]),
             ask_column=str(payload["ask_column"]),
             price_column=None if payload["price_column"] is None else str(payload["price_column"]),
+            tick_size=float(tick_size),
+        )
+
+
+@dataclass(slots=True)
+class ExecutableReturnLabelConfig:
+    """Configuration for executable long/short action-value targets."""
+
+    horizon_events: int = 100
+    entry_lag_events: int = 0
+    round_trip_fees_bps: float = 0.0
+    slippage_ticks_per_side: float = 0.0
+    minimum_edge_ticks: float = 0.0
+    clip_target_ticks: float | None = None
+    bid_column: str = "bid_price_1"
+    ask_column: str = "ask_price_1"
+    tick_size: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.horizon_events <= 0:
+            raise ValueError("preprocessing.labels.executable_return.horizon_events must be > 0.")
+        if self.entry_lag_events < 0 or self.entry_lag_events >= self.horizon_events:
+            raise ValueError(
+                "preprocessing.labels.executable_return.entry_lag_events must be in [0, horizon_events)."
+            )
+        if self.round_trip_fees_bps < 0.0:
+            raise ValueError("preprocessing.labels.executable_return.round_trip_fees_bps must be >= 0.")
+        if self.slippage_ticks_per_side < 0.0:
+            raise ValueError("preprocessing.labels.executable_return.slippage_ticks_per_side must be >= 0.")
+        if self.minimum_edge_ticks < 0.0:
+            raise ValueError("preprocessing.labels.executable_return.minimum_edge_ticks must be >= 0.")
+        if self.clip_target_ticks is not None and self.clip_target_ticks <= 0.0:
+            raise ValueError("preprocessing.labels.executable_return.clip_target_ticks must be > 0 or null.")
+        if self.tick_size <= 0.0:
+            raise ValueError("data.tick_size must be > 0 for executable-return labels.")
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: dict[str, Any] | None,
+        *,
+        tick_size: float,
+    ) -> "ExecutableReturnLabelConfig":
+        payload = payload or {}
+        return cls(
+            horizon_events=int(payload.get("horizon_events", 100)),
+            entry_lag_events=int(payload.get("entry_lag_events", 0)),
+            round_trip_fees_bps=float(payload.get("round_trip_fees_bps", 0.0)),
+            slippage_ticks_per_side=float(payload.get("slippage_ticks_per_side", 0.0)),
+            minimum_edge_ticks=float(payload.get("minimum_edge_ticks", 0.0)),
+            clip_target_ticks=_optional_float(payload.get("clip_target_ticks")),
+            bid_column=str(payload.get("bid_column", "bid_price_1")),
+            ask_column=str(payload.get("ask_column", "ask_price_1")),
+            tick_size=float(tick_size),
         )
 
 
@@ -1097,10 +1210,20 @@ class LabelConfig:
     strategy: str
     smoothing: SmoothingLabelConfig
     triple_barrier: TripleBarrierLabelConfig
+    executable_return: ExecutableReturnLabelConfig = field(default_factory=ExecutableReturnLabelConfig)
 
     def __post_init__(self) -> None:
         """Check that the active labeling strategy has a usable threshold rule."""
-        if self.strategy.lower() != "smoothing":
+        self.strategy = self.strategy.lower()
+        if self.strategy == "triple_barrier":
+            if self.triple_barrier.horizon <= 0:
+                raise ValueError("preprocessing.labels.triple_barrier.horizon must be > 0.")
+            if (
+                self.triple_barrier.upper_barrier_ticks <= 0.0
+                or self.triple_barrier.lower_barrier_ticks <= 0.0
+            ):
+                raise ValueError("active triple-barrier upper/lower barrier ticks must be > 0.")
+        if self.strategy != "smoothing":
             return
         adaptive_enabled = (
             self.smoothing.adaptive_threshold is not None
@@ -1114,12 +1237,16 @@ class LabelConfig:
             )
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "LabelConfig":
+    def from_dict(cls, payload: dict[str, Any], *, tick_size: float = 1.0) -> "LabelConfig":
         """Build label settings from a YAML subsection."""
         return cls(
             strategy=str(payload["strategy"]),
             smoothing=SmoothingLabelConfig.from_dict(payload["smoothing"]),
-            triple_barrier=TripleBarrierLabelConfig.from_dict(payload["triple_barrier"]),
+            triple_barrier=TripleBarrierLabelConfig.from_dict(payload["triple_barrier"], tick_size=tick_size),
+            executable_return=ExecutableReturnLabelConfig.from_dict(
+                payload.get("executable_return"),
+                tick_size=tick_size,
+            ),
         )
 
 
@@ -1172,6 +1299,60 @@ class TemporalFeaturesConfig:
         )
 
 
+@dataclass(slots=True)
+class CausalMarketFeaturesConfig:
+    """Configuration for explicit causal microstructure features."""
+
+    enabled: bool = False
+    volatility_windows: tuple[int, ...] = (32, 128, 256)
+    spread_regime_window: int = 128
+    imbalance_levels: tuple[int, ...] = (1, 5)
+    microprice_levels: int = 5
+    ofi_windows: tuple[int, ...] = (10, 50, 100)
+    intensity_windows: tuple[int, ...] = (10, 50, 100)
+    momentum_windows: tuple[int, ...] = (5, 20, 100)
+    trade_type_values: tuple[int, ...] = (4, 5)
+
+    def __post_init__(self) -> None:
+        self.volatility_windows = self._positive_tuple(self.volatility_windows, "volatility_windows")
+        self.imbalance_levels = self._positive_tuple(self.imbalance_levels, "imbalance_levels")
+        self.ofi_windows = self._positive_tuple(self.ofi_windows, "ofi_windows")
+        self.intensity_windows = self._positive_tuple(self.intensity_windows, "intensity_windows")
+        self.momentum_windows = self._positive_tuple(self.momentum_windows, "momentum_windows")
+        self.trade_type_values = tuple(int(value) for value in self.trade_type_values)
+        if self.spread_regime_window <= 1:
+            raise ValueError("preprocessing.causal_market_features.spread_regime_window must be > 1.")
+        if self.microprice_levels <= 0:
+            raise ValueError("preprocessing.causal_market_features.microprice_levels must be > 0.")
+        if not self.trade_type_values:
+            raise ValueError("preprocessing.causal_market_features.trade_type_values must not be empty.")
+
+    @staticmethod
+    def _positive_tuple(values: tuple[int, ...] | list[int], name: str) -> tuple[int, ...]:
+        normalized = tuple(int(value) for value in values)
+        if not normalized or any(value <= 0 for value in normalized):
+            raise ValueError(f"preprocessing.causal_market_features.{name} must contain positive integers.")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError(f"preprocessing.causal_market_features.{name} must not contain duplicates.")
+        return normalized
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "CausalMarketFeaturesConfig":
+        if payload is None:
+            return cls()
+        return cls(
+            enabled=bool(payload.get("enabled", False)),
+            volatility_windows=tuple(payload.get("volatility_windows", (32, 128, 256))),
+            spread_regime_window=int(payload.get("spread_regime_window", 128)),
+            imbalance_levels=tuple(payload.get("imbalance_levels", (1, 5))),
+            microprice_levels=int(payload.get("microprice_levels", 5)),
+            ofi_windows=tuple(payload.get("ofi_windows", (10, 50, 100))),
+            intensity_windows=tuple(payload.get("intensity_windows", (10, 50, 100))),
+            momentum_windows=tuple(payload.get("momentum_windows", (5, 20, 100))),
+            trade_type_values=tuple(payload.get("trade_type_values", (4, 5))),
+        )
+
+
 def _normalization_scaling_value(payload: dict[str, Any], key: str, default: str) -> str:
     value = str(payload.get(key, default)).strip().lower()
     if value == "quantile":
@@ -1188,6 +1369,7 @@ class NormalizationConfig:
     size_log1p_scaling_method: str = "zscore"
     price_static_scaling_method: str = "zscore"
     adaptive_label_feature_scaling_method: str = "zscore"
+    causal_market_feature_scaling_method: str = "robust_mad"
     delta_t_transform: str = "log1p"
     delta_t_scaling_method: str = "robust_mad"
 
@@ -1221,6 +1403,11 @@ class NormalizationConfig:
                 payload,
                 "adaptive_label_feature_scaling_method",
                 "zscore",
+            ),
+            causal_market_feature_scaling_method=_normalization_scaling_value(
+                payload,
+                "causal_market_feature_scaling_method",
+                "robust_mad",
             ),
             delta_t_transform=str(payload.get("delta_t_transform", "log1p")).strip().lower(),
             delta_t_scaling_method=_normalization_scaling_value(
@@ -1406,6 +1593,7 @@ class PreprocessingConfig:
     price_static: PriceStaticConfig
     volume_kinematic: VolumeKinematicConfig
     volume_static: VolumeStaticConfig
+    causal_market_features: CausalMarketFeaturesConfig = field(default_factory=CausalMarketFeaturesConfig)
     microprice: MicropriceConfig = field(default_factory=MicropriceConfig)
     sample_clock: SampleClockConfig = field(default_factory=SampleClockConfig)
     save_processed_dataframes: bool = False
@@ -1432,7 +1620,7 @@ class PreprocessingConfig:
         """Build preprocessing settings from a YAML subsection."""
         return cls(
             snapshot_window=int(payload["snapshot_window"]),
-            labels=LabelConfig.from_dict(payload["labels"]),
+            labels=LabelConfig.from_dict(payload["labels"], tick_size=tick_size),
             message=MessageConfig.from_dict(payload["message"], tick_size=tick_size),
             temporal_features=TemporalFeaturesConfig.from_dict(payload["temporal_features"]),
             normalization=NormalizationConfig.from_dict(payload["normalization"]),
@@ -1441,6 +1629,7 @@ class PreprocessingConfig:
             price_static=PriceStaticConfig.from_dict(payload["price_static"], tick_size=tick_size),
             volume_kinematic=VolumeKinematicConfig.from_dict(payload["volume_kinematic"]),
             volume_static=VolumeStaticConfig.from_dict(payload["volume_static"]),
+            causal_market_features=CausalMarketFeaturesConfig.from_dict(payload.get("causal_market_features")),
             microprice=MicropriceConfig.from_dict(payload.get("microprice")),
             sample_clock=SampleClockConfig.from_dict(payload.get("sample_clock")),
             save_processed_dataframes=bool(payload.get("save_processed_dataframes", False)),
@@ -1552,6 +1741,10 @@ class ModelConfig:
     max_dt_quantile: float = 95.0
     max_dt: float | None = None
     local_attention_context_tokens: int | None = None
+    feature_include_raw_value: bool = False
+    use_spatial_attention: bool = True
+    use_temporal_attention: bool = True
+    moe_router_z_loss_weight: float = 0.0
 
     def __post_init__(self) -> None:
         """Check model-derived scalar settings.
@@ -1576,6 +1769,8 @@ class ModelConfig:
             raise ValueError("model.max_dt must be >= 0 when resolved.")
         if self.local_attention_context_tokens is not None and self.local_attention_context_tokens <= 0:
             raise ValueError("model.local_attention_context_tokens must be > 0 or null.")
+        if self.moe_router_z_loss_weight < 0.0:
+            raise ValueError("model.moe_router_z_loss_weight must be >= 0.")
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ModelConfig":
@@ -1612,6 +1807,22 @@ class ModelConfig:
                 payload.get("local_attention_context_tokens"),
                 "model.local_attention_context_tokens",
             ),
+            feature_include_raw_value=_optional_bool(
+                payload.get("feature_include_raw_value"),
+                "model.feature_include_raw_value",
+                default=False,
+            ),
+            use_spatial_attention=_optional_bool(
+                payload.get("use_spatial_attention"),
+                "model.use_spatial_attention",
+                default=True,
+            ),
+            use_temporal_attention=_optional_bool(
+                payload.get("use_temporal_attention"),
+                "model.use_temporal_attention",
+                default=True,
+            ),
+            moe_router_z_loss_weight=float(payload.get("moe_router_z_loss_weight", 0.0)),
         )
 
     def resolved_latent_spatial_embed_dim(self) -> int:
@@ -2069,6 +2280,67 @@ class TrainingAuxiliaryLossConfig:
 
 
 @dataclass(slots=True)
+class TrainingObjectiveConfig:
+    """Select classification or executable action-value regression."""
+
+    type: str = "classification"
+    loss: str = "huber"
+    huber_delta: float = 1.0
+    quantiles: tuple[float, ...] = (0.1, 0.5, 0.9)
+    quantile_loss_weight: float = 0.25
+    quantile_crossing_weight: float = 0.1
+    decision_threshold_ticks: float = 0.0
+    fixed_rate: float | None = None
+
+    def __post_init__(self) -> None:
+        self.type = str(self.type).strip().lower()
+        self.loss = str(self.loss).strip().lower()
+        if self.type not in {"classification", "action_value_regression"}:
+            raise ValueError("training.objective.type must be 'classification' or 'action_value_regression'.")
+        if self.loss not in {"huber", "mse", "huber_quantile"}:
+            raise ValueError("training.objective.loss must be 'huber', 'mse', or 'huber_quantile'.")
+        self.quantiles = tuple(float(value) for value in self.quantiles)
+        if not self.quantiles or any(not 0.0 < value < 1.0 for value in self.quantiles):
+            raise ValueError("training.objective.quantiles must contain values in (0, 1).")
+        if tuple(sorted(self.quantiles)) != self.quantiles or len(set(self.quantiles)) != len(self.quantiles):
+            raise ValueError("training.objective.quantiles must be strictly increasing.")
+        if self.quantile_loss_weight < 0.0 or self.quantile_crossing_weight < 0.0:
+            raise ValueError("training.objective quantile loss weights must be >= 0.")
+        if self.huber_delta <= 0.0:
+            raise ValueError("training.objective.huber_delta must be > 0.")
+        if self.decision_threshold_ticks < 0.0:
+            raise ValueError("training.objective.decision_threshold_ticks must be >= 0.")
+        if self.fixed_rate is not None and not 0.0 < self.fixed_rate <= 1.0:
+            raise ValueError("training.objective.fixed_rate must be in (0, 1] or null.")
+
+    @property
+    def is_regression(self) -> bool:
+        return self.type == "action_value_regression"
+
+    @property
+    def uses_quantiles(self) -> bool:
+        return self.is_regression and self.loss == "huber_quantile"
+
+    @property
+    def regression_output_dim(self) -> int:
+        return 2 * (1 + len(self.quantiles)) if self.uses_quantiles else 2
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingObjectiveConfig":
+        payload = payload or {}
+        return cls(
+            type=str(payload.get("type", "classification")),
+            loss=str(payload.get("loss", "huber")),
+            huber_delta=float(payload.get("huber_delta", 1.0)),
+            quantiles=tuple(payload.get("quantiles", (0.1, 0.5, 0.9))),
+            quantile_loss_weight=float(payload.get("quantile_loss_weight", 0.25)),
+            quantile_crossing_weight=float(payload.get("quantile_crossing_weight", 0.1)),
+            decision_threshold_ticks=float(payload.get("decision_threshold_ticks", 0.0)),
+            fixed_rate=_optional_float(payload.get("fixed_rate")),
+        )
+
+
+@dataclass(slots=True)
 class TrainingConfig:
     device: str
     epochs: int
@@ -2104,6 +2376,7 @@ class TrainingConfig:
     directional_thresholds: TrainingDirectionalThresholdConfig
     sampling: TrainingSamplingConfig
     sequence_supervision: TrainingSequenceSupervisionConfig
+    objective: TrainingObjectiveConfig = field(default_factory=TrainingObjectiveConfig)
     class_weights: list[float] | None = None
 
     def __post_init__(self) -> None:
@@ -2155,10 +2428,12 @@ class TrainingConfig:
             "val_directional_macro_f1",
             "tailored_score",
             "precision_at_fixed_rate",
+            "val_pnl",
+            "val_rank_ic",
         }:
             raise ValueError(
                 "training.monitor must be one of val_loss, val_macro_f1, "
-                "val_directional_macro_f1, tailored_score, precision_at_fixed_rate."
+                "val_directional_macro_f1, tailored_score, precision_at_fixed_rate, val_pnl, val_rank_ic."
             )
         if self.monitor_mode not in {"min", "max"}:
             raise ValueError("training.monitor_mode must be 'min' or 'max'.")
@@ -2321,6 +2596,7 @@ class TrainingConfig:
             sequence_supervision=TrainingSequenceSupervisionConfig.from_dict(
                 payload.get("sequence_supervision"),
             ),
+            objective=TrainingObjectiveConfig.from_dict(payload.get("objective")),
         )
 
 
@@ -2401,6 +2677,40 @@ class ExperimentConfig:
     def __post_init__(self) -> None:
         if self.training.sequence_supervision.token_chunk_enabled:
             self.training.sequence_supervision.resolved_chunk_stride(self.data.sequence_window)
+        if self.training.objective.is_regression:
+            if self.preprocessing.labels.strategy != "executable_return":
+                raise ValueError(
+                    "training.objective.type=action_value_regression requires "
+                    "preprocessing.labels.strategy=executable_return."
+                )
+            if self.data.target_columns is None or len(self.data.target_columns) != 2:
+                raise ValueError(
+                    "action_value_regression requires exactly two data.target_columns "
+                    "ordered as [long_value, short_value]."
+                )
+            if self.training.monitor not in {"val_loss", "val_pnl", "val_rank_ic"}:
+                raise ValueError(
+                    "action_value_regression monitor must be val_loss, val_pnl, or val_rank_ic."
+                )
+            expected_mode = "min" if self.training.monitor == "val_loss" else "max"
+            if self.training.monitor_mode != expected_mode:
+                raise ValueError(
+                    f"training.monitor_mode must be '{expected_mode}' for {self.training.monitor}."
+                )
+            if not self.training.validates_by_epoch:
+                raise ValueError(
+                    "action_value_regression currently requires training.validate_every_n_batches='epoch'."
+                )
+            if self.training.temperature_scaling.enabled or self.training.directional_thresholds.enabled:
+                raise ValueError(
+                    "action_value_regression requires temperature_scaling.enabled=false and "
+                    "directional_thresholds.enabled=false; action values are already in net PnL ticks."
+                )
+        elif self.training.monitor in {"val_pnl", "val_rank_ic"}:
+            raise ValueError(
+                f"training.monitor={self.training.monitor} requires "
+                "training.objective.type=action_value_regression."
+            )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ExperimentConfig":

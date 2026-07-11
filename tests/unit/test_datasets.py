@@ -6,6 +6,7 @@ import shutil
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from configuration import DataConfig
 from datasets import DailySequenceBuilder, EpochNeutralDownsamplingSampler, LOBDataset, LOBTokenChunkDataset
@@ -75,6 +76,27 @@ def test_build_creates_compact_feature_time_and_label_arrays() -> None:
     np.testing.assert_allclose(times, [1.0, 2.0, 3.0, 4.0, 5.0])
 
 
+def test_build_creates_two_regression_targets_without_feature_leakage() -> None:
+    df = pd.DataFrame(
+        {
+            "time": [1.0, 2.0, 3.0],
+            "feature": [4.0, 5.0, 6.0],
+            "trend_label": [1, -1, 0],
+            "long_net_return_ticks": [1.5, -0.5, 0.1],
+            "short_net_return_ticks": [-2.0, 0.25, -0.2],
+        }
+    )
+    config = make_data_config(sequence_window=2)
+    config.target_columns = ["long_net_return_ticks", "short_net_return_ticks"]
+
+    features, _times, targets = DailySequenceBuilder(config).build(df)
+
+    assert features.shape == (3, 1)
+    np.testing.assert_allclose(features[:, 0], df["feature"])
+    assert targets.dtype == np.float32
+    np.testing.assert_allclose(targets, [[1.5, -2.0], [-0.5, 0.25], [0.1, -0.2]])
+
+
 def test_lob_dataset_getitem_returns_sequence_window_starting_at_idx(artifact_dir: Path) -> None:
     df = pd.DataFrame(
         {
@@ -98,8 +120,33 @@ def test_lob_dataset_getitem_returns_sequence_window_starting_at_idx(artifact_di
     assert tuple(x_seq.shape) == (3, 2)  # sequence_window events, 2 feature columns.
     assert tuple(t_seq.shape) == (3,)
     np.testing.assert_allclose(x_seq.numpy(), [[20, 2], [30, 3], [40, 4]])
-    np.testing.assert_allclose(t_seq.numpy(), [2.0, 3.0, 4.0])
+    np.testing.assert_allclose(t_seq.numpy(), [0.0, 1.0, 2.0])
     assert y_label.item() == 0
+
+
+def test_lob_dataset_preserves_microsecond_deltas_at_absolute_market_times(artifact_dir: Path) -> None:
+    x_path = artifact_dir / "precise_features.npy"
+    t_path = artifact_dir / "precise_times.npy"
+    y_path = artifact_dir / "precise_labels.npy"
+    np.save(x_path, np.ones((4, 2), dtype=np.float32))
+    np.save(
+        t_path,
+        np.asarray([34_200.0, 34_200.000_001, 34_200.000_003, 34_200.000_008], dtype=np.float64),
+    )
+    np.save(y_path, np.asarray([0, 1, 2, 1], dtype=np.int64))
+
+    dataset = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=4)
+    _x, relative_times, _target = dataset[0]
+
+    assert relative_times.dtype == torch.float32
+    assert relative_times[0].item() == 0.0
+    assert torch.all(relative_times[1:] > relative_times[:-1])
+    np.testing.assert_allclose(
+        relative_times.numpy(),
+        [0.0, 1e-6, 3e-6, 8e-6],
+        rtol=2e-4,
+        atol=1e-10,
+    )
 
 
 def test_lob_dataset_can_preload_compact_arrays_to_memory(artifact_dir: Path) -> None:

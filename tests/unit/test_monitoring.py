@@ -9,6 +9,7 @@ from monitoring import (
     directional_precision_at_fixed_rate,
     directional_class_ids,
     epoch_monitor_value,
+    exclusive_directional_top_k,
     tailored_score_components,
 )
 
@@ -87,7 +88,7 @@ def test_epoch_monitor_value_supports_tailored_score() -> None:
     assert value == pytest.approx(0.64375)
 
 
-def test_directional_precision_at_fixed_rate_uses_top_down_and_up_scores_separately() -> None:
+def test_directional_precision_at_fixed_rate_uses_disjoint_down_and_up_actions() -> None:
     probabilities = np.asarray(
         [
             [0.99, 0.00, 0.01],
@@ -107,8 +108,28 @@ def test_directional_precision_at_fixed_rate_uses_top_down_and_up_scores_separat
     )
 
     assert components.k == 2
-    assert components.actual_rate == pytest.approx(0.4)
+    assert components.actual_rate == pytest.approx(0.8)
     assert components.precision == pytest.approx(0.75)
+    assert components.selected_count == 4
+    assert components.down_count == 2
+    assert components.up_count == 2
+    assert components.overlap_resolved_count == 0
+
+
+def test_exclusive_directional_top_k_resolves_overlap_and_refills_budget() -> None:
+    down_scores = np.asarray([0.99, 0.80, 0.70, 0.10])
+    up_scores = np.asarray([0.98, 0.20, 0.90, 0.85])
+
+    down_indices, up_indices, overlap_count = exclusive_directional_top_k(
+        down_scores,
+        up_scores,
+        k_per_side=2,
+    )
+
+    assert overlap_count == 1
+    assert down_indices.tolist() == [0, 1]
+    assert up_indices.tolist() == [2, 3]
+    assert set(down_indices).isdisjoint(set(up_indices))
 
 
 def test_epoch_monitor_value_supports_precision_at_fixed_rate() -> None:

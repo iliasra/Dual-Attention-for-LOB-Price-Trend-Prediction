@@ -4,7 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from configuration import AdaptiveThresholdConfig, LabelConfig, SmoothingLabelConfig, TripleBarrierLabelConfig
+from configuration import (
+    AdaptiveThresholdConfig,
+    ExecutableReturnLabelConfig,
+    LabelConfig,
+    SmoothingLabelConfig,
+    TripleBarrierLabelConfig,
+)
 from horizon import (
     ADAPTIVE_LABEL_FEATURE_COLUMNS,
     SmoothingMethodC,
@@ -207,7 +213,8 @@ def test_triple_barrier_labeler_uses_first_hit() -> None:
         price_col="midprice",
     )(df)
 
-    assert labels.tolist() == [1, -1, 0, 0]
+    assert labels.iloc[:2].tolist() == [1, -1]
+    assert labels.iloc[2:].isna().all()
 
 
 def test_target_label_pipeline_adds_smoothing_labels() -> None:
@@ -384,8 +391,9 @@ def test_adaptive_method_c_components_include_exante_local_volatility() -> None:
         config=config,
     )
 
-    w_minus = midprices.rolling(window=2).mean()
-    expected_local_vol = w_minus.pct_change(periods=2).rolling(window=2, min_periods=2).std(ddof=0)
+    expected_local_vol = (
+        midprices.pct_change().rolling(window=2, min_periods=2).std(ddof=0) * np.sqrt(2.0)
+    )
     pd.testing.assert_series_equal(
         components["adaptive_local_volatility"],
         expected_local_vol,
@@ -643,4 +651,54 @@ def test_target_label_pipeline_adds_triple_barrier_labels() -> None:
 
     result = TargetLabelPipeline(config).transform(df)
 
-    assert result["trend_label"].tolist() == [1, -1, 0, 0]
+    assert result["trend_label"].tolist() == [1, -1]
+
+
+def test_executable_return_targets_match_crossing_pnl_and_censor_tail() -> None:
+    frame = pd.DataFrame(
+        {
+            "bid_price_1": [100.0, 101.0, 103.0, 102.0, 105.0],
+            "ask_price_1": [101.0, 102.0, 104.0, 103.0, 106.0],
+        }
+    )
+    config = make_smoothing_config(threshold=0.0, k=0, h=2)
+    config.strategy = "executable_return"
+    config.executable_return = ExecutableReturnLabelConfig(
+        horizon_events=2,
+        minimum_edge_ticks=0.0,
+        tick_size=1.0,
+    )
+
+    result = TargetLabelPipeline(config).transform(frame)
+
+    assert len(result) == 3
+    np.testing.assert_allclose(result["long_net_return_ticks"], [2.0, 0.0, 1.0])
+    np.testing.assert_allclose(result["short_net_return_ticks"], [-4.0, -2.0, -3.0])
+    assert result["trend_label"].tolist() == [1, 0, 1]
+
+
+def test_executable_return_targets_include_fees_latency_and_slippage() -> None:
+    frame = pd.DataFrame(
+        {
+            "bid_price_1": [10_000.0, 10_010.0, 10_030.0, 10_040.0],
+            "ask_price_1": [10_010.0, 10_020.0, 10_040.0, 10_050.0],
+        }
+    )
+    config = make_smoothing_config(threshold=0.0, k=0, h=2)
+    config.strategy = "executable_return"
+    config.executable_return = ExecutableReturnLabelConfig(
+        horizon_events=3,
+        entry_lag_events=1,
+        round_trip_fees_bps=10.0,
+        slippage_ticks_per_side=0.5,
+        tick_size=10.0,
+    )
+
+    result = TargetLabelPipeline(config).transform(frame)
+
+    expected_fee_ticks = ((10_010.0 + 10_020.0) / 2.0) * 10.0 / 10_000.0 / 10.0
+    expected_long = (10_040.0 - 10_020.0) / 10.0 - expected_fee_ticks - 1.0
+    expected_short = (10_010.0 - 10_050.0) / 10.0 - expected_fee_ticks - 1.0
+    assert len(result) == 1
+    assert result.loc[0, "long_net_return_ticks"] == pytest.approx(expected_long)
+    assert result.loc[0, "short_net_return_ticks"] == pytest.approx(expected_short)

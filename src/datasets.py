@@ -15,12 +15,36 @@ except ImportError:  # pragma: no cover
     from .configuration import DataConfig
 
 
+def relative_time_tensor(time_values: np.ndarray) -> torch.Tensor:
+    """Return window-relative float32 times without quantizing absolute timestamps.
+
+    LOBSTER timestamps are seconds since midnight. Casting values around 34,000--
+    57,000 seconds directly to float32 destroys sub-millisecond event spacing.
+    Subtracting the window origin in float64 first retains that spacing while
+    keeping the model input compact.
+    """
+    absolute_times = np.asarray(time_values, dtype=np.float64)
+    if absolute_times.ndim != 1:
+        raise ValueError("time_values must be one-dimensional.")
+    if absolute_times.size == 0:
+        return torch.empty(0, dtype=torch.float32)
+    if not np.isfinite(absolute_times).all():
+        raise ValueError("time_values contains non-finite timestamps.")
+    relative_times = absolute_times - absolute_times[0]
+    return torch.from_numpy(relative_times.astype(np.float32, copy=False))
+
+
 @dataclass(slots=True)
 class DailySequenceBuilder:
     config: DataConfig
 
     def feature_columns(self, df: pd.DataFrame) -> list[str]:
-        excluded = {self.config.time_column, self.config.label_column, *self.config.feature_exclude_columns}
+        excluded = {
+            self.config.time_column,
+            self.config.label_column,
+            *self.config.feature_exclude_columns,
+            *(self.config.target_columns or []),
+        }
         return [column for column in df.columns if column not in excluded]
 
     def build(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -33,10 +57,18 @@ class DailySequenceBuilder:
 
         feature_columns = self.feature_columns(df)
         times = df[self.config.time_column].to_numpy()
-        labels = df[self.config.label_column].map(self.config.label_mapping).to_numpy(dtype=np.float32)
-        if np.isnan(labels).any():
-            raise ValueError("Encountered labels missing from the configured label_mapping.")
-        labels = labels.astype(np.int64)
+        if self.config.target_columns:
+            missing_targets = sorted(set(self.config.target_columns) - set(df.columns))
+            if missing_targets:
+                raise ValueError(f"Missing configured regression target columns: {missing_targets}.")
+            labels = df.loc[:, self.config.target_columns].to_numpy(dtype=np.float32)
+            if not np.isfinite(labels).all():
+                raise ValueError("Encountered non-finite regression targets.")
+        else:
+            labels = df[self.config.label_column].map(self.config.label_mapping).to_numpy(dtype=np.float32)
+            if np.isnan(labels).any():
+                raise ValueError("Encountered labels missing from the configured label_mapping.")
+            labels = labels.astype(np.int64)
         features = df[feature_columns].to_numpy(dtype=np.float32)
 
         return features, times, labels
@@ -165,8 +197,13 @@ class LOBDataset(Dataset):
 
         # Access compact arrays by slicing, then copy into a tensor-owned batch sample.
         x_seq = torch.from_numpy(np.array(self.X_data[day_idx][local_idx:end_idx], dtype=np.float32, copy=True))
-        t_seq = torch.from_numpy(np.array(self.T_data[day_idx][local_idx:end_idx], dtype=np.float32, copy=True))
-        y_label = torch.tensor(int(self.y_data[day_idx][end_idx - 1]), dtype=torch.long)
+        t_seq = relative_time_tensor(self.T_data[day_idx][local_idx:end_idx])
+        raw_target = self.y_data[day_idx][end_idx - 1]
+        y_label = (
+            torch.from_numpy(np.asarray(raw_target, dtype=np.float32).copy())
+            if np.asarray(raw_target).ndim > 0
+            else torch.tensor(int(raw_target), dtype=torch.long)
+        )
 
         return x_seq, t_seq, y_label
 
@@ -286,8 +323,9 @@ class LOBTokenChunkDataset(Dataset):
         loss_mask = row_positions >= supervise_from
 
         x_seq = torch.from_numpy(np.array(self.X_data[day_idx][start:end], dtype=np.float32, copy=True))
-        t_seq = torch.from_numpy(np.array(self.T_data[day_idx][start:end], dtype=np.float32, copy=True))
-        y_seq = torch.from_numpy(np.array(self.y_data[day_idx][start:end], dtype=np.int64, copy=True))
+        t_seq = relative_time_tensor(self.T_data[day_idx][start:end])
+        target_dtype = np.float32 if self.y_data[day_idx].ndim > 1 else np.int64
+        y_seq = torch.from_numpy(np.array(self.y_data[day_idx][start:end], dtype=target_dtype, copy=True))
         mask = torch.from_numpy(loss_mask.astype(np.bool_, copy=False))
         ids = torch.from_numpy(token_indices.astype(np.int64, copy=False))
         return x_seq, t_seq, y_seq, mask, ids

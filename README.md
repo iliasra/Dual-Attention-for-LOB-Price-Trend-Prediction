@@ -242,12 +242,13 @@ python scripts/run_training.py --config configs/pipeline_config.yaml --resume-la
 python scripts/run_training.py --config configs/pipeline_config.yaml --fold-id <fold_id> --resume-from <path/to/training_state_latest.pth>
 ```
 
-The complete training-state checkpoint stores the optimizer, scheduler, AMP
-scaler, validation index, early-stopping state, RNG states, top-k checkpoint
-metadata, and W&B run id. It is separate from the top-k model checkpoints used
-for final model selection. A checkpoint from `last_window` training is not
-resumed into `token_chunk` training; start a new run or warm-start model weights
-explicitly if the model dimensions remain compatible.
+The complete training-state checkpoint stores the model, optimizer, scheduler,
+AMP scaler, early-stopping state, RNG states, history, and top-k checkpoint
+metadata. Classification additionally stores its validation index and W&B run
+id. Action-value regression resumes at the next fully validated epoch boundary;
+it intentionally does not attempt a partial-epoch replay. A checkpoint from
+`last_window` training is not resumed into `token_chunk` training, and an
+action-value checkpoint is not interchangeable with a classification state.
 
 ## Testing
 
@@ -297,11 +298,11 @@ Place the raw LOBSTER files under:
 $HOME/Dual-Attention-for-LOB-Price-Trend-Prediction/data/LOBSTER/
 ```
 
-Then edit `configs/pipeline_config.yaml` and `configs/folds.txt` as needed. If
-you use `preprocess_folds_array.pbs`, its `#PBS -J` array range must match the
-number of non-empty, non-comment lines in `configs/folds.txt`, or you must
-override it at submission time with `qsub -J ...`. The same rule applies to
-`run_training_folds_array.pbs` when training folds as an array job.
+Then edit `configs/pipeline_config.yaml` and `configs/folds.txt` as needed. PBS
+array bounds are not hard-coded in the scripts: submit
+`preprocess_folds_array.pbs` and `run_training_folds_array.pbs` with an explicit
+`qsub -J ...` range matching the number of non-empty, non-comment lines in the
+selected folds file.
 
 `configs/folds.txt` is only the list of fold ids to run. Each non-empty,
 non-comment line contains one fold id, and every listed id must exist in the
@@ -370,14 +371,8 @@ writes `.npz` cache files under `data/gcv_cache/`.
 Once the GCV cache is complete, submit the fold preprocessing array:
 
 ```bash
-qsub preprocess_folds_array.pbs
-```
-
-If the `#PBS -J` directive in the script does not match your fold count, submit
-with an explicit array range instead:
-
-```bash
-qsub -J 1-<N_FOLDS> preprocess_folds_array.pbs
+N_FOLDS=$(awk 'NF && $1 !~ /^#/ { c++ } END { print c + 0 }' configs/folds.txt)
+qsub -J 1-$N_FOLDS preprocess_folds_array.pbs
 ```
 
 `preprocess_folds_array.pbs` reads fold ids from `configs/folds.txt`, runs:
@@ -389,7 +384,9 @@ python scripts/process_data.py \
   --require-lambda-cache
 ```
 
-and copies fold outputs back to:
+and copies fold outputs back to the directories configured by
+`data.sequence_data_dir`, `data.processed_data_dir`, and
+`preprocessing.normalization.derivatives_stats_dir`, for example:
 
 ```text
 data/sequences/<fold_id>/
@@ -456,7 +453,10 @@ qsub -v TRAINING_CONFIG=configs/my_config.yaml,FOLDS_FILE=configs/my_folds.txt,T
 ```
 
 `run_training.pbs` copies the code to `$TMPDIR`, links persistent `logs/` and
-`results/`, stages `data/sequences/<fold_id>/` into `$TMPDIR`, and then runs:
+`results/`, stages each fold from the configured `data.sequence_data_dir`, and
+links the configured `data.raw_data_dir` into the work tree. The raw-data link is
+needed by the held-out classification PnL evaluation; without it training can
+finish but that diagnostic is marked as skipped. The job then runs:
 
 ```bash
 python scripts/run_training.py \
@@ -517,11 +517,16 @@ $HOME/run_outputs/<RUN_STEM>/run_logs.txt
 ```
 
 To resume after walltime, reuse the same `TRAINING_RUN_STEM` and pass resume
-arguments through the PBS variable:
+arguments through the PBS variable. This works for classification and
+action-value regression:
 
 ```bash
 qsub -v TRAINING_RUN_STEM="$RUN_STEM",TRAINING_RESUME_ARGS=--resume-latest run_training.pbs
 ```
+
+For action-value regression, `training_state_latest.pth` is written after every
+validated epoch and resumes at the next epoch. Keep the same config, objective,
+quantiles, gradient accumulation, supervision mode, and `TRAINING_RUN_STEM`.
 
 For W&B online tracking from PBS, pass the API key through the environment, for
 example:
@@ -549,6 +554,28 @@ qsub -J 1-$N_FOLDS \
   -v TRAINING_RUN_STEM="$RUN_STEM" \
   run_training_folds_array.pbs
 ```
+
+An interrupted array run can be resumed in the same way:
+
+```bash
+qsub -J 1-$N_FOLDS \
+  -v TRAINING_RUN_STEM="$RUN_STEM",TRAINING_RESUME_ARGS=--resume-latest \
+  run_training_folds_array.pbs
+```
+
+For the prebuilt FI2010/TLOB configuration, preprocessing is skipped and the
+matching config/folds files must be selected together:
+
+```bash
+N_FOLDS=$(awk 'NF && $1 !~ /^#/ { c++ } END { print c + 0 }' configs/folds_fi2010.txt)
+RUN_STEM=fi2010_tlob_h100_$(date +%Y%m%d_%H%M%S)
+qsub -J 1-$N_FOLDS \
+  -v TRAINING_CONFIG=configs/config_TLOB_F1_2010.yaml,FOLDS_FILE=configs/folds_fi2010.txt,TRAINING_RUN_STEM="$RUN_STEM" \
+  run_training_folds_array.pbs
+```
+
+The alternative `config_TLOB_F1_2010_2.yaml` uses
+`FOLDS_FILE=configs/folds_fi2010_2.txt` instead.
 
 For `run_training_folds_array.pbs`, each fold task writes its live PBS stream to:
 

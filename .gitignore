@@ -1,9 +1,12 @@
 # Misc
 *.env
+.agents
 
 # PBS stdout/stderr logs
 *.o[0-9]*
 *.e[0-9]*
+
+docs/*
 
 # Results/logs dir
 backtest/*
@@ -11,6 +14,7 @@ results/*
 !results/.gitkeep
 logs/*
 label/
+
 
 # Data
 data/*

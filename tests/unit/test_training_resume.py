@@ -25,6 +25,7 @@ def test_complete_training_state_round_trip(artifact_dir: Path) -> None:
     config = load_config()
     config.training.device = "cpu"
     config.training.use_amp = False
+    config.training.gradient_accumulation_steps = 1
     config.training.model_dir = str(tmp_path)
     trainer = LobTrainer(config.training)
 
@@ -87,6 +88,7 @@ def test_training_state_rejects_incompatible_gradient_accumulation(artifact_dir:
     config = load_config()
     config.training.device = "cpu"
     config.training.use_amp = False
+    config.training.gradient_accumulation_steps = 1
     config.training.model_dir = str(tmp_path)
     trainer = LobTrainer(config.training)
 

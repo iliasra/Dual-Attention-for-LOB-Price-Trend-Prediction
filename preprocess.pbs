@@ -33,6 +33,23 @@ format_duration() {
   fi
 }
 
+resolve_configured_path() {
+  config_path="$1"
+  dotted_key="$2"
+  python - "$config_path" "$dotted_key" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+config_path = Path(sys.argv[1]).resolve()
+value = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+for key in sys.argv[2].split("."):
+    value = value[key]
+path = Path(value)
+print(path if path.is_absolute() else (config_path.parent / path).resolve())
+PY
+}
+
 finish() {
   status=$?
   end_epoch="$(date +%s)"
@@ -49,22 +66,22 @@ copy_fold_outputs() {
   fold_id="$1"
 
   echo "===== COPYING OUTPUTS BACK FOR $fold_id ====="
-  mkdir -p "$OUTPUT_ROOT/data/sequences/$fold_id"
-  mkdir -p "$OUTPUT_ROOT/data/derivatives_z_scores/$fold_id"
+  mkdir -p "$PROJECT_SEQUENCE_DIR/$fold_id"
+  mkdir -p "$PROJECT_DERIVATIVES_DIR/$fold_id"
 
-  rsync -a "$WORK_DIR/data/sequences/$fold_id/" \
-    "$OUTPUT_ROOT/data/sequences/$fold_id/"
+  rsync -a "$WORK_SEQUENCE_DIR/$fold_id/" \
+    "$PROJECT_SEQUENCE_DIR/$fold_id/"
 
-  if [ -d "$WORK_DIR/data/processed_dataframes/$fold_id" ]; then
-    mkdir -p "$OUTPUT_ROOT/data/processed_dataframes/$fold_id"
-    rsync -a "$WORK_DIR/data/processed_dataframes/$fold_id/" \
-      "$OUTPUT_ROOT/data/processed_dataframes/$fold_id/"
+  if [ -d "$WORK_PROCESSED_DIR/$fold_id" ]; then
+    mkdir -p "$PROJECT_PROCESSED_DIR/$fold_id"
+    rsync -a "$WORK_PROCESSED_DIR/$fold_id/" \
+      "$PROJECT_PROCESSED_DIR/$fold_id/"
   else
     echo "No processed dataframe CSV directory to copy for $fold_id (save_processed_dataframes=false)."
   fi
 
-  rsync -a "$WORK_DIR/data/derivatives_z_scores/$fold_id/" \
-    "$OUTPUT_ROOT/data/derivatives_z_scores/$fold_id/"
+  rsync -a "$WORK_DERIVATIVES_DIR/$fold_id/" \
+    "$PROJECT_DERIVATIVES_DIR/$fold_id/"
 }
 
 trap finish EXIT
@@ -114,6 +131,13 @@ export NUMEXPR_NUM_THREADS=8
 echo "===== COPYING PROJECT TO TMPDIR ====="
 cp -r "$PROJECT_DIR" "$TMPDIR/"
 cd "$WORK_DIR"
+
+PROJECT_SEQUENCE_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" data.sequence_data_dir)"
+WORK_SEQUENCE_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" data.sequence_data_dir)"
+PROJECT_PROCESSED_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" data.processed_data_dir)"
+WORK_PROCESSED_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" data.processed_data_dir)"
+PROJECT_DERIVATIVES_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" preprocessing.normalization.derivatives_stats_dir)"
+WORK_DERIVATIVES_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" preprocessing.normalization.derivatives_stats_dir)"
 
 for fold_id in "${FOLD_IDS[@]}"; do
   echo

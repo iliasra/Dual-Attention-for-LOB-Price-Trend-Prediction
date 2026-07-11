@@ -4,6 +4,8 @@ matplotlib
 pytest
 PyYAML
 scipy
+scikit-learn
 torch
 tqdm
 wandb
+xgboost

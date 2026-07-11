@@ -78,6 +78,23 @@ format_duration() {
   fi
 }
 
+resolve_configured_path() {
+  config_path="$1"
+  dotted_key="$2"
+  python - "$config_path" "$dotted_key" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+config_path = Path(sys.argv[1]).resolve()
+value = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+for key in sys.argv[2].split("."):
+    value = value[key]
+path = Path(value)
+print(path if path.is_absolute() else (config_path.parent / path).resolve())
+PY
+}
+
 same_file() {
   left_path="$1"
   right_path="$2"
@@ -266,12 +283,28 @@ rm -rf "${WORK_DIR:?}/logs" "${WORK_DIR:?}/results"
 ln -s "$PROJECT_DIR/logs" "$WORK_DIR/logs"
 ln -s "$PROJECT_DIR/results" "$WORK_DIR/results"
 
+PROJECT_RAW_DATA_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" data.raw_data_dir)"
+WORK_RAW_DATA_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" data.raw_data_dir)"
+echo "PROJECT_RAW_DATA_DIR=$PROJECT_RAW_DATA_DIR"
+echo "WORK_RAW_DATA_DIR=$WORK_RAW_DATA_DIR"
+if [ -d "$PROJECT_RAW_DATA_DIR" ] && [ "$PROJECT_RAW_DATA_DIR" != "$WORK_RAW_DATA_DIR" ]; then
+  mkdir -p "$(dirname "$WORK_RAW_DATA_DIR")"
+  if [ -e "$WORK_RAW_DATA_DIR" ] || [ -L "$WORK_RAW_DATA_DIR" ]; then
+    rm -rf "$WORK_RAW_DATA_DIR"
+  fi
+  ln -s "$PROJECT_RAW_DATA_DIR" "$WORK_RAW_DATA_DIR"
+elif [ ! -d "$PROJECT_RAW_DATA_DIR" ]; then
+  echo "WARNING: raw data directory is unavailable; raw-data PnL evaluation may be skipped: $PROJECT_RAW_DATA_DIR" >&2
+fi
+
 echo
 echo "===== STAGING SEQUENCE DATA ====="
+PROJECT_SEQUENCE_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" data.sequence_data_dir)"
+WORK_SEQUENCE_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" data.sequence_data_dir)"
 for fold_id in "${FOLD_IDS[@]}"; do
-  mkdir -p "$WORK_DIR/data/sequences/$fold_id"
-  rsync -a "$PROJECT_DIR/data/sequences/$fold_id/" \
-    "$WORK_DIR/data/sequences/$fold_id/"
+  mkdir -p "$WORK_SEQUENCE_DIR/$fold_id"
+  rsync -a "$PROJECT_SEQUENCE_DIR/$fold_id/" \
+    "$WORK_SEQUENCE_DIR/$fold_id/"
 done
 
 cd "$WORK_DIR"

@@ -333,7 +333,7 @@ def _precision_at_fixed_rate_from_thresholded_decisions(
         "precision_at_fixed_rate_up_evaluated_count": int(up_counts["evaluated"]),
         "precision_at_fixed_rate_up_correct_count": int(up_counts["correct"]),
         "precision_at_fixed_rate_up_precision": float(up_counts["precision"]),
-        "precision_at_fixed_rate_actual_rate": float(evaluated_count / max(2 * n_samples, 1)),
+        "precision_at_fixed_rate_actual_rate": float(evaluated_count / max(n_samples, 1)),
         "precision_at_fixed_rate_decision_rate": float(available_count / n_samples),
         "precision_at_fixed_rate_selection_rule": (
             "post_threshold_down_up_decisions_ranked_separately_by_side_probability; "

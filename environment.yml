@@ -12,9 +12,11 @@ dependencies:
   - pytorch-cuda=12.1
   - pytorch=2.5.1
   - conda-forge::scipy=1.17.0
+  - scikit-learn
   - pyyaml
   - tqdm
   - pytest
   - pip
   - pip:
       - wandb
+      - xgboost

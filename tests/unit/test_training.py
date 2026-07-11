@@ -577,7 +577,7 @@ def test_lob_trainer_flushes_partial_gradient_accumulation_window(
 
 
 @pytest.mark.filterwarnings("ignore:Detected call of.*lr_scheduler\\.step.*:UserWarning")
-def test_lob_trainer_delays_validation_until_accumulation_boundary(
+def test_lob_trainer_flushes_partial_accumulation_at_validation_boundary(
     artifact_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -602,9 +602,9 @@ def test_lob_trainer_delays_validation_until_accumulation_boundary(
 
     _, history = trainer.fit(TinySequenceClassifier(), train_loader=_tiny_batches(5), val_loader=[])
 
-    assert [(item.batch_in_epoch, item.global_step) for item in history] == [(4, 4), (5, 5)]
+    assert [(item.batch_in_epoch, item.global_step) for item in history] == [(3, 3), (5, 5)]
     assert [item.checkpoint_label for item in history] == [
-        "epoch_0001_step_00000004",
+        "epoch_0001_step_00000003",
         "epoch_0001_step_00000005",
     ]
 
@@ -936,7 +936,7 @@ def test_metric_accumulator_computes_directional_precision_at_fixed_rate() -> No
     metrics = accumulator.compute()
 
     assert metrics.directional_precision_at_fixed_rate_k == 2
-    assert metrics.directional_precision_at_fixed_rate_actual_rate == pytest.approx(0.5)
+    assert metrics.directional_precision_at_fixed_rate_actual_rate == pytest.approx(1.0)
     assert metrics.directional_precision_at_fixed_rate == pytest.approx(0.5)
 
 
@@ -1258,7 +1258,7 @@ def test_lob_trainer_evaluate_can_collect_probability_outputs() -> None:
     assert result.metrics.per_class_pr_ap == pytest.approx([1.0, 1.0, 1.0])
     assert result.metrics.per_class_pr_auc == pytest.approx([1.0, 1.0, 1.0])
     assert result.metrics.per_class_roc_auc == pytest.approx([1.0, 1.0, 1.0])
-    assert result.metrics.directional_precision_at_fixed_rate == pytest.approx(1 / 3)
+    assert result.metrics.directional_precision_at_fixed_rate == pytest.approx(2 / 3)
     assert result.metrics.directional_precision_at_fixed_rate_k == 3
     assert result.metrics.directional_precision_at_fixed_rate_actual_rate == pytest.approx(1.0)
 

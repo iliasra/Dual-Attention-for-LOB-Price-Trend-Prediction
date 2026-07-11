@@ -20,11 +20,38 @@ if str(SCRIPTS_DIR) not in sys.path:
 from configuration import load_config
 from evaluate_model import (
     apply_directional_thresholds_to_result,
+    apply_logit_calibration_to_result,
     extract_checkpoint_state_dict,
     load_directional_thresholds,
+    load_logit_calibration,
     load_config_for_evaluation,
     write_evaluation_outputs,
 )
+
+
+def test_external_evaluation_applies_temperature_and_class_bias_before_metrics(artifact_dir: Path) -> None:
+    config = load_config()
+    calibration_path = artifact_dir / "temperature_scaling.yaml"
+    calibration_path.write_text(
+        yaml.safe_dump({"temperature": 2.0, "class_biases": [0.0, -1.0, 1.0]}),
+        encoding="utf-8",
+    )
+    calibration = load_logit_calibration(calibration_path, config)
+    result = SimpleNamespace(
+        loss=0.0,
+        metrics=None,
+        prediction_outputs={
+            "logits": np.asarray([[1.0, 2.0, 0.0], [0.0, 2.0, 1.0]], dtype=np.float32),
+            "targets": np.asarray([2, 1], dtype=np.int64),
+        },
+    )
+
+    apply_logit_calibration_to_result(result, config, calibration)
+
+    assert result.prediction_outputs["probabilities"].shape == (2, 3)
+    assert result.prediction_outputs["predictions"].tolist() == [2, 2]
+    assert np.isfinite(result.loss)
+    assert result.metrics.confusion_matrix[2][2] == 1
 
 
 @pytest.fixture()

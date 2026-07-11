@@ -20,18 +20,24 @@ class FeaturePositionalEmbedding(nn.Module):
         embed_dim: int,
         num_frequencies: int,
         sigma: float,
+        include_raw_value: bool = False,
     ) -> None:
         super().__init__()
         self.num_features = d_input
         self.embed_dim = embed_dim
+        self.include_raw_value = bool(include_raw_value)
         self.frequencies = nn.Parameter(torch.randn(d_input, num_frequencies) * sigma)
-        self.linear = nn.Linear(2 * num_frequencies, embed_dim)
+        input_width = 2 * num_frequencies + int(self.include_raw_value)
+        self.linear = nn.Linear(input_width, embed_dim)
         self.spatial_pe = nn.Parameter(torch.randn(1, 1, d_input, embed_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.unsqueeze(-1)
         angles = x * self.frequencies * 2 * math.pi
-        periodic_features = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+        components = [torch.sin(angles), torch.cos(angles)]
+        if self.include_raw_value:
+            components.append(x)
+        periodic_features = torch.cat(components, dim=-1)
         projected = self.linear(periodic_features)
         return self.spatial_pe + projected
 
@@ -78,7 +84,9 @@ class ContinuousRotaryEmbedding(RotaryEmbeddingBase):
     def __init__(self, head_dim: int, num_heads: int, base: int) -> None:
         super().__init__(head_dim=head_dim, num_heads=num_heads, base=base)
         self.time_scale = nn.Parameter(torch.ones(self.head_dim // 2))
-        self.log_freqs = nn.Parameter(torch.randn(num_heads, head_dim // 2))
+        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+        initial_log_freqs = torch.log(inv_freq.clamp_min(1e-8)).repeat(num_heads, 1)
+        self.log_freqs = nn.Parameter(initial_log_freqs + 0.01 * torch.randn_like(initial_log_freqs))
 
     def forward(
         self,
@@ -88,7 +96,7 @@ class ContinuousRotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         t = t.unsqueeze(-1).unsqueeze(-1)
         frequencies = torch.exp(self.log_freqs).clamp(min=1e-4, max=1e2).unsqueeze(0).unsqueeze(0)
-        time_scale = self.time_scale.reshape(1, 1, 1, -1)  # reshape avoids contiguous-memory assumptions
+        time_scale = self.time_scale.clamp(min=1e-4, max=1e4).reshape(1, 1, 1, -1)
         angles = t * time_scale * frequencies
         embedding = angles.repeat_interleave(2, dim=-1)
         cos = embedding.cos()
@@ -102,7 +110,8 @@ class HybridContinuousRotaryEmbedding(RotaryEmbeddingBase):
         inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
         self.register_buffer("inv_freq", inv_freq)
         self.time_scale = nn.Parameter(torch.ones(self.head_dim // 2))
-        self.log_freqs = nn.Parameter(torch.randn(num_heads, head_dim // 2))
+        initial_log_freqs = torch.log(inv_freq.clamp_min(1e-8)).repeat(num_heads, 1)
+        self.log_freqs = nn.Parameter(initial_log_freqs + 0.01 * torch.randn_like(initial_log_freqs))
 
     def forward(
         self,
@@ -113,7 +122,7 @@ class HybridContinuousRotaryEmbedding(RotaryEmbeddingBase):
         _, sequence_length, _, _ = q.shape
         t_expanded = t.unsqueeze(-1).unsqueeze(-1)
         frequencies = torch.exp(self.log_freqs).clamp(min=1e-4, max=1e2).unsqueeze(0).unsqueeze(0)
-        time_scale = self.time_scale.reshape(1, 1, 1, -1)  # reshape avoids contiguous-memory assumptions
+        time_scale = self.time_scale.clamp(min=1e-4, max=1e4).reshape(1, 1, 1, -1)
         angles_time = t_expanded * time_scale * frequencies
 
         positions = torch.arange(sequence_length, device=q.device, dtype=q.dtype).reshape(1, sequence_length, 1, 1)  # reshape avoids contiguous-memory assumptions
@@ -183,19 +192,50 @@ class ContinuousTimeAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        dt = t[:, :, None] - t[:, None, :]
-        time_mask = ((dt >= 0) & (dt <= self.max_dt)).unsqueeze(1)
-        causal_mask = torch.tril(
-            torch.ones((sequence_length, sequence_length), device=x.device, dtype=torch.bool)
-        ).reshape(1, 1, sequence_length, sequence_length)  # reshape avoids contiguous-memory assumptions
-        attention_mask = time_mask & causal_mask
+        dropout_p = self.dropout if self.training else 0.0
         if self.local_context_tokens is not None and self.local_context_tokens < sequence_length:
-            positions = torch.arange(sequence_length, device=x.device)
-            local_distance = positions.reshape(sequence_length, 1) - positions.reshape(1, sequence_length)
-            local_mask = (local_distance >= 0) & (local_distance < int(self.local_context_tokens))
-            attention_mask = attention_mask & local_mask.reshape(1, 1, sequence_length, sequence_length)
-
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask, dropout_p=self.dropout if self.training else 0.0, is_causal=False,)
+            # Blocked local attention avoids allocating [B,H,L,L] masks/scores.
+            # A query block of C tokens sees at most 2C-1 keys and is then
+            # constrained to its causal C-token context by the boolean mask.
+            context = int(self.local_context_tokens)
+            output_blocks: list[torch.Tensor] = []
+            for query_start in range(0, sequence_length, context):
+                query_end = min(sequence_length, query_start + context)
+                key_start = max(0, query_start - context + 1)
+                key_end = query_end
+                query_positions = torch.arange(query_start, query_end, device=x.device)
+                key_positions = torch.arange(key_start, key_end, device=x.device)
+                token_distance = query_positions[:, None] - key_positions[None, :]
+                local_causal_mask = (token_distance >= 0) & (token_distance < context)
+                dt = t[:, query_start:query_end, None] - t[:, None, key_start:key_end]
+                time_mask = (dt >= 0) & (dt <= self.max_dt)
+                attention_mask = (time_mask & local_causal_mask.unsqueeze(0)).unsqueeze(1)
+                output_blocks.append(
+                    F.scaled_dot_product_attention(
+                        q[:, :, query_start:query_end],
+                        k[:, :, key_start:key_end],
+                        v[:, :, key_start:key_end],
+                        attn_mask=attention_mask,
+                        dropout_p=dropout_p,
+                        is_causal=False,
+                    )
+                )
+            out = torch.cat(output_blocks, dim=2)
+        else:
+            dt = t[:, :, None] - t[:, None, :]
+            time_mask = ((dt >= 0) & (dt <= self.max_dt)).unsqueeze(1)
+            causal_mask = torch.tril(
+                torch.ones((sequence_length, sequence_length), device=x.device, dtype=torch.bool)
+            ).reshape(1, 1, sequence_length, sequence_length)
+            attention_mask = time_mask & causal_mask
+            out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attention_mask,
+                dropout_p=dropout_p,
+                is_causal=False,
+            )
         out = out.transpose(1, 2).reshape(batch_size, sequence_length, hidden_size)
         return self.out(out)
 
@@ -209,6 +249,7 @@ class MoE(nn.Module):
             raise ValueError("top_k must be at least 1 for MoE routing.")
         self.router_noise = config.moe_router_noise  # routing noise for MoE training
         self.load_balancing_weight = config.moe_load_balancing_weight  # load-balancing coefficient for MoE training
+        self.router_z_loss_weight = config.moe_router_z_loss_weight
         self.load_balancing_loss: torch.Tensor | None = None  # expose MoE auxiliary loss to the trainer
         self.last_routing: dict[str, torch.Tensor | int] | None = None
         self.gate = nn.Linear(config.d_model, config.num_experts)
@@ -241,7 +282,15 @@ class MoE(nn.Module):
         weights = torch.softmax(gate_logits, dim=-1)
         topk_weights, topk_indices = torch.topk(weights, self.top_k, dim=-1)
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(topk_weights.dtype).eps)  # renormalize selected MoE expert weights
-        self.load_balancing_loss = self._load_balancing_loss(weights, topk_indices) if self.training else weights.new_zeros(())  # load-balancing for MoE training
+        if self.training:
+            balance_loss = self._load_balancing_loss(weights, topk_indices)
+            router_z_loss = (
+                torch.logsumexp(gate_logits.float(), dim=-1).square().mean().to(weights.dtype)
+                * self.router_z_loss_weight
+            )
+            self.load_balancing_loss = balance_loss + router_z_loss
+        else:
+            self.load_balancing_loss = weights.new_zeros(())
         self.last_routing = {
             "topk_indices": topk_indices.detach(),
             "topk_weights": topk_weights.detach(),
@@ -289,20 +338,26 @@ class RawFeatureDualAttentionBlock(nn.Module):
             raise ValueError("feature_embed_dim must be divisible by num_heads.")
 
         self.config = config
+        self.use_spatial_attention = bool(config.use_spatial_attention)
+        self.use_temporal_attention = bool(config.use_temporal_attention)
         self.d_input = config.resolved_d_input()
         self.feature_embedding = FeaturePositionalEmbedding(
             d_input=self.d_input,
             embed_dim=config.feature_embed_dim,
             num_frequencies=config.feature_num_frequencies,
             sigma=config.feature_sigma,
+            include_raw_value=config.feature_include_raw_value,
         )
         self.flattened_feature_dim = self.d_input * config.feature_embed_dim
         self.spatial_attention = nn.MultiheadAttention(
             embed_dim=config.feature_embed_dim,
             num_heads=config.num_heads, #same nb of heads for spatial/timewise
+            dropout=config.attention_dropout,
             batch_first=True,
         )
         self.projection = nn.Linear(self.flattened_feature_dim, config.d_model)
+        self.spatial_norm = nn.LayerNorm(config.feature_embed_dim)
+        self.spatial_dropout = nn.Dropout(config.attention_dropout)
         self.norm1 = nn.LayerNorm(config.d_model)
         self.temporal_attention = ContinuousTimeAttention(config)  #same nb of heads for spatial/timewise
         self.norm2 = nn.LayerNorm(config.d_model)
@@ -325,11 +380,20 @@ class RawFeatureDualAttentionBlock(nn.Module):
 
         embedded = self.feature_embedding(x)
         embedded = embedded.reshape(batch_size * sequence_length, self.d_input, self.config.feature_embed_dim)  # reshape avoids contiguous-memory assumptions
-        spatial_attended, _ = self.spatial_attention(embedded, embedded, embedded)
-        embedded = (embedded + spatial_attended).reshape(batch_size, sequence_length, self.flattened_feature_dim)  # reshape avoids contiguous-memory assumptions
+        if self.use_spatial_attention:
+            spatial_input = self.spatial_norm(embedded)
+            spatial_attended = self.spatial_attention(
+                spatial_input,
+                spatial_input,
+                spatial_input,
+                need_weights=False,
+            )[0]
+            embedded = embedded + self.spatial_dropout(spatial_attended)
+        embedded = embedded.reshape(batch_size, sequence_length, self.flattened_feature_dim)
 
         projected = self.projection(embedded)
-        projected = projected + self.temporal_attention(self.norm1(projected), relative_time)
+        if self.use_temporal_attention:
+            projected = projected + self.temporal_attention(self.norm1(projected), relative_time)
         tail = self.moe if self.moe is not None else self.dense_fnn
         if tail is None:
             raise RuntimeError("RawFeatureDualAttentionBlock has no tail module.")
@@ -341,14 +405,19 @@ class LatentDualAttentionBlock(nn.Module):
     def __init__(self, config: ModelConfig, *, use_moe_tail: bool) -> None:
         super().__init__()
         self.d_model = config.d_model
+        self.use_spatial_attention = bool(config.use_spatial_attention)
+        self.use_temporal_attention = bool(config.use_temporal_attention)
         self.latent_spatial_embed_dim = config.resolved_latent_spatial_embed_dim()
         self.num_latent_features = config.d_model // self.latent_spatial_embed_dim
         self.spatial_attention = nn.MultiheadAttention(
             embed_dim=self.latent_spatial_embed_dim,
             num_heads=config.num_heads,
+            dropout=config.attention_dropout,
             batch_first=True,
         )
         self.norm1 = nn.LayerNorm(config.d_model)
+        self.spatial_norm = nn.LayerNorm(self.latent_spatial_embed_dim)
+        self.spatial_dropout = nn.Dropout(config.attention_dropout)
         self.temporal_attention = ContinuousTimeAttention(config)
         self.norm2 = nn.LayerNorm(config.d_model)
         self.moe = MoE(config) if use_moe_tail else None
@@ -371,9 +440,18 @@ class LatentDualAttentionBlock(nn.Module):
             self.num_latent_features,
             self.latent_spatial_embed_dim,
         )
-        spatial_attended, _ = self.spatial_attention(chunks, chunks, chunks)
-        h = (chunks + spatial_attended).reshape(batch_size, sequence_length, self.d_model)
-        h = h + self.temporal_attention(self.norm1(h), relative_time)
+        if self.use_spatial_attention:
+            spatial_input = self.spatial_norm(chunks)
+            spatial_attended = self.spatial_attention(
+                spatial_input,
+                spatial_input,
+                spatial_input,
+                need_weights=False,
+            )[0]
+            chunks = chunks + self.spatial_dropout(spatial_attended)
+        h = chunks.reshape(batch_size, sequence_length, self.d_model)
+        if self.use_temporal_attention:
+            h = h + self.temporal_attention(self.norm1(h), relative_time)
         tail = self.moe if self.moe is not None else self.dense_fnn
         if tail is None:
             raise RuntimeError("LatentDualAttentionBlock has no tail module.")
@@ -417,7 +495,7 @@ class DualAttentionEncoder(nn.Module):
 
 
 class TrendClassifier(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, *, output_dim: int | None = None) -> None:
         super().__init__()
         self.pooling_methods = tuple(config.classifier_pooling.methods)
         self.last_k = int(config.classifier_pooling.last_k)
@@ -431,8 +509,11 @@ class TrendClassifier(nn.Module):
             nn.GELU(),
             nn.Dropout(config.classifier_dropout),
         )
-        self.class_head = nn.Linear(hidden_dim, config.num_classes)
-        self.use_auxiliary_heads = bool(aux_cfg.enabled)
+        self.output_dim = int(config.num_classes if output_dim is None else output_dim)
+        if self.output_dim <= 0:
+            raise ValueError("output_dim must be > 0.")
+        self.class_head = nn.Linear(hidden_dim, self.output_dim)
+        self.use_auxiliary_heads = bool(aux_cfg.enabled and self.output_dim == config.num_classes)
         self.movement_head = nn.Linear(hidden_dim, 1) if self.use_auxiliary_heads and aux_cfg.movement else None
         self.direction_head = nn.Linear(hidden_dim, 2) if self.use_auxiliary_heads and aux_cfg.direction else None
         self.last_auxiliary_outputs: dict[str, torch.Tensor] = {}
@@ -552,12 +633,12 @@ class TrendClassifier(nn.Module):
 
 
 class LobTrendTransformer(nn.Module):
-    def __init__(self, config: ModelConfig) -> None:
+    def __init__(self, config: ModelConfig, *, output_dim: int | None = None) -> None:
         super().__init__()
         resolved_config = replace(config, d_input=config.resolved_d_input(config.d_input))
         self.config = resolved_config
         self.encoder = DualAttentionEncoder(resolved_config)
-        self.classifier = TrendClassifier(resolved_config)
+        self.classifier = TrendClassifier(resolved_config, output_dim=output_dim)
         self.moe_load_balancing_loss: torch.Tensor | None = None  # expose MoE auxiliary loss to training
         self.moe_routing: dict[str, torch.Tensor | int] | None = None
         self.auxiliary_outputs: dict[str, torch.Tensor] = {}
@@ -575,13 +656,18 @@ class LobTrendTransformer(nn.Module):
         return logits
 
 
-def build_model(config: ModelConfig | None = None, d_input: int | None = None) -> LobTrendTransformer:
+def build_model(
+    config: ModelConfig | None = None,
+    d_input: int | None = None,
+    *,
+    output_dim: int | None = None,
+) -> LobTrendTransformer:
     model_config = config or load_config().model
     if d_input is not None:
         model_config = replace(model_config, d_input=d_input)
     elif model_config.d_input is None:
         raise ValueError("d_input must be provided either in the YAML file or as an argument.")
-    return LobTrendTransformer(model_config)
+    return LobTrendTransformer(model_config, output_dim=output_dim)
 
 
 FeaturePE = FeaturePositionalEmbedding

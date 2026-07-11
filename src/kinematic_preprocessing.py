@@ -11,7 +11,7 @@ from scipy.interpolate import UnivariateSpline
 from tqdm import tqdm
 
 try:
-    from configuration import DataConfig, FastKinematicConfig, PreprocessingConfig, load_config
+    from configuration import CausalMarketFeaturesConfig, DataConfig, FastKinematicConfig, PreprocessingConfig, load_config
     from fast_kinematic_preprocessing import (
         KINEMATIC_SUFFIXES,
         PenalizedBSplineKinematicTokenizer,
@@ -20,7 +20,7 @@ try:
     )
     from utils import save_yaml
 except ImportError:  # pragma: no cover
-    from .configuration import DataConfig, FastKinematicConfig, PreprocessingConfig, load_config
+    from .configuration import CausalMarketFeaturesConfig, DataConfig, FastKinematicConfig, PreprocessingConfig, load_config
     from .fast_kinematic_preprocessing import (
         KINEMATIC_SUFFIXES,
         PenalizedBSplineKinematicTokenizer,
@@ -43,6 +43,7 @@ ADAPTIVE_LABEL_FEATURE_COLUMNS = (
     "adaptive_cost_floor",
     "adaptive_threshold",
 )
+CAUSAL_MARKET_FEATURE_PREFIX = "causal_"
 
 
 def _normalize_row_mask(row_mask: pd.Series | np.ndarray | list[bool], length: int) -> np.ndarray:
@@ -126,6 +127,137 @@ def calculate_microprice(df: pd.DataFrame, levels: int) -> pd.Series:
     if np.any(denominator <= 0.0):
         raise ValueError(f"Cannot compute microprice_{levels}; volume denominator must be positive.")
     return pd.Series(numerator / denominator, index=df.index, name=microprice_feature_name(levels))
+
+
+def add_causal_market_features(
+    df: pd.DataFrame,
+    *,
+    time_column: str,
+    tick_size: float,
+    config: CausalMarketFeaturesConfig,
+    size_column: str = "size",
+    type_column: str = "type",
+) -> pd.DataFrame:
+    """Add explicit microstructure features using rows at or before the current event only."""
+    if not config.enabled:
+        return df.copy()
+    required = {time_column, "bid_price_1", "ask_price_1", "bid_size_1", "ask_size_1"}
+    maximum_level = max((*config.imbalance_levels, config.microprice_levels))
+    for level in range(1, maximum_level + 1):
+        required.update(
+            {
+                f"bid_price_{level}",
+                f"ask_price_{level}",
+                f"bid_size_{level}",
+                f"ask_size_{level}",
+            }
+        )
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(f"Cannot compute causal market features; missing columns: {missing}.")
+    if tick_size <= 0.0:
+        raise ValueError("tick_size must be positive for causal market features.")
+
+    result = df.copy()
+    time = pd.to_numeric(result[time_column], errors="coerce").astype(float)
+    if time.isna().any() or bool((time.diff().dropna() < 0.0).any()):
+        raise ValueError("Causal market features require finite non-decreasing timestamps.")
+    bid = pd.to_numeric(result["bid_price_1"], errors="coerce").astype(float)
+    ask = pd.to_numeric(result["ask_price_1"], errors="coerce").astype(float)
+    bid_size = pd.to_numeric(result["bid_size_1"], errors="coerce").astype(float)
+    ask_size = pd.to_numeric(result["ask_size_1"], errors="coerce").astype(float)
+    mid = (bid + ask) / 2.0
+    spread_ticks = (ask - bid) / float(tick_size)
+    result["causal_spread_ticks"] = spread_ticks
+
+    spread_window = int(config.spread_regime_window)
+    spread_mean = spread_ticks.rolling(spread_window, min_periods=1).mean()
+    spread_std = spread_ticks.rolling(spread_window, min_periods=2).std(ddof=0)
+    result[f"causal_spread_mean_ticks_{spread_window}"] = spread_mean
+    result[f"causal_spread_zscore_{spread_window}"] = (
+        (spread_ticks - spread_mean) / spread_std.where(spread_std > 1e-12)
+    ).fillna(0.0)
+
+    mid_change_ticks = mid.diff() / float(tick_size)
+    for window in config.volatility_windows:
+        result[f"causal_volatility_ticks_{window}"] = (
+            mid_change_ticks.rolling(window, min_periods=2).std(ddof=0).fillna(0.0)
+        )
+    for window in config.momentum_windows:
+        result[f"causal_midprice_momentum_ticks_{window}"] = (
+            (mid - mid.shift(window)) / float(tick_size)
+        ).fillna(0.0)
+
+    for level in config.imbalance_levels:
+        total_bid = sum(pd.to_numeric(result[f"bid_size_{index}"], errors="coerce") for index in range(1, level + 1))
+        total_ask = sum(pd.to_numeric(result[f"ask_size_{index}"], errors="coerce") for index in range(1, level + 1))
+        total_depth = total_bid + total_ask
+        imbalance = np.divide(
+            (total_bid - total_ask).to_numpy(dtype=np.float64),
+            total_depth.to_numpy(dtype=np.float64),
+            out=np.zeros(len(result), dtype=np.float64),
+            where=total_depth.to_numpy(dtype=np.float64) > 0.0,
+        )
+        result[f"causal_book_imbalance_l{level}"] = np.clip(imbalance, -1.0, 1.0)
+
+    microprice = calculate_microprice(result, config.microprice_levels)
+    result[f"causal_microprice_minus_mid_ticks_l{config.microprice_levels}"] = (
+        microprice - mid
+    ) / float(tick_size)
+
+    previous_bid = bid.shift(1).fillna(bid)
+    previous_ask = ask.shift(1).fillna(ask)
+    previous_bid_size = bid_size.shift(1).fillna(bid_size)
+    previous_ask_size = ask_size.shift(1).fillna(ask_size)
+    event_ofi = (
+        (bid >= previous_bid).astype(float) * bid_size
+        - (bid <= previous_bid).astype(float) * previous_bid_size
+        - (ask <= previous_ask).astype(float) * ask_size
+        + (ask >= previous_ask).astype(float) * previous_ask_size
+    )
+    top_depth = (bid_size + ask_size).clip(lower=0.0)
+    for window in config.ofi_windows:
+        numerator = event_ofi.rolling(window, min_periods=1).sum()
+        denominator = top_depth.rolling(window, min_periods=1).sum()
+        result[f"causal_ofi_l1_norm_{window}"] = np.divide(
+            numerator.to_numpy(dtype=np.float64),
+            denominator.to_numpy(dtype=np.float64),
+            out=np.zeros(len(result), dtype=np.float64),
+            where=denominator.to_numpy(dtype=np.float64) > 0.0,
+        )
+
+    def log_intensity(contribution: pd.Series, window: int) -> np.ndarray:
+        rolling_value = contribution.rolling(window, min_periods=1).sum().to_numpy(dtype=np.float64)
+        start_time = time.shift(window - 1).fillna(float(time.iloc[0]))
+        elapsed = (time - start_time).to_numpy(dtype=np.float64)
+        rate = np.divide(
+            rolling_value,
+            elapsed,
+            out=np.zeros(len(result), dtype=np.float64),
+            where=elapsed > 1e-9,
+        )
+        return np.log1p(np.maximum(rate, 0.0))
+
+    ones = pd.Series(1.0, index=result.index)
+    message_volume = (
+        pd.to_numeric(result[size_column], errors="coerce").clip(lower=0.0)
+        if size_column in result.columns
+        else pd.Series(0.0, index=result.index)
+    )
+    trade_mask = (
+        result[type_column].isin(config.trade_type_values)
+        if type_column in result.columns
+        else pd.Series(False, index=result.index)
+    )
+    for window in config.intensity_windows:
+        result[f"causal_event_intensity_log_{window}"] = log_intensity(ones, window)
+        result[f"causal_message_volume_intensity_log_{window}"] = log_intensity(message_volume, window)
+        result[f"causal_trade_intensity_log_{window}"] = log_intensity(trade_mask.astype(float), window)
+        result[f"causal_traded_volume_intensity_log_{window}"] = log_intensity(
+            message_volume.where(trade_mask, 0.0),
+            window,
+        )
+    return result
 
 
 def _ghost_level_columns(
@@ -825,6 +957,7 @@ class MessageOrderbookJoiner:
 class MessageFeatureProcessor:
     time_column: str
     message_config: object
+    causal_market_config: CausalMarketFeaturesConfig = field(default_factory=CausalMarketFeaturesConfig)
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         if self.time_column not in df.columns:
@@ -838,6 +971,14 @@ class MessageFeatureProcessor:
             raise ValueError("Message dataframe must contain size and price columns.")
         if "bid_price_1" not in result.columns or "ask_price_1" not in result.columns:
             raise ValueError("bid_price_1 and ask_price_1 are required for message feature processing.")
+
+        result = add_causal_market_features(
+            result,
+            time_column=self.time_column,
+            tick_size=float(self.message_config.tick_size),
+            config=self.causal_market_config,
+            size_column=size_column,
+        )
 
         result["size_log1p"] = _log1p(result[size_column])
 
@@ -1318,6 +1459,10 @@ def adaptive_label_feature_columns(df: pd.DataFrame) -> list[str]:
     return [column for column in ADAPTIVE_LABEL_FEATURE_COLUMNS if column in df.columns]
 
 
+def causal_market_feature_columns(df: pd.DataFrame) -> list[str]:
+    return [column for column in df.columns if column.lower().startswith(CAUSAL_MARKET_FEATURE_PREFIX)]
+
+
 def normalizable_feature_columns(df: pd.DataFrame) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
@@ -1328,6 +1473,7 @@ def normalizable_feature_columns(df: pd.DataFrame) -> list[str]:
         message_price_static_feature_columns,
         delta_t_feature_columns,
         adaptive_label_feature_columns,
+        causal_market_feature_columns,
     ):
         for column in selector(df):
             if column in seen:
@@ -1371,6 +1517,7 @@ class DerivativeNormalizer:
     size_log1p_method: str = "zscore"
     price_static_method: str = "zscore"
     adaptive_label_feature_method: str = "zscore"
+    causal_market_feature_method: str = "robust_mad"
     delta_t_method: str = "robust_mad"
     delta_t_transform: str = "log1p"
     stats_: dict[str, dict[str, float | int | str]] = field(default_factory=dict)
@@ -1392,6 +1539,10 @@ class DerivativeNormalizer:
         self.adaptive_label_feature_method = _normalize_scaling_method(
             self.adaptive_label_feature_method,
             context="adaptive label feature scaling method",
+        )
+        self.causal_market_feature_method = _normalize_scaling_method(
+            self.causal_market_feature_method,
+            context="causal market feature scaling method",
         )
         self.delta_t_method = _normalize_scaling_method(
             self.delta_t_method,
@@ -1423,6 +1574,11 @@ class DerivativeNormalizer:
             adaptive_label_feature_columns(df),
             family="adaptive_label_feature",
             method=self.adaptive_label_feature_method,
+        )
+        add(
+            causal_market_feature_columns(df),
+            family="causal_market_feature",
+            method=self.causal_market_feature_method,
         )
         add(
             delta_t_feature_columns(df),
@@ -1692,6 +1848,7 @@ def process_orderbook_snapshot_df_window(
         volume_columns=volume_cols,
         feature_exclude_columns=config.data.feature_exclude_columns,
         sequence_window=config.data.sequence_window,
+        target_columns=config.data.target_columns,
     )
     preprocessing_config = config.preprocessing
     preprocessing_config.snapshot_window = window
@@ -1739,6 +1896,7 @@ def process_all_snapshot_windows(
         volume_columns=volume_cols,
         feature_exclude_columns=config.data.feature_exclude_columns,
         sequence_window=config.data.sequence_window,
+        target_columns=config.data.target_columns,
     )
     preprocessing_config = config.preprocessing
     preprocessing_config.snapshot_window = window
@@ -1760,7 +1918,11 @@ def process_message_col(message_df: pd.DataFrame, tick: float) -> pd.DataFrame:
     """Legacy wrapper"""
     config = load_config()
     config.preprocessing.message.tick_size = tick
-    return MessageFeatureProcessor(config.data.time_column, config.preprocessing.message).transform(message_df)
+    return MessageFeatureProcessor(
+        config.data.time_column,
+        config.preprocessing.message,
+        config.preprocessing.causal_market_features,
+    ).transform(message_df)
 
 
 def z_score_derivatives(df: pd.DataFrame, filepath: str) -> pd.DataFrame:

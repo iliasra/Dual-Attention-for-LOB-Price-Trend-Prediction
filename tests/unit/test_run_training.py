@@ -6,6 +6,7 @@ import shutil
 
 import numpy as np
 import pytest
+import yaml
 
 pytest.importorskip("torch")
 
@@ -25,6 +26,7 @@ from run_training import (
     fold_artifact_paths,
     resolve_class_weights,
     sequence_label_values,
+    sequence_paths,
     sequence_time_span_quantile,
     train_fold,
 )
@@ -52,6 +54,37 @@ def test_fold_artifact_paths_are_scoped_by_fold() -> None:
     assert paths["sequence_dir"] == Path("data/sequences/fold_003")
     assert paths["log_dir"] == Path("logs/run_7/fold_003")
     assert paths["result_dir"] == Path("results/run_7/fold_003")
+
+
+def test_sequence_paths_uses_manifest_and_ignores_stale_glob_files(artifact_dir: Path) -> None:
+    split_dir = artifact_dir / "train"
+    split_dir.mkdir()
+    for stem in ("kept", "stale"):
+        np.save(split_dir / f"{stem}_features.npy", np.zeros((2, 1), dtype=np.float32))
+        np.save(split_dir / f"{stem}_times.npy", np.zeros(2, dtype=np.float64))
+        np.save(split_dir / f"{stem}_labels.npy", np.zeros(2, dtype=np.int64))
+    manifest = {
+        "version": 1,
+        "splits": {
+            "train": [
+                {
+                    "features": "train/kept_features.npy",
+                    "times": "train/kept_times.npy",
+                    "labels": "train/kept_labels.npy",
+                }
+            ]
+        },
+    }
+    (artifact_dir / "sequence_manifest.yaml").write_text(
+        yaml.safe_dump(manifest),
+        encoding="utf-8",
+    )
+
+    x_paths, t_paths, y_paths = sequence_paths(artifact_dir, "train")
+
+    assert [Path(path).name for path in x_paths] == ["kept_features.npy"]
+    assert [Path(path).name for path in t_paths] == ["kept_times.npy"]
+    assert [Path(path).name for path in y_paths] == ["kept_labels.npy"]
 
 
 def test_resolve_resume_checkpoint_prefers_explicit_path(artifact_dir: Path) -> None:

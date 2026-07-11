@@ -50,7 +50,9 @@ def test_volume_clock_sampler_splits_large_trade_on_exact_grid() -> None:
     assert bars["volume_time"].tolist() == [1.0, 2.0, 3.0]
     assert bars["volume_wall_time"].tolist() == [1.0, 1.0, 1.0]
     assert bars["bar_duration_seconds"].tolist() == [1.0, 0.0, 0.0]
-    np.testing.assert_allclose(bars["bar_buy_trade_volume"], [100.0, 100.0, 100.0])
+    np.testing.assert_allclose(bars["bar_buy_trade_volume"], [0.0, 0.0, 0.0])
+    np.testing.assert_allclose(bars["bar_sell_trade_volume"], [100.0, 100.0, 100.0])
+    np.testing.assert_allclose(bars["bar_signed_trade_volume"], [-100.0, -100.0, -100.0])
     np.testing.assert_allclose(bars["bar_trade_count"], [1 / 3, 1 / 3, 1 / 3])
     np.testing.assert_allclose(bars["bar_type_1_count"], [1.0, 0.0, 0.0])
     np.testing.assert_allclose(bars["bar_type_4_count"], [1 / 3, 1 / 3, 1 / 3])
@@ -163,4 +165,3 @@ def test_orderbook_auto_detection_ignores_volume_bar_size_features() -> None:
 
     assert resolver.price_columns(frame) == ["ask_price_1", "bid_price_1"]
     assert resolver.volume_columns(frame) == ["ask_size_1", "bid_size_1"]
-

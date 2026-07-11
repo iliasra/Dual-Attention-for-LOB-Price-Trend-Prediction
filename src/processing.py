@@ -86,6 +86,7 @@ except ImportError:  # pragma: no cover
 SPLIT_NAMES = ("train", "validation", "test")
 DERIVATIVES_STATS_FILENAME = "derivatives_stats.yaml"
 FEATURE_SCHEMA_FILENAME = "feature_schema.yaml"
+SEQUENCE_MANIFEST_FILENAME = "sequence_manifest.yaml"
 
 
 @dataclass(slots=True)
@@ -192,6 +193,7 @@ class LobProcessingPipeline:
         self.message_processor = MessageFeatureProcessor(
             time_column=self.config.data.time_column,
             message_config=self.config.preprocessing.message,
+            causal_market_config=self.config.preprocessing.causal_market_features,
         )
         self.volume_clock_sampler = VolumeClockSampler(
             sample_clock_config=self.config.preprocessing.sample_clock,
@@ -1078,7 +1080,11 @@ class LobProcessingPipeline:
 
     def _tracks_label_distribution(self) -> bool:
         """Return whether preprocessing metadata should include label counts."""
-        return self.uses_adaptive_method_c_labels() or self.uses_fitted_smoothing_threshold()
+        return (
+            self.uses_adaptive_method_c_labels()
+            or self.uses_fitted_smoothing_threshold()
+            or self.config.preprocessing.labels.strategy == "executable_return"
+        )
 
     def _label_distribution_method(self) -> str:
         """Return the label-distribution method name for metadata."""
@@ -1324,6 +1330,9 @@ class LobProcessingPipeline:
             adaptive_label_feature_method=(
                 self.config.preprocessing.normalization.adaptive_label_feature_scaling_method
             ),
+            causal_market_feature_method=(
+                self.config.preprocessing.normalization.causal_market_feature_scaling_method
+            ),
             delta_t_method=self.config.preprocessing.normalization.delta_t_scaling_method,
             delta_t_transform=self.config.preprocessing.normalization.delta_t_transform,
         )
@@ -1381,6 +1390,7 @@ class LobProcessingPipeline:
             data_config.time_column,
             data_config.label_column,
             *data_config.feature_exclude_columns,
+            *(data_config.target_columns or []),
         }
         non_feature_columns = [column for column in normalized.columns if column in excluded_columns]
         day.normalized = normalized.loc[:, non_feature_columns + ordered_feature_columns]
@@ -1465,6 +1475,9 @@ class LobProcessingPipeline:
             adaptive_label_feature_method=(
                 self.config.preprocessing.normalization.adaptive_label_feature_scaling_method
             ),
+            causal_market_feature_method=(
+                self.config.preprocessing.normalization.causal_market_feature_scaling_method
+            ),
             delta_t_method=self.config.preprocessing.normalization.delta_t_scaling_method,
             delta_t_transform=self.config.preprocessing.normalization.delta_t_transform,
         )
@@ -1492,6 +1505,9 @@ class LobProcessingPipeline:
                     "size_log1p": self.config.preprocessing.normalization.size_log1p_scaling_method,
                     "price_static": self.config.preprocessing.normalization.price_static_scaling_method,
                     "adaptive_label_features": self._adaptive_label_features_metadata(),
+                    "causal_market_features": (
+                        self.config.preprocessing.normalization.causal_market_feature_scaling_method
+                    ),
                     "delta_t": self.config.preprocessing.normalization.delta_t_scaling_method,
                     "delta_t_transform": self.config.preprocessing.normalization.delta_t_transform,
                 }
@@ -1709,6 +1725,40 @@ class LobProcessingPipeline:
                 "fold_preprocessing_duration": format_duration(fold_duration_seconds),
             },
         )
+        manifest_splits: dict[str, list[dict[str, object]]] = {}
+        for split, split_summary in summary.items():
+            entries: list[dict[str, object]] = []
+            for stem, shape in sorted(split_summary.items()):
+                split_dir = fold_sequence_dir / split
+                files = {
+                    "features": f"{split}/{stem}_features.npy",
+                    "times": f"{split}/{stem}_times.npy",
+                    "labels": f"{split}/{stem}_labels.npy",
+                }
+                missing = [name for name, relative in files.items() if not (fold_sequence_dir / relative).exists()]
+                if missing:
+                    raise FileNotFoundError(f"Cannot finalize shard manifest for {stem}; missing {missing}.")
+                entries.append(
+                    {
+                        "stem": stem,
+                        **files,
+                        "rows": int(shape[0]),
+                        "processed_columns": int(shape[1]),
+                    }
+                )
+            manifest_splits[split] = entries
+        manifest = {
+            "version": 1,
+            "fold_id": fold.id,
+            "target_columns": list(self.config.data.target_columns or []),
+            "splits": manifest_splits,
+        }
+        manifest_path = fold_sequence_dir / SEQUENCE_MANIFEST_FILENAME
+        temporary_manifest_path = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+        with temporary_manifest_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(manifest, handle, sort_keys=False, allow_unicode=True)
+        temporary_manifest_path.replace(manifest_path)
+        print(f"Saved exact shard manifest for fold {fold.id} to {manifest_path}.")
         print(f"Saved preprocessing metadata for fold {fold.id} to {metadata_path}.")
         print(f"Finished fold {fold.id} ({format_duration(fold_duration_seconds)}).")
         return summary

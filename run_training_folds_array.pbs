@@ -2,7 +2,7 @@
 #PBS -N lob_train_fold
 #PBS -l walltime=24:00:00
 #PBS -l select=1:ncpus=10:mem=48gb:ngpus=1
-#PBS -J 1-6%3
+# Submit with: qsub -J 1-<number_of_folds>%<max_concurrent> run_training_folds_array.pbs
 
 # UNCOMMENT FOLLOWING TO ENABLE DETERMINISTIC BEHAVIOR
 # export CUBLAS_WORKSPACE_CONFIG=:4096:8
@@ -13,6 +13,7 @@ SCRIPT_START_EPOCH="$(date +%s)"
 PROJECT_DIR="$HOME/Dual-Attention-for-LOB-Price-Trend-Prediction"
 WORK_DIR="$TMPDIR/Dual-Attention-for-LOB-Price-Trend-Prediction"
 TRAINING_CONFIG="${TRAINING_CONFIG:-configs/pipeline_config.yaml}"
+TRAINING_RESUME_ARGS="${TRAINING_RESUME_ARGS:-}"
 FOLDS_FILE="${FOLDS_FILE:-configs/folds.txt}"
 PROJECT_FOLDS_FILE="$PROJECT_DIR/$FOLDS_FILE"
 WORK_CONFIG_PATH="$WORK_DIR/$TRAINING_CONFIG"
@@ -96,6 +97,10 @@ if [ ! -f "$PROJECT_DIR/$TRAINING_CONFIG" ]; then
   echo "Training config not found: $PROJECT_DIR/$TRAINING_CONFIG" >&2
   exit 1
 fi
+if [ -z "${PBS_ARRAY_INDEX:-}" ]; then
+  echo "PBS_ARRAY_INDEX is unset. Submit with qsub -J 1-<number_of_folds>%<max_concurrent>." >&2
+  exit 1
+fi
 
 FOLD_ID="$(
   awk -v fold_index="$PBS_ARRAY_INDEX" '
@@ -133,6 +138,23 @@ format_duration() {
   else
     printf "%ds" "$seconds"
   fi
+}
+
+resolve_configured_path() {
+  config_path="$1"
+  dotted_key="$2"
+  python - "$config_path" "$dotted_key" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+config_path = Path(sys.argv[1]).resolve()
+value = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+for key in sys.argv[2].split("."):
+    value = value[key]
+path = Path(value)
+print(path if path.is_absolute() else (config_path.parent / path).resolve())
+PY
 }
 
 same_file() {
@@ -260,6 +282,7 @@ echo "FOLD_ID=$FOLD_ID"
 echo "FOLDS_FILE=$FOLDS_FILE"
 echo "PROJECT_FOLDS_FILE=$PROJECT_FOLDS_FILE"
 echo "TRAINING_CONFIG=$TRAINING_CONFIG"
+echo "TRAINING_RESUME_ARGS=${TRAINING_RESUME_ARGS:-<none>}"
 echo "HOSTNAME=$(hostname)"
 echo "TMPDIR=$TMPDIR"
 
@@ -305,22 +328,43 @@ rm -rf "${WORK_DIR:?}/logs" "${WORK_DIR:?}/results"
 ln -s "$PROJECT_DIR/logs" "$WORK_DIR/logs"
 ln -s "$PROJECT_DIR/results" "$WORK_DIR/results"
 
+PROJECT_RAW_DATA_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" data.raw_data_dir)"
+WORK_RAW_DATA_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" data.raw_data_dir)"
+echo "PROJECT_RAW_DATA_DIR=$PROJECT_RAW_DATA_DIR"
+echo "WORK_RAW_DATA_DIR=$WORK_RAW_DATA_DIR"
+if [ -d "$PROJECT_RAW_DATA_DIR" ] && [ "$PROJECT_RAW_DATA_DIR" != "$WORK_RAW_DATA_DIR" ]; then
+  mkdir -p "$(dirname "$WORK_RAW_DATA_DIR")"
+  if [ -e "$WORK_RAW_DATA_DIR" ] || [ -L "$WORK_RAW_DATA_DIR" ]; then
+    rm -rf "$WORK_RAW_DATA_DIR"
+  fi
+  ln -s "$PROJECT_RAW_DATA_DIR" "$WORK_RAW_DATA_DIR"
+elif [ ! -d "$PROJECT_RAW_DATA_DIR" ]; then
+  echo "WARNING: raw data directory is unavailable; raw-data PnL evaluation may be skipped: $PROJECT_RAW_DATA_DIR" >&2
+fi
+
 echo
 echo "===== STAGING SEQUENCE DATA FOR $FOLD_ID ====="
-mkdir -p "$WORK_DIR/data/sequences/$FOLD_ID"
-rsync -a "$PROJECT_DIR/data/sequences/$FOLD_ID/" \
-  "$WORK_DIR/data/sequences/$FOLD_ID/"
+PROJECT_SEQUENCE_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" data.sequence_data_dir)"
+WORK_SEQUENCE_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" data.sequence_data_dir)"
+mkdir -p "$WORK_SEQUENCE_DIR/$FOLD_ID"
+rsync -a "$PROJECT_SEQUENCE_DIR/$FOLD_ID/" \
+  "$WORK_SEQUENCE_DIR/$FOLD_ID/"
 
 cd "$WORK_DIR"
 touch "$RUN_MARKER"
 
 echo
 echo "===== RUNNING TRAINING FOR $FOLD_ID ====="
+TRAINING_RESUME_ARGV=()
+if [ -n "$TRAINING_RESUME_ARGS" ]; then
+  TRAINING_RESUME_ARGV=($TRAINING_RESUME_ARGS)
+fi
 PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" \
 python scripts/run_training.py \
   --config "$WORK_CONFIG_PATH" \
   --fold-id "$FOLD_ID" \
-  --run-stem "$RUN_STEM"
+  --run-stem "$RUN_STEM" \
+  "${TRAINING_RESUME_ARGV[@]}"
 
 echo
 echo "===== TRAINING FOLD COMPLETED OK ====="
