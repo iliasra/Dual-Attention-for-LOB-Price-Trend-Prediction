@@ -12,6 +12,7 @@ import torch
 from baselines.models import (
     BaselineHead,
     LSTMBaseline,
+    RecurrentBaseline,
     context_features,
     momentum_signal,
     sampled_context_sequences,
@@ -55,6 +56,16 @@ def test_sampled_lstm_context_is_causal_and_includes_last_snapshot() -> None:
 
 def test_lstm_baseline_supports_classification_and_regression_shape() -> None:
     model = LSTMBaseline(input_dim=4, output_dim=2, hidden_dim=8)
+
+    outputs = model(torch.ones((3, 5, 4)))
+
+    assert outputs.shape == (3, 2)
+    assert torch.isfinite(outputs).all()
+
+
+@pytest.mark.parametrize("cell", ["rnn", "gru"])
+def test_recurrent_baselines_support_classification_and_regression_shape(cell: str) -> None:
+    model = RecurrentBaseline(input_dim=4, output_dim=2, cell=cell, hidden_dim=8)
 
     outputs = model(torch.ones((3, 5, 4)))
 

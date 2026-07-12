@@ -17,8 +17,8 @@ for path in (ROOT, SRC):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from action_value import action_value_metrics
-from baselines.models import BaselineHead, LSTMBaseline, context_features, momentum_signal
+from action_value import action_value_metrics, action_value_policy_frontier
+from baselines.models import BaselineHead, LSTMBaseline, RecurrentBaseline, context_features, momentum_signal
 from training import classification_metrics_from_predictions
 
 
@@ -26,6 +26,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run compute-cheap LOB baselines on prepared shards.")
     parser.add_argument("--sequence-dir", type=Path, required=True, help="One prepared fold directory.")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--evaluation-split",
+        choices=("validation", "test"),
+        default="validation",
+        help="Evaluate the train-fitted baseline on validation or on the frozen test split.",
+    )
     parser.add_argument(
         "--model",
         choices=(
@@ -36,6 +42,8 @@ def parse_args() -> argparse.Namespace:
             "linear",
             "mlp",
             "lstm",
+            "rnn",
+            "gru",
             "random_forest",
             "xgboost",
         ),
@@ -397,12 +405,13 @@ def predict(model: torch.nn.Module, inputs: np.ndarray, *, batch_size: int, devi
 def main() -> None:
     args = parse_args()
     torch.manual_seed(args.seed)
-    if args.model == "lstm" and (args.max_rows <= 0 or args.max_rows > 50_000):
+    recurrent_models = {"lstm", "rnn", "gru"}
+    if args.model in recurrent_models and (args.max_rows <= 0 or args.max_rows > 50_000):
         raise ValueError(
-            "The LSTM materializes sampled sequences. Set --max-rows to a positive value <= 50000 "
+            "Recurrent baselines materialize sampled sequences. Set --max-rows to a positive value <= 50000 "
             "and increase it only after measuring host RAM."
         )
-    sequence_steps = args.lstm_steps if args.model == "lstm" else None
+    sequence_steps = args.lstm_steps if args.model in recurrent_models else None
     train_x, train_y = load_split(
         args.sequence_dir,
         "train",
@@ -414,7 +423,7 @@ def main() -> None:
     )
     validation_x, validation_y = load_split(
         args.sequence_dir,
-        "validation",
+        args.evaluation_split,
         window=args.window,
         context=args.context,
         max_rows=args.max_rows,
@@ -448,7 +457,7 @@ def main() -> None:
         )
         validation_signal, momentum_validation_y = load_momentum_split(
             args.sequence_dir,
-            "validation",
+            args.evaluation_split,
             window=args.window,
             mode=momentum_mode,
             feature_index=args.momentum_feature_index,
@@ -483,7 +492,7 @@ def main() -> None:
             )
         predictions, validation_y = load_delayed_target_split(
             args.sequence_dir,
-            "validation",
+            args.evaluation_split,
             window=args.window,
             lag=args.label_lag,
             max_rows=args.max_rows,
@@ -507,6 +516,15 @@ def main() -> None:
                 num_layers=args.lstm_layers,
                 dropout=args.lstm_dropout,
             )
+        elif args.model in {"rnn", "gru"}:
+            model = RecurrentBaseline(
+                train_x.shape[-1],
+                output_dim,
+                cell=args.model,
+                hidden_dim=args.hidden_dim,
+                num_layers=args.lstm_layers,
+                dropout=args.lstm_dropout,
+            )
         else:
             hidden_dim = args.hidden_dim if args.model == "mlp" else None
             model = BaselineHead(train_x.shape[1], output_dim, hidden_dim=hidden_dim)
@@ -520,8 +538,10 @@ def main() -> None:
             probabilities = exp / exp.sum(axis=1, keepdims=True)
             predictions = np.argmax(probabilities, axis=1)
 
+    ranking_pnl_frontier = None
     if regression:
         metrics = action_value_metrics(predictions, validation_y, fixed_rate=args.fixed_rate).to_dict()
+        ranking_pnl_frontier = action_value_policy_frontier(predictions, validation_y)
     else:
         metrics = asdict(classification_metrics_from_predictions(
             validation_y,
@@ -535,6 +555,7 @@ def main() -> None:
         "model": args.model,
         "context": args.context,
         "task": "action_value_regression" if regression else "classification",
+        "evaluation_split": args.evaluation_split,
         "train_rows": int(len(train_y)),
         "validation_rows": int(len(validation_y)),
         "parameters": {
@@ -558,6 +579,7 @@ def main() -> None:
             "max_depth": int(args.max_depth),
         },
         "metrics": metrics,
+        "ranking_pnl_frontier": ranking_pnl_frontier,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")

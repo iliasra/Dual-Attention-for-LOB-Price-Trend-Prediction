@@ -349,17 +349,21 @@ class RawFeatureDualAttentionBlock(nn.Module):
             include_raw_value=config.feature_include_raw_value,
         )
         self.flattened_feature_dim = self.d_input * config.feature_embed_dim
-        self.spatial_attention = nn.MultiheadAttention(
-            embed_dim=config.feature_embed_dim,
-            num_heads=config.num_heads, #same nb of heads for spatial/timewise
-            dropout=config.attention_dropout,
-            batch_first=True,
+        self.spatial_attention = (
+            nn.MultiheadAttention(
+                embed_dim=config.feature_embed_dim,
+                num_heads=config.num_heads, #same nb of heads for spatial/timewise
+                dropout=config.attention_dropout,
+                batch_first=True,
+            )
+            if self.use_spatial_attention
+            else None
         )
         self.projection = nn.Linear(self.flattened_feature_dim, config.d_model)
-        self.spatial_norm = nn.LayerNorm(config.feature_embed_dim)
-        self.spatial_dropout = nn.Dropout(config.attention_dropout)
-        self.norm1 = nn.LayerNorm(config.d_model)
-        self.temporal_attention = ContinuousTimeAttention(config)  #same nb of heads for spatial/timewise
+        self.spatial_norm = nn.LayerNorm(config.feature_embed_dim) if self.use_spatial_attention else None
+        self.spatial_dropout = nn.Dropout(config.attention_dropout) if self.use_spatial_attention else None
+        self.norm1 = nn.LayerNorm(config.d_model) if self.use_temporal_attention else None
+        self.temporal_attention = ContinuousTimeAttention(config) if self.use_temporal_attention else None
         self.norm2 = nn.LayerNorm(config.d_model)
         self.use_moe_tail = config.use_moe and config.num_layers == 1
         self.moe = MoE(config) if self.use_moe_tail else None
@@ -381,6 +385,8 @@ class RawFeatureDualAttentionBlock(nn.Module):
         embedded = self.feature_embedding(x)
         embedded = embedded.reshape(batch_size * sequence_length, self.d_input, self.config.feature_embed_dim)  # reshape avoids contiguous-memory assumptions
         if self.use_spatial_attention:
+            if self.spatial_norm is None or self.spatial_attention is None or self.spatial_dropout is None:
+                raise RuntimeError("Spatial attention is enabled but its modules are missing.")
             spatial_input = self.spatial_norm(embedded)
             spatial_attended = self.spatial_attention(
                 spatial_input,
@@ -393,6 +399,8 @@ class RawFeatureDualAttentionBlock(nn.Module):
 
         projected = self.projection(embedded)
         if self.use_temporal_attention:
+            if self.norm1 is None or self.temporal_attention is None:
+                raise RuntimeError("Temporal attention is enabled but its modules are missing.")
             projected = projected + self.temporal_attention(self.norm1(projected), relative_time)
         tail = self.moe if self.moe is not None else self.dense_fnn
         if tail is None:
@@ -409,16 +417,20 @@ class LatentDualAttentionBlock(nn.Module):
         self.use_temporal_attention = bool(config.use_temporal_attention)
         self.latent_spatial_embed_dim = config.resolved_latent_spatial_embed_dim()
         self.num_latent_features = config.d_model // self.latent_spatial_embed_dim
-        self.spatial_attention = nn.MultiheadAttention(
-            embed_dim=self.latent_spatial_embed_dim,
-            num_heads=config.num_heads,
-            dropout=config.attention_dropout,
-            batch_first=True,
+        self.spatial_attention = (
+            nn.MultiheadAttention(
+                embed_dim=self.latent_spatial_embed_dim,
+                num_heads=config.num_heads,
+                dropout=config.attention_dropout,
+                batch_first=True,
+            )
+            if self.use_spatial_attention
+            else None
         )
-        self.norm1 = nn.LayerNorm(config.d_model)
-        self.spatial_norm = nn.LayerNorm(self.latent_spatial_embed_dim)
-        self.spatial_dropout = nn.Dropout(config.attention_dropout)
-        self.temporal_attention = ContinuousTimeAttention(config)
+        self.norm1 = nn.LayerNorm(config.d_model) if self.use_temporal_attention else None
+        self.spatial_norm = nn.LayerNorm(self.latent_spatial_embed_dim) if self.use_spatial_attention else None
+        self.spatial_dropout = nn.Dropout(config.attention_dropout) if self.use_spatial_attention else None
+        self.temporal_attention = ContinuousTimeAttention(config) if self.use_temporal_attention else None
         self.norm2 = nn.LayerNorm(config.d_model)
         self.moe = MoE(config) if use_moe_tail else None
         self.dense_fnn = None if use_moe_tail else DenseFNN(config)
@@ -441,6 +453,8 @@ class LatentDualAttentionBlock(nn.Module):
             self.latent_spatial_embed_dim,
         )
         if self.use_spatial_attention:
+            if self.spatial_norm is None or self.spatial_attention is None or self.spatial_dropout is None:
+                raise RuntimeError("Spatial attention is enabled but its modules are missing.")
             spatial_input = self.spatial_norm(chunks)
             spatial_attended = self.spatial_attention(
                 spatial_input,
@@ -451,6 +465,8 @@ class LatentDualAttentionBlock(nn.Module):
             chunks = chunks + self.spatial_dropout(spatial_attended)
         h = chunks.reshape(batch_size, sequence_length, self.d_model)
         if self.use_temporal_attention:
+            if self.norm1 is None or self.temporal_attention is None:
+                raise RuntimeError("Temporal attention is enabled but its modules are missing.")
             h = h + self.temporal_attention(self.norm1(h), relative_time)
         tail = self.moe if self.moe is not None else self.dense_fnn
         if tail is None:

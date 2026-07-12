@@ -9,6 +9,18 @@ import yaml
 from configuration import ExperimentConfig, load_config
 
 
+def _as_classification_config(payload: dict) -> dict:
+    """Make an active A-series regression payload suitable for classification-only tests."""
+    payload["data"]["target_columns"] = None
+    payload["preprocessing"]["labels"]["strategy"] = "smoothing"
+    payload["training"]["objective"]["type"] = "classification"
+    payload["training"]["monitor"] = "val_loss"
+    payload["training"]["monitor_mode"] = "min"
+    payload["training"]["temperature_scaling"]["enabled"] = False
+    payload["training"]["directional_thresholds"]["enabled"] = False
+    return payload
+
+
 @pytest.fixture()
 def artifact_dir(request: pytest.FixtureRequest) -> Path:
     path = Path(__file__).resolve().parent / ".test_artifacts" / request.node.name
@@ -405,14 +417,26 @@ def test_volume_static_exp_scaling_train_fitted_config_values_are_loaded() -> No
     assert config.preprocessing.volume_static.k is None
 
 
-def test_model_max_dt_quantile_is_loaded_and_max_dt_is_resolved_later() -> None:
+def test_a5_action_value_model_switches_and_objective_are_loaded() -> None:
     config = load_config()
 
+    assert config.experiment.name == "A5"
     assert config.model.num_layers == 2
     assert config.model.latent_spatial_embed_dim == 16
-    assert config.model.use_moe is True
+    assert config.model.use_moe is False
+    assert config.model.use_spatial_attention is True
+    assert config.model.use_temporal_attention is True
     assert config.model.max_dt_quantile == 95.0
     assert config.model.max_dt is None
+    assert config.preprocessing.labels.strategy == "executable_return"
+    assert config.data.target_columns == ["long_net_return_ticks", "short_net_return_ticks"]
+    assert config.model.auxiliary_heads.enabled is False
+    assert config.training.objective.type == "action_value_regression"
+    assert config.training.objective.loss == "huber"
+    assert config.training.monitor == "val_pnl"
+    assert config.training.monitor_mode == "max"
+    assert config.training.temperature_scaling.enabled is False
+    assert config.training.directional_thresholds.enabled is False
 
 
 def test_model_layer_config_defaults_for_old_snapshots(artifact_dir: Path) -> None:
@@ -845,6 +869,7 @@ def test_adaptive_threshold_config_is_optional_for_legacy_configs(artifact_dir: 
 def test_smoothing_config_rejects_null_threshold_without_adaptive_threshold(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
     payload["preprocessing"]["labels"]["smoothing"]["threshold"] = None
     payload["preprocessing"]["labels"]["smoothing"]["adaptive_threshold"]["enabled"] = False
 
@@ -1184,12 +1209,12 @@ def test_training_data_loader_settings_are_loaded() -> None:
     assert config.training.num_workers >= 0
     assert config.training.early_stopping_patience >= 0
     assert config.training.early_stopping_warmup == 0
-    assert config.training.monitor == "precision_at_fixed_rate"
+    assert config.training.monitor == "val_pnl"
     assert config.training.monitor_mode == "max"
     assert config.training.monitor_params.lambda_ece == 0.0
     assert config.training.monitor_params.lambda_rate == 0.1
     assert isinstance(config.training.temperature_scaling.enabled, bool)
-    assert config.training.directional_thresholds.enabled is True
+    assert config.training.directional_thresholds.enabled is False
     assert config.training.directional_thresholds.method == "top_x_quantile"
     assert config.training.directional_thresholds.score in {
         "macro_f1",
@@ -1336,6 +1361,7 @@ def test_training_validate_every_n_batches_defaults_to_epoch_and_validates(artif
     assert loaded.training.validates_by_epoch is True
     assert loaded.training.validate_at_epoch_end is True
 
+    _as_classification_config(payload)
     payload["training"]["validate_every_n_batches"] = 5000
     payload["training"]["validate_at_epoch_end"] = False
     config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
@@ -1361,6 +1387,7 @@ def test_training_validate_every_n_batches_defaults_to_epoch_and_validates(artif
 def test_training_tailored_monitor_requires_params_and_max_mode(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
     payload["training"]["monitor"] = "tailored_score"
     payload["training"]["monitor_mode"] = "min"
 
@@ -1408,6 +1435,7 @@ def test_training_tailored_monitor_requires_params_and_max_mode(artifact_dir: Pa
 def test_training_precision_at_fixed_rate_monitor_requires_fixed_rate_and_max_mode(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
     payload["training"]["monitor"] = "precision_at_fixed_rate"
     payload["training"]["monitor_mode"] = "min"
     payload["training"]["monitor_params"] = {"fixed_rate": 0.01}
@@ -1479,6 +1507,7 @@ def test_directional_threshold_config_is_optional(artifact_dir: Path) -> None:
 def test_temperature_scaling_config_is_optional(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
     payload["training"].pop("temperature_scaling", None)
 
     config_path = artifact_dir / "no_temperature_scaling.yaml"
@@ -1615,6 +1644,7 @@ def test_directional_threshold_tailored_score_requires_monitor_params(artifact_d
 def test_directional_threshold_precision_at_fixed_rate_requires_fixed_rate(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
     payload["training"]["monitor"] = "val_macro_f1"
     payload["training"]["monitor_mode"] = "max"
     payload["training"].pop("monitor_params", None)
@@ -1721,6 +1751,7 @@ def test_action_value_regression_config_is_cross_validated(artifact_dir: Path) -
 def test_directional_threshold_config_validates_methods_and_floors(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
     payload["training"]["directional_thresholds"] = {
         "enabled": True,
         "method": "joint_up_down",
@@ -1778,6 +1809,7 @@ def test_directional_threshold_config_validates_methods_and_floors(artifact_dir:
 def test_directional_threshold_config_validates_top_quantile_method(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
     payload["training"]["directional_thresholds"] = {
         "enabled": True,
         "method": "top_x_quantile",

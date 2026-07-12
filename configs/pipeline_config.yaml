@@ -1,7 +1,7 @@
 seed: 42
 
 experiment:
-  name: DATA
+  name: A5
 
 data:
   raw_data_dir: ../data/LOBSTER
@@ -12,7 +12,7 @@ data:
   time_column: time
   label_column: trend_label
   label_mapping: {-1: 0, 0: 1, 1: 2}
-  target_columns: null # regression: [long_net_return_ticks, short_net_return_ticks]
+  target_columns: [long_net_return_ticks, short_net_return_ticks]
   price_columns: auto
   volume_columns: auto
   # used to exclude specific columns when features.npy is created
@@ -141,7 +141,7 @@ preprocessing:
   snapshot_window: 100
   save_processed_dataframes: false # set true to also save large normalized CSV debug/audit files
   labels:
-    strategy: smoothing # allowed: smoothing, triple_barrier, executable_return
+    strategy: executable_return # A-series INTC target: executable long/short net returns
     smoothing:
       method: C # allowed: A, B, C
       threshold: null # allowed: numeric fixed threshold, null for adaptive_threshold.enabled=true, or fitted modes mean_spread/mean_pct/mean_pct_2
@@ -279,9 +279,9 @@ model:
   num_heads: 4
   # Quantile (0-100) of train sequence time spans used as temporal attention max_dt per fold.
   max_dt_quantile: 95.0
-  use_moe: true # false = replace the final MoE tail with a dense FNN
-  use_spatial_attention: true # false = ablation without feature/latent spatial attention
-  use_temporal_attention: true # false = ablation without causal time attention
+  use_moe: false # A5: dense FNN tails, no MoE
+  use_spatial_attention: true # A5: spatial attention in both blocks
+  use_temporal_attention: true # A5: causal temporal attention in both blocks
   # MoE-only router/expert selection parameters; ignored when use_moe=false.
   num_experts: 4
   top_k: 2
@@ -301,15 +301,15 @@ model:
     methods: [last, mean] # allowed elements: last, mean, max; multiple values are concatenated
     last_k: 16 # number of final tokens used by mean/max pooling
   auxiliary_heads:
-    enabled: true # add movement/neutral and up/down auxiliary heads during training
+    enabled: false # classification-only heads; disabled for action-value regression
     movement: true # binary movement head: directional vs neutral
     direction: true # directional head: up vs down on non-neutral examples
     hidden_dim: null # null = d_model // 2 shared classifier trunk
 
 training:
   objective:
-    type: classification # classification or action_value_regression
-    loss: huber_quantile # regression only; use huber/mse for L0/L1 ablations
+    type: action_value_regression
+    loss: huber # common Stage-A loss; quantile variants are compared only in Stage B0
     huber_delta: 1.0
     quantiles: [0.1, 0.5, 0.9] # used by huber_quantile; separate heads per action and quantile
     quantile_loss_weight: 0.25
@@ -317,7 +317,7 @@ training:
     decision_threshold_ticks: 0.0 # trade only when predicted best action exceeds this net edge
     fixed_rate: 0.005 # regression ranking/PnL audit: capacity per side, overlap resolved exclusively
   device: cuda # allowed: cpu, cuda
-  epochs: 40
+  epochs: 10 # Stage-A screening budget, not a claim of full convergence; compare equal update budgets
   batch_size: 32 # token_chunk L=256; start conservative on L40S, try 64 after VRAM dry-run
   gradient_accumulation_steps: 2 # 2 => effective optimizer batch ~= 64 chunks without extra activation memory
   eval_batch_size: 128 # evaluation only; no backward pass
@@ -329,9 +329,9 @@ training:
   early_stopping_patience: 0 # counts validation intervals when validate_every_n_batches is an int
   early_stopping_warmup: 0 # counts validation intervals when validate_every_n_batches is an int
   early_stopping_min_delta: 0
-  monitor: precision_at_fixed_rate # allowed: val_loss, val_macro_f1, val_directional_macro_f1, tailored_score, precision_at_fixed_rate
-  monitor_mode: max # allowed: min, max; tailored_score and precision_at_fixed_rate require max
-  top_k_checkpoints: 3 # keep the best k raw-monitor checkpoints, then select after calibration/thresholding
+  monitor: val_pnl # action-value checkpoint criterion: mean net PnL at the configured fixed rate
+  monitor_mode: max
+  top_k_checkpoints: 3 # retain the three best validation-PnL checkpoints
   monitor_params:
     base_metric: val_macro_f1 # used by tailored_score monitor/thresholds; allowed: val_macro_f1, val_directional_macro_f1
     lambda_ece: 0.0
@@ -358,10 +358,10 @@ training:
   use_amp: true
   deterministic_torch: false
   temperature_scaling:
-    enabled: true
+    enabled: false # classification-only calibration
     class_bias_calibration: true # learn per-class additive logits bias on validation
   directional_thresholds:
-    enabled: true
+    enabled: false # action values are already expressed in net-PnL ticks
     method: top_x_quantile # allowed: joint_up_down, precision_floor, top_x_quantile
     score: precision_at_fixed_rate # allowed: directional_macro_f1, macro_f1, tailored_score, precision_at_fixed_rate; custom scores use training.monitor_params
     min: 0.1 # lower bound for candidate probability thresholds

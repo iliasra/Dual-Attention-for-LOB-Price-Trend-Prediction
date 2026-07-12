@@ -125,3 +125,41 @@ class LSTMBaseline(nn.Module):
             raise ValueError("LSTM inputs must have shape [batch, time, features].")
         sequence, _state = self.lstm(inputs)
         return self.output(sequence[:, -1])
+
+
+class RecurrentBaseline(nn.Module):
+    """Small vanilla-RNN or GRU baseline using the last recurrent output."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        *,
+        cell: str,
+        hidden_dim: int = 64,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0 or output_dim <= 0 or hidden_dim <= 0 or num_layers <= 0:
+            raise ValueError("Recurrent dimensions and layer count must be positive.")
+        cell = str(cell).strip().lower()
+        recurrent_type = {"rnn": nn.RNN, "gru": nn.GRU}.get(cell)
+        if recurrent_type is None:
+            raise ValueError("cell must be 'rnn' or 'gru'.")
+        effective_dropout = float(dropout) if num_layers > 1 else 0.0
+        self.cell = cell
+        self.recurrent = recurrent_type(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=effective_dropout,
+        )
+        self.output = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.ndim != 3:
+            raise ValueError("Recurrent inputs must have shape [batch, time, features].")
+        sequence, _state = self.recurrent(inputs)
+        return self.output(sequence[:, -1])

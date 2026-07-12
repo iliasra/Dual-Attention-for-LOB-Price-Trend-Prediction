@@ -45,6 +45,24 @@ from model import build_model
 from processing import LobFilePair, LobFileSegment, LobProcessingPipeline, ProcessedDay
 
 
+def make_classification_pipeline_payload(payload: dict) -> dict:
+    """Adapt the active action-value config for small smoothing pipeline fixtures."""
+    payload["data"]["target_columns"] = None
+    payload["preprocessing"]["labels"]["strategy"] = "smoothing"
+    payload["training"]["objective"]["type"] = "classification"
+    payload["training"]["monitor"] = "val_loss"
+    payload["training"]["monitor_mode"] = "min"
+    payload["training"]["temperature_scaling"]["enabled"] = False
+    payload["training"]["directional_thresholds"]["enabled"] = False
+    payload["training"]["sequence_supervision"] = {
+        "mode": "last_window",
+        "loss_warmup_tokens": None,
+        "chunk_stride": None,
+        "neutral_weighting": "none",
+    }
+    return payload
+
+
 @pytest.fixture()
 def artifact_dir(request: pytest.FixtureRequest) -> Path:
     path = Path(__file__).resolve().parent / ".test_artifacts" / request.node.name
@@ -654,6 +672,46 @@ def test_multi_layer_model_can_disable_moe_for_all_blocks() -> None:
     assert model.moe_routing is None
 
 
+def test_spatial_only_ablation_does_not_instantiate_temporal_weights() -> None:
+    model_config = ModelConfig(
+        d_input=6,
+        d_model=16,
+        feature_embed_dim=4,
+        feature_num_frequencies=3,
+        feature_sigma=1.0,
+        num_heads=2,
+        max_dt=3.0,
+        num_experts=2,
+        top_k=1,
+        num_classes=3,
+        rope_type="hybrid_crope",
+        rope_base=10000,
+        attention_dropout=0.0,
+        moe_dropout=0.0,
+        moe_expansion_factor=2,
+        moe_router_noise=0.0,
+        moe_load_balancing_weight=0.0,
+        classifier_dropout=0.0,
+        num_layers=1,
+        use_moe=False,
+        use_spatial_attention=True,
+        use_temporal_attention=False,
+    )
+    model = build_model(model_config)
+    block = model.encoder.layers[0]
+
+    assert block.spatial_attention is not None
+    assert block.temporal_attention is None
+    assert block.norm1 is None
+    assert not any("temporal_attention" in name for name, _parameter in model.named_parameters())
+
+    logits = model(
+        torch.randn(2, 5, model_config.d_input),
+        torch.arange(5, dtype=torch.float32).repeat(2, 1),
+    )
+    assert logits.shape == (2, model_config.num_classes)
+
+
 def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
     raw_dir = artifact_dir / "raw"
     write_lobster_day(raw_dir, "TEST", "2020-01-01")
@@ -662,6 +720,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
 
     base_config = load_config()
     payload = yaml.safe_load(base_config.path.read_text(encoding="utf-8"))
+    make_classification_pipeline_payload(payload)
     payload["data"]["raw_data_dir"] = "raw"
     payload["data"]["processed_data_dir"] = "processed"
     payload["data"]["sequence_data_dir"] = "sequences"
@@ -759,6 +818,7 @@ def test_processing_pipeline_uses_split_fitted_mean_pct_smoothing_threshold(arti
 
     base_config = load_config()
     payload = yaml.safe_load(base_config.path.read_text(encoding="utf-8"))
+    make_classification_pipeline_payload(payload)
     payload["data"]["raw_data_dir"] = "raw"
     payload["data"]["processed_data_dir"] = "processed"
     payload["data"]["sequence_data_dir"] = "sequences"
@@ -822,6 +882,7 @@ def test_processing_pipeline_volume_clock_writes_bar_features(artifact_dir: Path
 
     base_config = load_config()
     payload = yaml.safe_load(base_config.path.read_text(encoding="utf-8"))
+    make_classification_pipeline_payload(payload)
     payload["data"]["raw_data_dir"] = "raw"
     payload["data"]["processed_data_dir"] = "processed"
     payload["data"]["sequence_data_dir"] = "sequences"
