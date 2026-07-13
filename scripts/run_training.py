@@ -146,6 +146,43 @@ def sequence_paths(sequence_dir: Path, split: str) -> tuple[list[str], list[str]
     return x_paths, t_paths, y_paths
 
 
+def validate_prepared_target_contract(
+    sequence_dir: Path,
+    split: str,
+    config: ExperimentConfig,
+    dataset: LOBDataset | LOBTokenChunkDataset,
+) -> None:
+    """Reject prepared shards produced for a different objective before training starts."""
+    expected_columns = list(config.data.target_columns or [])
+    manifest_path = sequence_dir / "sequence_manifest.yaml"
+    if manifest_path.exists():
+        manifest = load_yaml(manifest_path)
+        declared_columns = manifest.get("target_columns")
+        if declared_columns is not None and list(declared_columns) != expected_columns:
+            raise ValueError(
+                f"Prepared sequence manifest {manifest_path} declares target_columns={declared_columns!r}, "
+                f"but the active config requires {expected_columns!r}. Rerun preprocessing with the active "
+                "config and replace the stale fold sequence directory before training."
+            )
+
+    regression = config.training.objective.is_regression
+    for path, labels in zip(dataset.y_paths, dataset.y_data):
+        valid_shape = labels.ndim == 2 and labels.shape[1] == 2 if regression else labels.ndim == 1
+        valid_dtype = np.issubdtype(labels.dtype, np.floating) if regression else np.issubdtype(
+            labels.dtype, np.integer
+        )
+        if valid_shape and valid_dtype:
+            continue
+        expected = "[num_rows, 2] with a floating dtype" if regression else "[num_rows] with an integer dtype"
+        objective = "action_value_regression" if regression else "classification"
+        raise ValueError(
+            f"Prepared {split} target shard {path} is incompatible with objective={objective}: "
+            f"expected {expected}, found shape={tuple(labels.shape)}, dtype={labels.dtype}. "
+            "This usually means data.sequence_data_dir contains shards generated for an older label strategy. "
+            "Rerun preprocessing with the same config used for training and replace the stale fold directory."
+        )
+
+
 def build_dataset(
     sequence_dir: Path,
     split: str,
@@ -173,6 +210,7 @@ def build_dataset(
             sequence_window=config.data.sequence_window,
             preload_to_memory=preload_to_memory,
         )
+    validate_prepared_target_contract(sequence_dir, split, config, dataset)
     if preload_to_memory:
         size_gib = dataset.arrays_nbytes / (1024**3)
         print(f"Preloaded {split} sequence arrays into RAM: {size_gib:.2f} GiB across {len(x_paths)} shard(s).")

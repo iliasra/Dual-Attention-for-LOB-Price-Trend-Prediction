@@ -140,9 +140,22 @@ class ActionValueTrainer:
         predictions = model(x, t, tokenwise=tokenwise)
         if loss_mask is not None:
             mask = loss_mask.bool()
+            if targets.ndim != 3 or targets.shape[:2] != mask.shape or targets.shape[-1] != 2:
+                raise ValueError(
+                    "Tokenwise action-value targets must have shape [batch, sequence, 2], "
+                    f"got {tuple(targets.shape)} for mask {tuple(mask.shape)}. The prepared label "
+                    "shards are likely stale classification targets; rerun preprocessing with "
+                    "labels.strategy=executable_return and action_value_regression enabled."
+                )
             predictions = predictions[mask]
             targets = targets[mask]
         else:
+            if targets.ndim != 2 or targets.shape[-1] != 2:
+                raise ValueError(
+                    "Window-level action-value targets must have shape [batch, 2], "
+                    f"got {tuple(targets.shape)}. The prepared label shards are likely stale "
+                    "classification targets; rerun preprocessing with labels.strategy=executable_return."
+                )
             predictions = predictions.reshape(-1, int(self.config.objective.regression_output_dim))
         targets = targets.reshape(-1, 2)
         if predictions.shape[0] != targets.shape[0] or targets.shape[-1] != 2:

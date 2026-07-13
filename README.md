@@ -458,6 +458,25 @@ links the configured `data.raw_data_dir` into the work tree. The raw-data link i
 needed by the held-out classification PnL evaluation; without it training can
 finish but that diagnostic is marked as skipped. The job then runs:
 
+`run_training.pbs` does **not** regenerate sequence shards. Whenever the label
+strategy, objective, target columns, feature schema, sequence window, or sample
+clock changes, rerun preprocessing before training. In particular,
+`action_value_regression` requires every `*_labels.npy` file to have floating
+shape `[num_rows, 2]`; scalar `[num_rows]` integer files are classification
+shards and cannot be reused. Training validates the manifest and target arrays
+before the first epoch and reports a stale-preprocessing error when they do not
+match the active config.
+
+For the sequential one-fold workflow, the two jobs can be chained so training
+starts only after successful preprocessing:
+
+```bash
+PREPROCESS_JOB=$(qsub -v TRAINING_CONFIG=configs/pipeline_config.yaml,FOLDS_FILE=configs/folds.txt preprocess.pbs)
+qsub -W depend=afterok:$PREPROCESS_JOB \
+  -v TRAINING_CONFIG=configs/pipeline_config.yaml,FOLDS_FILE=configs/folds.txt,TRAINING_RUN_STEM=A5_$(date +%Y%m%d_%H%M%S) \
+  run_training.pbs
+```
+
 ```bash
 python scripts/run_training.py \
   --config "$WORK_CONFIG_PATH" \

@@ -17,6 +17,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from run_training import (
     build_auxiliary_criterion,
+    build_dataset,
     build_train_sampler,
     monitor_value_after_postprocessing,
     resolve_resume_checkpoint,
@@ -85,6 +86,50 @@ def test_sequence_paths_uses_manifest_and_ignores_stale_glob_files(artifact_dir:
     assert [Path(path).name for path in x_paths] == ["kept_features.npy"]
     assert [Path(path).name for path in t_paths] == ["kept_times.npy"]
     assert [Path(path).name for path in y_paths] == ["kept_labels.npy"]
+
+
+def test_action_value_dataset_rejects_stale_scalar_classification_shards(artifact_dir: Path) -> None:
+    split_dir = artifact_dir / "train"
+    split_dir.mkdir()
+    np.save(split_dir / "day_features.npy", np.zeros((8, 3), dtype=np.float32))
+    np.save(split_dir / "day_times.npy", np.arange(8, dtype=np.float64))
+    np.save(split_dir / "day_labels.npy", np.zeros(8, dtype=np.int64))
+    config = load_config()
+    config.data.sequence_window = 4
+    config.training.sequence_supervision.loss_warmup_tokens = 2
+    config.training.sequence_supervision.chunk_stride = 2
+
+    with pytest.raises(ValueError, match=r"stale.*classification|older label strategy"):
+        build_dataset(artifact_dir, "train", config)
+
+
+def test_dataset_rejects_manifest_target_columns_from_another_objective(artifact_dir: Path) -> None:
+    split_dir = artifact_dir / "train"
+    split_dir.mkdir()
+    np.save(split_dir / "day_features.npy", np.zeros((8, 3), dtype=np.float32))
+    np.save(split_dir / "day_times.npy", np.arange(8, dtype=np.float64))
+    np.save(split_dir / "day_labels.npy", np.zeros((8, 2), dtype=np.float32))
+    manifest = {
+        "version": 1,
+        "target_columns": [],
+        "splits": {
+            "train": [
+                {
+                    "features": "train/day_features.npy",
+                    "times": "train/day_times.npy",
+                    "labels": "train/day_labels.npy",
+                }
+            ]
+        },
+    }
+    (artifact_dir / "sequence_manifest.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    config = load_config()
+    config.data.sequence_window = 4
+    config.training.sequence_supervision.loss_warmup_tokens = 2
+    config.training.sequence_supervision.chunk_stride = 2
+
+    with pytest.raises(ValueError, match=r"declares target_columns=\[\].*active config requires"):
+        build_dataset(artifact_dir, "train", config)
 
 
 def test_resolve_resume_checkpoint_prefers_explicit_path(artifact_dir: Path) -> None:

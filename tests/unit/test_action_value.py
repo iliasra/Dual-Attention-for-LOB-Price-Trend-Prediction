@@ -172,6 +172,31 @@ def test_action_value_trainer_evaluates_two_output_model() -> None:
     assert metrics.total_pnl_ticks == pytest.approx(3.0)
 
 
+def test_action_value_trainer_rejects_scalar_classification_targets_before_reshape() -> None:
+    class TokenwiseTwoOutputModel(nn.Module):
+        def forward(self, x: torch.Tensor, t: torch.Tensor, *, tokenwise: bool = False) -> torch.Tensor:
+            del t
+            values = x[..., :2]
+            return values if tokenwise else values[:, -1]
+
+    config = load_config().training
+    config.device = "cpu"
+    config.use_amp = False
+    trainer = ActionValueTrainer(config)
+    features = torch.ones((2, 4, 2))
+    scalar_targets = torch.ones((2, 4), dtype=torch.long)
+    loss_mask = torch.tensor([[False, False, True, True], [False, False, True, True]])
+
+    with pytest.raises(ValueError, match=r"\[batch, sequence, 2\].*stale classification targets"):
+        trainer._supervised_values(
+            TokenwiseTwoOutputModel(),
+            features,
+            torch.zeros((2, 4)),
+            scalar_targets,
+            loss_mask,
+        )
+
+
 def test_action_value_trainer_collects_validation_quantile_outputs() -> None:
     class FixedQuantileModel(nn.Module):
         def __init__(self) -> None:
