@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
+import yaml
 
 from action_value import (
     action_value_metrics,
@@ -15,7 +16,7 @@ from action_value import (
     spearman_rank_correlation,
 )
 from action_value_training import ActionValueRegressionLoss, ActionValueTrainer, split_action_value_outputs
-from configuration import load_config
+from configuration import TrainingConfig, load_config
 
 
 @pytest.fixture()
@@ -194,6 +195,81 @@ def test_action_value_trainer_rejects_scalar_classification_targets_before_resha
             torch.zeros((2, 4)),
             scalar_targets,
             loss_mask,
+        )
+
+
+def test_action_value_fp16_scaler_overflow_skips_step_instead_of_aborting() -> None:
+    class OverflowGradientModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(2))
+            self.weight.register_hook(lambda gradient: torch.full_like(gradient, float("inf")))
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor, *, tokenwise: bool = False) -> torch.Tensor:
+            del t
+            values = x[..., :2] * self.weight
+            return values if tokenwise else values[:, -1]
+
+    class FakeOverflowScaler:
+        def __init__(self) -> None:
+            self.scale_value = 1024.0
+            self.step_calls = 0
+
+        def scale(self, loss: torch.Tensor) -> torch.Tensor:
+            return loss
+
+        def unscale_(self, _optimizer: torch.optim.Optimizer) -> None:
+            return None
+
+        def is_enabled(self) -> bool:
+            return True
+
+        def get_scale(self) -> float:
+            return self.scale_value
+
+        def step(self, _optimizer: torch.optim.Optimizer) -> None:
+            self.step_calls += 1
+
+        def update(self) -> None:
+            self.scale_value /= 2.0
+
+    config_path = Path(__file__).resolve().parents[2] / "configs" / "pipeline_config.yaml"
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))["training"]
+    config = TrainingConfig.from_dict(payload)
+    config.device = "cpu"
+    config.use_amp = False
+    config.gradient_accumulation_steps = 1
+    trainer = ActionValueTrainer(config)
+    fake_scaler = FakeOverflowScaler()
+    trainer.scaler = fake_scaler  # type: ignore[assignment]
+    model = OverflowGradientModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    features = torch.ones((2, 4, 2))
+    targets = torch.ones((2, 2))
+    loader = [(features, torch.zeros((2, 4)), targets)]
+
+    loss = trainer._run_train_epoch(
+        model,
+        loader,
+        ActionValueRegressionLoss(config),
+        optimizer,
+        epoch=1,
+    )
+
+    assert np.isfinite(loss)
+    assert fake_scaler.step_calls == 1
+    assert fake_scaler.scale_value == 512.0
+
+
+def test_action_value_batch_validation_reports_non_finite_features_and_tokens() -> None:
+    with pytest.raises(FloatingPointError, match=r"invalid=\['features'\].*token_indices"):
+        ActionValueTrainer._require_finite_batch(
+            x=torch.tensor([[[1.0, float("nan")]]]),
+            t=torch.zeros((1, 1)),
+            targets=torch.zeros((1, 1, 2)),
+            token_indices=torch.tensor([[123]]),
+            epoch=1,
+            batch_index=7,
         )
 
 

@@ -580,6 +580,14 @@ For action-value regression, `training_state_latest.pth` is written after every
 validated epoch and resumes at the next epoch. Keep the same config, objective,
 quantiles, gradient accumulation, supervision mode, and `TRAINING_RUN_STEM`.
 
+Action-value training uses BF16 autocast when the CUDA device supports it (for
+example, an NVIDIA L40S). On older GPUs it falls back to FP16 with dynamic loss
+scaling: an isolated FP16 gradient overflow skips only the affected optimizer
+step and lowers the scale instead of aborting the complete job. A non-finite
+BF16/FP32 gradient remains a fatal error and its diagnostic reports the affected
+parameters, input/target/prediction ranges, and token indices. These numerical
+training changes do not require preprocessing the sequences again.
+
 For W&B online tracking from PBS, pass the API key through the environment, for
 example:
 

@@ -324,7 +324,7 @@ training:
   num_workers: 0
   prefetch_factor: null # DataLoader batches prefetched per worker; 16 workers * 4 = up to 64 queued batches
   preload_data_to_memory: false # memmap shards; avoids ~87 GiB host-RAM preload on the current fold
-  validate_every_n_batches: "epoch" # allowed: positive int or "epoch"; int validates/checkpoints intra-epoch
+  validate_every_n_batches: 5000 # allowed: positive int or "epoch"; int validates/checkpoints intra-epoch
   validate_at_epoch_end: false # used only when validate_every_n_batches is an int; false avoids extra epoch-end evals
   early_stopping_patience: 0 # counts validation intervals when validate_every_n_batches is an int
   early_stopping_warmup: 0 # counts validation intervals when validate_every_n_batches is an int

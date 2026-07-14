@@ -107,7 +107,22 @@ class ActionValueTrainer:
         self.config = config
         self.device = torch.device(config.device)
         self.amp_enabled = bool(config.use_amp and self.device.type == "cuda")
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.amp_enabled)
+        self.amp_dtype = (
+            torch.bfloat16
+            if self.amp_enabled and LobTrainer._cuda_supports_bf16(self.device)
+            else None
+        )
+        self.scaler = torch.amp.GradScaler(
+            self.device.type,
+            enabled=self.amp_enabled and self.amp_dtype is None,
+        )
+        if self.amp_enabled:
+            amp_dtype_name = "bfloat16" if self.amp_dtype is torch.bfloat16 else "float16"
+            print(
+                "Action-value AMP enabled: "
+                f"autocast_dtype={amp_dtype_name}, "
+                f"grad_scaler_enabled={self.scaler.is_enabled()}."
+            )
         self.top_checkpoints: list[tuple[float, int, Path]] = []
         self.last_evaluation_outputs: dict[str, object] | None = None
         self.selected_best_model_path: Path | None = None
@@ -116,17 +131,74 @@ class ActionValueTrainer:
         return ActionValueRegressionLoss(self.config)
 
     def _amp_context(self):
-        return torch.autocast(device_type=self.device.type, enabled=self.amp_enabled)
+        if self.amp_dtype is None:
+            return torch.autocast(device_type=self.device.type, enabled=self.amp_enabled)
+        return torch.autocast(
+            device_type=self.device.type,
+            enabled=self.amp_enabled,
+            dtype=self.amp_dtype,
+        )
 
     @staticmethod
     def _unpack_batch(batch):
         if len(batch) == 3:
             x, t, targets = batch
-            return x, t, targets, None
+            return x, t, targets, None, None
         if len(batch) == 5:
-            x, t, targets, loss_mask, _token_indices = batch
-            return x, t, targets, loss_mask
+            x, t, targets, loss_mask, token_indices = batch
+            return x, t, targets, loss_mask, token_indices
         raise ValueError("Expected a 3-tensor window batch or 5-tensor token-chunk batch.")
+
+    @staticmethod
+    def _tensor_summary(name: str, tensor: torch.Tensor | None) -> str:
+        if tensor is None or tensor.numel() == 0:
+            return f"{name}=empty"
+        values = tensor.detach().float()
+        finite = values[torch.isfinite(values)]
+        if finite.numel() == 0:
+            return f"{name}=all_non_finite shape={tuple(tensor.shape)}"
+        return (
+            f"{name}[shape={tuple(tensor.shape)}, min={float(finite.min()):.6g}, "
+            f"max={float(finite.max()):.6g}, abs_max={float(finite.abs().max()):.6g}, "
+            f"non_finite={int((~torch.isfinite(values)).sum())}]"
+        )
+
+    @staticmethod
+    def _require_finite_batch(
+        *,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        targets: torch.Tensor,
+        token_indices: torch.Tensor | None,
+        epoch: int,
+        batch_index: int,
+    ) -> None:
+        invalid = [
+            name
+            for name, tensor in (("features", x), ("times", t), ("targets", targets))
+            if not bool(torch.isfinite(tensor).all())
+        ]
+        if not invalid:
+            return
+        token_summary = ActionValueTrainer._tensor_summary("token_indices", token_indices)
+        summaries = "; ".join(
+            ActionValueTrainer._tensor_summary(name, tensor)
+            for name, tensor in (("features", x), ("times", t), ("targets", targets))
+        )
+        raise FloatingPointError(
+            f"Non-finite training batch at epoch {epoch}, batch {batch_index}: "
+            f"invalid={invalid}; {token_summary}; {summaries}."
+        )
+
+    @staticmethod
+    def _non_finite_gradient_names(model: nn.Module, *, limit: int = 8) -> list[str]:
+        names = []
+        for name, parameter in model.named_parameters():
+            if parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all()):
+                names.append(name)
+                if len(names) >= limit:
+                    break
+        return names
 
     def _supervised_values(
         self,
@@ -314,14 +386,25 @@ class ActionValueTrainer:
         total_rows = 0
         accumulation = int(self.config.gradient_accumulation_steps)
         pending = 0
+        skipped_amp_steps = 0
         loader_length = len(data_loader) if hasattr(data_loader, "__len__") else None
         for batch_index, batch in enumerate(tqdm(data_loader, desc=f"Action values epoch {epoch} [Train]"), start=1):
-            x, t, targets, loss_mask = self._unpack_batch(batch)
+            x, t, targets, loss_mask, token_indices = self._unpack_batch(batch)
             x = x.to(self.device, non_blocking=True)
             t = t.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
             if loss_mask is not None:
                 loss_mask = loss_mask.to(self.device, non_blocking=True)
+            if token_indices is not None:
+                token_indices = token_indices.to(self.device, non_blocking=True)
+            self._require_finite_batch(
+                x=x,
+                t=t,
+                targets=targets,
+                token_indices=token_indices,
+                epoch=epoch,
+                batch_index=batch_index,
+            )
             with self._amp_context():
                 predictions, supervised_targets = self._supervised_values(model, x, t, targets, loss_mask)
                 base_loss = criterion(predictions, supervised_targets)
@@ -340,14 +423,40 @@ class ActionValueTrainer:
                             parameter.grad.div_(float(pending))
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), self.config.grad_clip_norm)
                 if not bool(torch.isfinite(grad_norm)):
-                    raise FloatingPointError(f"Non-finite gradient norm at epoch {epoch}, batch {batch_index}.")
-                self.scaler.step(optimizer)
-                self.scaler.update()
+                    if self.scaler.is_enabled():
+                        old_scale = float(self.scaler.get_scale())
+                        # Standard FP16 AMP behavior: unscale_ has recorded the
+                        # overflow, so step() skips this update and update()
+                        # lowers the dynamic loss scale.
+                        self.scaler.step(optimizer)
+                        self.scaler.update()
+                        skipped_amp_steps += 1
+                        print(
+                            "Skipped FP16 optimizer step after gradient overflow: "
+                            f"epoch={epoch}, batch={batch_index}, "
+                            f"scale={old_scale:g}->{float(self.scaler.get_scale()):g}, "
+                            f"bad_gradients={self._non_finite_gradient_names(model)}."
+                        )
+                    else:
+                        raise FloatingPointError(
+                            f"Non-finite gradient norm at epoch {epoch}, batch {batch_index}; "
+                            f"amp_dtype={self.amp_dtype}, "
+                            f"bad_gradients={self._non_finite_gradient_names(model)}; "
+                            f"{self._tensor_summary('features', x)}; "
+                            f"{self._tensor_summary('targets', supervised_targets)}; "
+                            f"{self._tensor_summary('predictions', predictions)}; "
+                            f"{self._tensor_summary('token_indices', token_indices)}."
+                        )
+                else:
+                    self.scaler.step(optimizer)
+                    self.scaler.update()
                 optimizer.zero_grad(set_to_none=True)
                 pending = 0
             rows = int(supervised_targets.shape[0])
             total_loss += float(base_loss.detach().item()) * rows
             total_rows += rows
+        if skipped_amp_steps:
+            print(f"Epoch {epoch} skipped {skipped_amp_steps} FP16 optimizer step(s) after scaler overflow.")
         return total_loss / max(total_rows, 1)
 
     @torch.inference_mode()
@@ -366,7 +475,7 @@ class ActionValueTrainer:
         total_loss = 0.0
         total_rows = 0
         for batch in tqdm(data_loader, desc=description):
-            x, t, targets, loss_mask = self._unpack_batch(batch)
+            x, t, targets, loss_mask, _token_indices = self._unpack_batch(batch)
             x = x.to(self.device, non_blocking=True)
             t = t.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
@@ -415,7 +524,7 @@ class ActionValueTrainer:
         started = perf_counter()
         model = model.to(self.device)
         criterion = self._criterion()
-        optimizer = LobTrainer(self.config)._optimizer(model)
+        optimizer = LobTrainer(self.config, log_amp_status=False)._optimizer(model)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config.epochs)
         best_value = float("inf") if self.config.monitor_mode == "min" else -float("inf")
         without_improvement = 0

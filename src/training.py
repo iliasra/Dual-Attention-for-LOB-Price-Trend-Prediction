@@ -1336,6 +1336,7 @@ class LobTrainer:
         config: TrainingConfig | None = None,
         *,
         auxiliary_criterion: MovementDirectionAuxiliaryLoss | None = None,
+        log_amp_status: bool = True,
     ) -> None:
         self.config = config or load_config().training
         self.device = torch.device(self.config.device)
@@ -1347,7 +1348,7 @@ class LobTrainer:
             device=self.device.type,
             enabled=self.amp_enabled and self.amp_dtype is None,
         )
-        if self.amp_enabled:
+        if self.amp_enabled and log_amp_status:
             amp_dtype_name = "bfloat16" if self.amp_dtype is torch.bfloat16 else "default"
             print(
                 "AMP enabled: "
