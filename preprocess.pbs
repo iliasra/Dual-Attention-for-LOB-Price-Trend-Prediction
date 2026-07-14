@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -N lob_preprocess
-#PBS -l walltime=14:00:00
+#PBS -l walltime=24:00:00
 #PBS -l select=1:ncpus=8:mem=64gb:ompthreads=8
 
 set -euo pipefail
@@ -58,8 +58,34 @@ finish() {
   echo
   echo "===== FINISHING PREPROCESS JOB ====="
   echo "Exit status=$status"
+  if [ "$status" -eq 137 ]; then
+    echo "ERROR: preprocessing was killed (SIGKILL/exit 137), usually because the PBS memory limit was reached." >&2
+    echo "No fold output from the failed process was copied back." >&2
+  fi
   echo "Total runtime=$duration (${elapsed}s)"
   exit "$status"
+}
+
+clean_work_fold_outputs() {
+  fold_id="$1"
+  for root in "$WORK_SEQUENCE_DIR" "$WORK_PROCESSED_DIR" "$WORK_DERIVATIVES_DIR"; do
+    case "$root" in
+      "$WORK_DIR"/*) ;;
+      *) echo "Refusing to clean work output outside WORK_DIR: $root" >&2; exit 1 ;;
+    esac
+    rm -rf -- "$root/$fold_id"
+  done
+}
+
+validate_work_fold_outputs() {
+  fold_id="$1"
+  manifest="$WORK_SEQUENCE_DIR/$fold_id/sequence_manifest.yaml"
+  if [ ! -s "$manifest" ]; then
+    echo "Missing completed sequence manifest for $fold_id: $manifest" >&2
+    exit 1
+  fi
+  printf 'completed_at=%s\nconfig=%s\n' "$(date --iso-8601=seconds)" "$TRAINING_CONFIG" \
+    > "$WORK_SEQUENCE_DIR/$fold_id/_SUCCESS"
 }
 
 copy_fold_outputs() {
@@ -69,18 +95,18 @@ copy_fold_outputs() {
   mkdir -p "$PROJECT_SEQUENCE_DIR/$fold_id"
   mkdir -p "$PROJECT_DERIVATIVES_DIR/$fold_id"
 
-  rsync -a "$WORK_SEQUENCE_DIR/$fold_id/" \
+  rsync -a --delete "$WORK_SEQUENCE_DIR/$fold_id/" \
     "$PROJECT_SEQUENCE_DIR/$fold_id/"
 
   if [ -d "$WORK_PROCESSED_DIR/$fold_id" ]; then
     mkdir -p "$PROJECT_PROCESSED_DIR/$fold_id"
-    rsync -a "$WORK_PROCESSED_DIR/$fold_id/" \
+    rsync -a --delete "$WORK_PROCESSED_DIR/$fold_id/" \
       "$PROJECT_PROCESSED_DIR/$fold_id/"
   else
     echo "No processed dataframe CSV directory to copy for $fold_id (save_processed_dataframes=false)."
   fi
 
-  rsync -a "$WORK_DERIVATIVES_DIR/$fold_id/" \
+  rsync -a --delete "$WORK_DERIVATIVES_DIR/$fold_id/" \
     "$PROJECT_DERIVATIVES_DIR/$fold_id/"
 }
 
@@ -142,6 +168,8 @@ WORK_DERIVATIVES_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" preprocessin
 for fold_id in "${FOLD_IDS[@]}"; do
   echo
   echo "===== RUNNING PREPROCESSING FOR $fold_id ====="
+  rm -f -- "$PROJECT_SEQUENCE_DIR/$fold_id/_SUCCESS"
+  clean_work_fold_outputs "$fold_id"
   PYTHONPATH="$WORK_DIR/src:${PYTHONPATH:-}" \
   python scripts/process_data.py \
     --config "$WORK_CONFIG_PATH" \
@@ -149,6 +177,7 @@ for fold_id in "${FOLD_IDS[@]}"; do
     --lambda-cache-dir "$LAMBDA_CACHE_DIR" \
     --require-lambda-cache
 
+  validate_work_fold_outputs "$fold_id"
   copy_fold_outputs "$fold_id"
   echo "===== DONE $fold_id ====="
 done

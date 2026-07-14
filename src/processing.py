@@ -24,6 +24,7 @@ try:
     )
     from gcv_lambda_cache import (
         aggregate_daily_gcv_caches,
+        build_daily_gcv_cache,
         daily_lambda_gcv_cache_path,
         lambda_gcv_cache_key,
         load_daily_gcv_cache,
@@ -35,6 +36,9 @@ try:
         SnapshotBatchProcessor,
         TradingSessionFilter,
         derivative_feature_columns,
+        StreamingNumericSummary,
+        choose_exp_scaling_k,
+        choose_plgs_tau_max,
         fit_exp_scaling_parameters,
         fit_plgs_parameters,
         handle_abnormal_prices,
@@ -44,7 +48,14 @@ try:
     )
     from lobster_io import read_lobster_message_csv, read_lobster_orderbook_csv
     from run_logging import format_duration, save_preprocessing_metadata
-    from volume_clock import VolumeBarFeatureProcessor, VolumeClockSampler
+    from volume_clock import (
+        POSITIVE_VOLUME_COLUMNS,
+        SCALING_QUANTILE,
+        SCALING_TARGET,
+        SIGNED_VOLUME_COLUMNS,
+        VolumeBarFeatureProcessor,
+        VolumeClockSampler,
+    )
 except ImportError:  # pragma: no cover
     from .configuration import ExperimentConfig, FoldConfig, load_config
     from .datasets import DailySequenceBuilder
@@ -60,6 +71,7 @@ except ImportError:  # pragma: no cover
     )
     from .gcv_lambda_cache import (
         aggregate_daily_gcv_caches,
+        build_daily_gcv_cache,
         daily_lambda_gcv_cache_path,
         lambda_gcv_cache_key,
         load_daily_gcv_cache,
@@ -71,6 +83,9 @@ except ImportError:  # pragma: no cover
         SnapshotBatchProcessor,
         TradingSessionFilter,
         derivative_feature_columns,
+        StreamingNumericSummary,
+        choose_exp_scaling_k,
+        choose_plgs_tau_max,
         fit_exp_scaling_parameters,
         fit_plgs_parameters,
         handle_abnormal_prices,
@@ -80,7 +95,14 @@ except ImportError:  # pragma: no cover
     )
     from .lobster_io import read_lobster_message_csv, read_lobster_orderbook_csv
     from .run_logging import format_duration, save_preprocessing_metadata
-    from .volume_clock import VolumeBarFeatureProcessor, VolumeClockSampler
+    from .volume_clock import (
+        POSITIVE_VOLUME_COLUMNS,
+        SCALING_QUANTILE,
+        SCALING_TARGET,
+        SIGNED_VOLUME_COLUMNS,
+        VolumeBarFeatureProcessor,
+        VolumeClockSampler,
+    )
 
 
 SPLIT_NAMES = ("train", "validation", "test")
@@ -516,6 +538,95 @@ class LobProcessingPipeline:
             day.message_features = self.volume_bar_processor.transform(labeled)
         return self.volume_bar_scaling_results
 
+    def _joined_frame_stream(self, pairs: list[LobFilePair], split: str):
+        """Yield one joined day at a time and release it after consumption."""
+        for pair in pairs:
+            day = self.prepare_unlabeled_pair(pair, split)
+            try:
+                yield self._require_frame(day, "joined", f"{split} streaming fit")
+            finally:
+                day.release_all_frames()
+                gc.collect()
+
+    def _fit_smoothing_threshold_streaming(
+        self,
+        pairs: list[LobFilePair],
+        split: str,
+    ) -> dict[str, object] | None:
+        """Fit a smoothing threshold from every split day with bounded RAM."""
+        if not self.uses_fitted_smoothing_threshold():
+            return None
+        result = fit_smoothing_threshold(
+            self._joined_frame_stream(pairs, split),
+            self.config.preprocessing.labels.smoothing,
+            fit_split=split,
+        )
+        if self.uses_split_fitted_smoothing_threshold():
+            result["fit_scope"] = "per_split"
+            self.smoothing_threshold_results[split] = result
+        else:
+            result["fit_scope"] = "train"
+            self.smoothing_threshold_result = result
+            self.smoothing_threshold_results["train"] = result
+        print(
+            f"Fitted smoothing label threshold on all {split} days: "
+            f"mode={result['mode']}, value={float(result['value']):.10g}, "
+            f"n_values={int(result['n_values'])}."
+        )
+        return result
+
+    def _fit_volume_bar_features_streaming(
+        self,
+        train_pairs: list[LobFilePair],
+    ) -> dict[str, dict[str, float | int]] | None:
+        """Fit volume-bar scaling from every train day using bounded sketches."""
+        if not self.uses_volume_clock():
+            return None
+        summaries = {
+            column: StreamingNumericSummary()
+            for column in (*POSITIVE_VOLUME_COLUMNS, *SIGNED_VOLUME_COLUMNS)
+        }
+        for pair in train_pairs:
+            day = self.prepare_pair(pair, "train")
+            labeled = None
+            values = None
+            numeric = None
+            finite = None
+            try:
+                labeled = self._require_frame(day, "labeled", "streaming volume-bar fit")
+                for column, summary in summaries.items():
+                    if column not in labeled.columns:
+                        continue
+                    values = labeled[column].abs() if column in SIGNED_VOLUME_COLUMNS else labeled[column]
+                    numeric = pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64)
+                    finite = np.clip(numeric[np.isfinite(numeric)], 0.0, None)
+                    summary.update(np.log1p(finite))
+            finally:
+                finite = None
+                numeric = None
+                values = None
+                labeled = None
+                day.release_all_frames()
+                gc.collect()
+
+        scaling: dict[str, dict[str, float | int]] = {}
+        for column, summary in summaries.items():
+            if summary.count == 0:
+                continue
+            quantile_value = summary.quantile(SCALING_QUANTILE / 100.0)
+            k = 1.0 if quantile_value <= 0.0 else choose_exp_scaling_k(quantile_value, SCALING_TARGET)
+            scaling[column] = {
+                "k": float(k),
+                "quantile": float(SCALING_QUANTILE),
+                "target": float(SCALING_TARGET),
+                "quantile_value": float(quantile_value),
+                "n_values": int(summary.count),
+            }
+        self.volume_bar_processor.scaling_ = scaling
+        self.volume_bar_scaling_results = scaling
+        print(f"Fitted volume-bar scaling on all {len(train_pairs)} train day(s).")
+        return scaling
+
     def _sample_clock_counts_for_day(self, day: ProcessedDay) -> dict[str, int]:
         """Return row counts before and after optional sample-clock conversion."""
         raw = self._require_frame(day, "raw", "sample-clock count metadata")
@@ -946,6 +1057,121 @@ class LobProcessingPipeline:
         )
         return True
 
+    def _try_optimize_fast_stream_lambda_from_pair_cache(
+        self,
+        train_pairs: list[LobFilePair],
+        *,
+        kind: str,
+    ) -> bool:
+        """Aggregate every configured train-day cache without loading raw frames."""
+        if self.lambda_cache_dir is None:
+            return False
+        stream_config = self._stream_config_for_kind(kind)
+        if not stream_config.enabled:
+            return True
+        scale = self.config.preprocessing.price_kinematic.tick_size if kind == "price" else 1.0
+        cache_key = self._lambda_cache_key_for_stream(kind=kind, scale=scale)
+        caches = []
+        missing: list[Path] = []
+        for pair in train_pairs:
+            cache_path = daily_lambda_gcv_cache_path(
+                self.lambda_cache_dir,
+                cache_key=cache_key,
+                kind=kind,
+                output_stem=pair.output_stem,
+            )
+            if cache_path.exists():
+                caches.append(load_daily_gcv_cache(cache_path))
+            else:
+                missing.append(cache_path)
+        if missing:
+            message = (
+                f"Missing {kind} lambda GCV cache file(s): "
+                + ", ".join(str(path) for path in missing[:5])
+                + (" ..." if len(missing) > 5 else "")
+            )
+            if self.require_lambda_cache:
+                raise FileNotFoundError(message)
+            print(message)
+            return False
+        if not caches:
+            if self.require_lambda_cache:
+                raise ValueError(f"No {kind} lambda GCV caches available for this fold.")
+            return False
+        self._apply_aggregated_gcv_caches(caches, kind=kind, source="daily GCV cache")
+        return True
+
+    def _apply_aggregated_gcv_caches(self, caches: list, *, kind: str, source: str) -> None:
+        result, total_count = aggregate_daily_gcv_caches(caches)
+        stream_config = self._stream_config_for_kind(kind)
+        stream_config.fast.selected_smoothing_lambda = result.smoothing_lambda
+        self.fast_smoothing_lambda_results[kind] = {
+            "selected_smoothing_lambda": float(result.smoothing_lambda),
+            "effective_df": float(result.effective_df),
+            "mean_gcv": float(result.gcv_score),
+            "stream_signature": self._lambda_cache_stream_signature(kind=kind),
+            "gcv_cache_total_count": int(total_count),
+            "gcv_cache_days": int(len(caches)),
+            "fit_mode": "all_train_days_streaming",
+        }
+        print(
+            f"Selected fast {kind} smoothing_lambda={result.smoothing_lambda:.8g} "
+            f"from {len(caches)} all-train {source} entries "
+            f"(effective_df={result.effective_df:.4f}, mean_gcv={result.gcv_score:.8g})."
+        )
+
+    def optimize_fast_smoothing_lambdas_streaming(self, train_pairs: list[LobFilePair]) -> None:
+        """Fit fast-stream lambdas from all train days without retaining day arrays."""
+        if self.config.preprocessing.kinematic_tokenization.method != "fast":
+            return
+        pending = [
+            kind
+            for kind in ("price", "volume")
+            if self._stream_config_for_kind(kind).enabled
+            and not self._try_optimize_fast_stream_lambda_from_pair_cache(train_pairs, kind=kind)
+        ]
+        if pending:
+            caches_by_kind: dict[str, list] = {kind: [] for kind in pending}
+            for pair in train_pairs:
+                day = self.prepare_pair_for_lambda_cache(pair)
+                values_by_day = None
+                centers_by_day = None
+                try:
+                    for kind in pending:
+                        values_by_day, centers_by_day, scale = self._stream_values_for_lambda_optimization(
+                            [day],
+                            kind=kind,
+                        )
+                        if not values_by_day or len(values_by_day[0]) < self.config.preprocessing.snapshot_window:
+                            continue
+                        stream_config = self._stream_config_for_kind(kind)
+                        caches_by_kind[kind].append(
+                            build_daily_gcv_cache(
+                                values=values_by_day[0],
+                                window=self.config.preprocessing.snapshot_window,
+                                n_basis=stream_config.fast.n_basis,
+                                max_df=stream_config.fast.df,
+                                n_df_candidates=self.config.preprocessing.kinematic_tokenization.n_df_candidates,
+                                chunk_size=min(
+                                    self.config.preprocessing.kinematic_tokenization.chunk_size,
+                                    4096,
+                                ),
+                                centers=(centers_by_day[0] if centers_by_day is not None else None),
+                                scale=scale,
+                                metadata={"output_stem": pair.output_stem, "kind": kind},
+                            )
+                        )
+                finally:
+                    values_by_day = None
+                    centers_by_day = None
+                    day.release_all_frames()
+                    gc.collect()
+            for kind, caches in caches_by_kind.items():
+                if not caches:
+                    raise ValueError(f"Cannot fit {kind} smoothing lambda: no valid train day.")
+                self._apply_aggregated_gcv_caches(caches, kind=kind, source="in-memory daily GCV")
+        self.snapshot_processor = SnapshotBatchProcessor(self.downstream_data_config, self.config.preprocessing)
+
     def reset_fold_state(self) -> None:
         self.config.preprocessing.price_kinematic.fast.selected_smoothing_lambda = None
         self.config.preprocessing.volume_kinematic.fast.selected_smoothing_lambda = None
@@ -1054,6 +1280,178 @@ class LobProcessingPipeline:
             f"k={result['k']:.6g}, n_values={int(result['n_values'])}."
         )
         return result
+
+    @staticmethod
+    def _merge_floor_comparison_counts(
+        accumulator: dict[str, int],
+        comparison: dict[str, object] | None,
+    ) -> None:
+        if comparison is None:
+            return
+        accumulator["valid_rows"] += int(comparison.get("valid_rows", 0))
+        for key in (
+            "cost_floor_gt_volatility_floor",
+            "volatility_floor_gt_cost_floor",
+            "equal",
+        ):
+            values = comparison.get(key)
+            if isinstance(values, dict):
+                accumulator[key] += int(values.get("count", 0))
+
+    @staticmethod
+    def _finalize_floor_comparison_counts(accumulator: dict[str, int]) -> dict[str, object] | None:
+        total = int(accumulator["valid_rows"])
+        if total == 0:
+            return None
+
+        def entry(key: str) -> dict[str, float | int]:
+            count = int(accumulator[key])
+            return {"count": count, "percentage": float(100.0 * count / total)}
+
+        return {
+            "valid_rows": total,
+            "cost_floor_gt_volatility_floor": entry("cost_floor_gt_volatility_floor"),
+            "volatility_floor_gt_cost_floor": entry("volatility_floor_gt_cost_floor"),
+            "equal": entry("equal"),
+        }
+
+    def _fit_static_parameters_streaming(
+        self,
+        train_pairs: list[LobFilePair],
+    ) -> tuple[dict[str, float] | None, dict[str, float] | None, dict[str, object] | None]:
+        """Fit static transforms and diagnostics from every train day, one at a time."""
+        price_config = self.config.preprocessing.price_static
+        volume_config = self.config.preprocessing.volume_static
+        price_summary = StreamingNumericSummary() if price_config.enabled else None
+        volume_summary = StreamingNumericSummary() if volume_config.enabled else None
+        floor_counts = {
+            "valid_rows": 0,
+            "cost_floor_gt_volatility_floor": 0,
+            "volatility_floor_gt_cost_floor": 0,
+            "equal": 0,
+        }
+        window = self.config.preprocessing.snapshot_window
+        chunk_size = max(1, int(self.config.preprocessing.kinematic_tokenization.chunk_size))
+
+        for day_index, pair in enumerate(train_pairs, start=1):
+            day = self.prepare_pair(pair, "train")
+            message_features = None
+            end_rows = None
+            distances = None
+            try:
+                self._merge_floor_comparison_counts(
+                    floor_counts,
+                    self.adaptive_threshold_floor_comparison([day]),
+                )
+                message_features = self._require_frame(day, "message_features", "streaming static fit")
+                if len(message_features) < window:
+                    continue
+
+                price_columns = (
+                    self.snapshot_processor.window_processor._resolve_stream_columns(
+                        message_features,
+                        price_config,
+                        "price",
+                    )
+                    if price_summary is not None
+                    else []
+                )
+                volume_columns = (
+                    self.snapshot_processor.window_processor._resolve_stream_columns(
+                        message_features,
+                        volume_config,
+                        "volume",
+                    )
+                    if volume_summary is not None
+                    else []
+                )
+                for start in range(window - 1, len(message_features), chunk_size):
+                    stop = min(start + chunk_size, len(message_features))
+                    end_rows = message_features.iloc[start:stop]
+                    if price_summary is not None and price_columns:
+                        distances = price_static_distance_frame(
+                            end_rows,
+                            price_columns,
+                            price_config.tick_size,
+                        )
+                        price_summary.update(distances.to_numpy(dtype=np.float64, copy=False))
+                    if volume_summary is not None and volume_columns:
+                        volume_summary.update(
+                            end_rows[volume_columns].to_numpy(dtype=np.float64, copy=False)
+                        )
+                print(
+                    f"Accumulated train-only static statistics for {pair.label} "
+                    f"({day_index}/{len(train_pairs)})."
+                )
+            finally:
+                distances = None
+                end_rows = None
+                message_features = None
+                day.release_all_frames()
+                gc.collect()
+
+        price_result: dict[str, float] | None = None
+        if price_summary is not None:
+            if price_summary.count == 0:
+                raise ValueError("Cannot fit price static PLGS parameters: no finite train values found.")
+            tau_clip = price_summary.quantile(0.99)
+            x95 = price_summary.quantile(0.95)
+            tau_max = choose_plgs_tau_max(
+                x95,
+                tau_start=price_config.tau_start,
+                target=0.50,
+            )
+            price_result = {
+                "tau_start": float(price_config.tau_start),
+                "tau_clip": float(tau_clip),
+                "tau_max": float(tau_max),
+                "x95": float(x95),
+                "x99": float(tau_clip),
+                "tau_max_target": 0.50,
+                "n_values": int(price_summary.count),
+                "fit_mode": "all_train_days_streaming",
+                "quantile_method": "deterministic_asinh_histogram_sketch",
+            }
+            price_config.tau_clip = float(tau_clip)
+            price_config.tau_max = float(tau_max)
+            self.price_static_plgs_results = price_result
+            print(
+                "Selected price static PLGS parameters from train: "
+                f"tau_start={price_result['tau_start']:.6g}, "
+                f"tau_clip(q99)={price_result['tau_clip']:.6g}, "
+                f"tau_max={price_result['tau_max']:.6g}, "
+                f"x95={price_result['x95']:.6g}, n_values={int(price_result['n_values'])} "
+                "(all train days, streaming)."
+            )
+
+        volume_result: dict[str, float] | None = None
+        if volume_summary is not None:
+            if volume_summary.count == 0:
+                raise ValueError("Cannot fit volume static exponential scaling: no finite train values found.")
+            quantile_value = volume_summary.quantile(volume_config.quantile / 100.0)
+            k = choose_exp_scaling_k(quantile_value, volume_config.target)
+            volume_result = {
+                "quantile": float(volume_config.quantile),
+                "target": float(volume_config.target),
+                "quantile_value": float(quantile_value),
+                "k": float(k),
+                "n_values": int(volume_summary.count),
+                "fit_mode": "all_train_days_streaming",
+                "quantile_method": "deterministic_asinh_histogram_sketch",
+            }
+            volume_config.k = float(k)
+            self.volume_static_exp_results = volume_result
+            print(
+                "Selected volume static exponential scaling from train: "
+                f"quantile={volume_result['quantile']:.6g}, "
+                f"target={volume_result['target']:.6g}, "
+                f"quantile_value={volume_result['quantile_value']:.6g}, "
+                f"k={volume_result['k']:.6g}, n_values={int(volume_result['n_values'])} "
+                "(all train days, streaming)."
+            )
+
+        self.snapshot_processor = SnapshotBatchProcessor(self.downstream_data_config, self.config.preprocessing)
+        return price_result, volume_result, self._finalize_floor_comparison_counts(floor_counts)
 
     def build_snapshot_features(self, processed_splits: dict[str, list[ProcessedDay]]) -> None:
         """Legacy eager snapshot construction for in-memory split payloads."""
@@ -1455,13 +1853,13 @@ class LobProcessingPipeline:
 
     def _fit_train_normalizer_streaming(
         self,
-        train_days: list[ProcessedDay],
+        train_pairs: list[LobFilePair],
         *,
         stats_path: Path,
         schema_path: Path,
     ) -> tuple[DerivativeNormalizer, list[str]]:
-        """Fit derivative stats from train snapshots while retaining only one full day."""
-        print(f"Fitting derivative normalizer on {len(train_days)} training day(s).")
+        """Fit derivative stats from every train day while retaining one day at most."""
+        print(f"Fitting derivative normalizer on all {len(train_pairs)} training day(s), sequentially.")
         if stats_path.exists():
             stats_path.unlink()
             print(f"Removed previous derivative statistics: {stats_path}")
@@ -1481,53 +1879,62 @@ class LobProcessingPipeline:
             delta_t_method=self.config.preprocessing.normalization.delta_t_scaling_method,
             delta_t_transform=self.config.preprocessing.normalization.delta_t_transform,
         )
-        normalizer_frames: list[pd.DataFrame] = []
-        first_schema_day: ProcessedDay | None = None
-        stats_metadata: dict[str, object] | None = None
+        first_schema_frame: pd.DataFrame | None = None
+        stats_metadata: dict[str, object] = {}
 
-        for day in train_days:
-            message_features = self._require_frame(day, "message_features", "train snapshot fitting")
-            day.processed = self.snapshot_processor.transform(message_features, source_label=day.pair.label)
-            processed = self._require_frame(day, "processed", "train normalizer fitting")
-            print(
-                f"Finished preprocessing for {day.pair.label}: "
-                f"{processed.shape[0]} rows, {processed.shape[1]} columns."
-            )
+        def processed_frame_stream():
+            nonlocal first_schema_frame
+            for day_index, pair in enumerate(train_pairs, start=1):
+                day = self.prepare_pair(pair, "train")
+                message_features = None
+                processed = None
+                try:
+                    message_features = self._require_frame(day, "message_features", "train snapshot fitting")
+                    processed = self.snapshot_processor.transform(message_features, source_label=day.pair.label)
+                    if first_schema_frame is None:
+                        first_schema_frame = processed.iloc[:1].copy()
+                        derivative_columns = derivative_feature_columns(processed)
+                        normalization_columns = normalizable_feature_columns(processed)
+                        stats_metadata.update(self._derivative_stats_metadata(message_features, derivative_columns))
+                        stats_metadata["normalization_columns"] = normalization_columns
+                        stats_metadata["normalization_methods"] = {
+                            "derivatives": self.config.preprocessing.normalization.derivative_scaling_method,
+                            "kinematic_positions": self.config.preprocessing.normalization.position_scaling_method,
+                            "size_log1p": self.config.preprocessing.normalization.size_log1p_scaling_method,
+                            "price_static": self.config.preprocessing.normalization.price_static_scaling_method,
+                            "adaptive_label_features": self._adaptive_label_features_metadata(),
+                            "causal_market_features": (
+                                self.config.preprocessing.normalization.causal_market_feature_scaling_method
+                            ),
+                            "delta_t": self.config.preprocessing.normalization.delta_t_scaling_method,
+                            "delta_t_transform": self.config.preprocessing.normalization.delta_t_transform,
+                        }
+                    print(
+                        f"Streaming normalizer day {day_index}/{len(train_pairs)} for {day.pair.label}: "
+                        f"{processed.shape[0]} rows, {processed.shape[1]} columns."
+                    )
+                    yield processed
+                finally:
+                    processed = None
+                    message_features = None
+                    day.release_all_frames()
+                    gc.collect()
 
-            derivative_columns = derivative_feature_columns(processed)
-            normalization_columns = normalizable_feature_columns(processed)
-            if stats_metadata is None:
-                stats_metadata = self._derivative_stats_metadata(message_features, derivative_columns)
-                stats_metadata["normalization_columns"] = normalization_columns
-                stats_metadata["normalization_methods"] = {
-                    "derivatives": self.config.preprocessing.normalization.derivative_scaling_method,
-                    "kinematic_positions": self.config.preprocessing.normalization.position_scaling_method,
-                    "size_log1p": self.config.preprocessing.normalization.size_log1p_scaling_method,
-                    "price_static": self.config.preprocessing.normalization.price_static_scaling_method,
-                    "adaptive_label_features": self._adaptive_label_features_metadata(),
-                    "causal_market_features": (
-                        self.config.preprocessing.normalization.causal_market_feature_scaling_method
-                    ),
-                    "delta_t": self.config.preprocessing.normalization.delta_t_scaling_method,
-                    "delta_t_transform": self.config.preprocessing.normalization.delta_t_transform,
-                }
-            normalizer_frames.append(processed.loc[:, normalization_columns].copy())
-            if first_schema_day is None:
-                first_schema_day = day
-            else:
-                day.processed = None
-            gc.collect()
-
-        if first_schema_day is None:
+        normalizer.fit_stream(processed_frame_stream(), metadata=stats_metadata)
+        if first_schema_frame is None:
             raise ValueError("Cannot fit derivative normalizer: no training day is available.")
-
-        normalizer.fit(normalizer_frames, metadata=stats_metadata)
-        first_processed = self._require_frame(first_schema_day, "processed", "feature schema bootstrap")
-        first_schema_day.normalized = normalizer.transform(first_processed)
-        ordered_feature_columns = self._build_feature_schema_from_day(first_schema_day, schema_path)
-        first_schema_day.processed = None
-        first_schema_day.normalized = None
-        normalizer_frames.clear()
+        schema_day = ProcessedDay(
+            split="train",
+            pair=train_pairs[0],
+            raw=None,
+            joined=None,
+            labeled=None,
+            message_features=None,
+            processed=first_schema_frame,
+            normalized=normalizer.transform(first_schema_frame),
+        )
+        ordered_feature_columns = self._build_feature_schema_from_day(schema_day, schema_path)
+        schema_day.release_all_frames()
         gc.collect()
 
         print("Derivative normalizer fitted.")
@@ -1624,49 +2031,25 @@ class LobProcessingPipeline:
         print(f"Starting fold {fold.id}.")
         self.reset_fold_state()
 
-        train_days: list[ProcessedDay] = []
         train_pairs = split_pairs.get("train", [])
+        if not train_pairs:
+            raise ValueError(f"Fold {fold.id} has no training day.")
         if self.uses_fitted_smoothing_threshold():
-            for pair in train_pairs:
-                train_days.append(self.prepare_unlabeled_pair(pair, "train"))
-            if self.uses_split_fitted_smoothing_threshold():
-                self._fit_split_smoothing_threshold(train_days, "train")
-            else:
-                self._fit_train_smoothing_threshold(train_days)
-            for day in train_days:
-                self._label_and_build_message_features(day)
-        else:
-            for pair in train_pairs:
-                train_days.append(self.prepare_pair(pair, "train"))
-        volume_bar_scaling = self._fit_volume_bar_features(train_days)
+            self._fit_smoothing_threshold_streaming(train_pairs, "train")
+        volume_bar_scaling = self._fit_volume_bar_features_streaming(train_pairs)
         sample_clock_counts: dict[str, dict[str, dict[str, int]]] = {split: {} for split in SPLIT_NAMES}
-        for day in train_days:
-            sample_clock_counts["train"][day.pair.output_stem] = self._sample_clock_counts_for_day(day)
 
         label_accumulator = self._new_label_distribution_accumulator() if self._tracks_label_distribution() else None
-        floor_comparison: dict[str, object] | None = None
         stats_path = self.fold_derivatives_stats_path(fold.id)
         fold_processed_dir = self.processed_dir / fold.id
         fold_sequence_dir = self.sequence_dir / fold.id
-        try:
-            floor_comparison = self.adaptive_threshold_floor_comparison(train_days)
-            for day in train_days:
-                day.release_raw_frames()
-            gc.collect()
-
-            plgs_parameters = self.fit_price_static_plgs_parameters(train_days)
-            volume_static_exp = self.fit_volume_static_exp_parameters(train_days)
-            self.optimize_fast_smoothing_lambdas(train_days)
-            normalizer, ordered_feature_columns = self._fit_train_normalizer_streaming(
-                train_days,
-                stats_path=stats_path,
-                schema_path=self.fold_feature_schema_path(fold.id),
-            )
-        finally:
-            for day in train_days:
-                day.release_all_frames()
-            train_days.clear()
-            gc.collect()
+        plgs_parameters, volume_static_exp, floor_comparison = self._fit_static_parameters_streaming(train_pairs)
+        self.optimize_fast_smoothing_lambdas_streaming(train_pairs)
+        normalizer, ordered_feature_columns = self._fit_train_normalizer_streaming(
+            train_pairs,
+            stats_path=stats_path,
+            schema_path=self.fold_feature_schema_path(fold.id),
+        )
 
         summary: dict[str, dict[str, tuple[int, int]]] = {split: {} for split in SPLIT_NAMES}
 
@@ -1695,15 +2078,10 @@ class LobProcessingPipeline:
                 and split not in self.smoothing_threshold_results
                 and pairs
             ):
-                split_days = [self.prepare_unlabeled_pair(pair, split) for pair in pairs]
-                self._fit_split_smoothing_threshold(split_days, split)
-                for day in split_days:
-                    self._label_and_build_message_features(day)
-                    process_streamed_day(day, split)
-            else:
-                for pair in pairs:
-                    day = self.prepare_pair(pair, split)
-                    process_streamed_day(day, split)
+                self._fit_smoothing_threshold_streaming(pairs, split)
+            for pair in pairs:
+                day = self.prepare_pair(pair, split)
+                process_streamed_day(day, split)
             print(f"Finished streaming preprocessing split '{split}'.")
 
         label_distribution = self._finalize_label_distribution(label_accumulator, floor_comparison)

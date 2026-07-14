@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Iterable, Protocol
 
 import numpy as np
 import pandas as pd
@@ -278,7 +278,7 @@ def _finite_spread_midprice_arrays(
 
 
 def fit_smoothing_threshold(
-    dataframes: list[pd.DataFrame],
+    dataframes: Iterable[pd.DataFrame],
     config: SmoothingLabelConfig,
     *,
     fit_split: str = "train",
@@ -288,10 +288,16 @@ def fit_smoothing_threshold(
         raise ValueError("Smoothing threshold fitting requires threshold='mean_spread', 'mean_pct', or 'mean_pct_2'.")
 
     mode = str(config.threshold).lower()
+    dataframe_iterator = iter(dataframes)
     if mode in {"mean_pct", "mean_pct_2"}:
         n_values = 0
         abs_change_sum = 0.0
-        for df in dataframes:
+        while True:
+            df = None
+            try:
+                df = next(dataframe_iterator)
+            except StopIteration:
+                break
             midprices = calculate_midprice(df, bid_col=config.bid_column, ask_col=config.ask_column)
             pct_changes = smoothing_pct_changes(midprices, config).to_numpy(dtype=float)
             finite = pct_changes[np.isfinite(pct_changes)]
@@ -315,7 +321,12 @@ def fit_smoothing_threshold(
         n_values = 0
         spread_sum = 0.0
         midprice_sum = 0.0
-        for df in dataframes:
+        while True:
+            df = None
+            try:
+                df = next(dataframe_iterator)
+            except StopIteration:
+                break
             spread, midprice = _finite_spread_midprice_arrays(
                 df,
                 bid_col=config.bid_column,

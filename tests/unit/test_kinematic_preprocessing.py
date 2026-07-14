@@ -34,6 +34,7 @@ from kinematic_preprocessing import (
     MessageOrderbookJoiner,
     PriceStaticProcessor,
     SnapshotBatchProcessor,
+    StreamingNumericSummary,
     VolumeStaticProcessor,
     _fast_price_tokens,
     _static_centering,
@@ -210,6 +211,51 @@ def test_derivative_normalizer_fit_matches_full_concat_stats() -> None:
         np.testing.assert_allclose(loaded_stats[column]["q999"], float(finite_values.quantile(0.999)), equal_nan=True)
         assert loaded_stats[column]["n_nan"] == int(values.isna().sum())
         assert loaded_stats[column]["n_inf"] == int(np.isinf(values).sum())
+
+
+def test_streaming_numeric_summary_uses_all_chunks_with_exact_moments() -> None:
+    summary = StreamingNumericSummary(max_centroids=16)
+
+    summary.update(np.array([1.0, 2.0, np.nan]))
+    summary.update(np.array([3.0, 4.0, np.inf]))
+
+    assert summary.count == 4
+    assert summary.n_nan == 1
+    assert summary.n_inf == 1
+    assert summary.mean == pytest.approx(2.5)
+    assert np.sqrt(summary.m2 / summary.count) == pytest.approx(np.std([1.0, 2.0, 3.0, 4.0]))
+    assert summary.quantile(0.5) == pytest.approx(2.5)
+
+
+def test_streaming_numeric_summary_remains_bounded_after_compression() -> None:
+    summary = StreamingNumericSummary(max_centroids=32)
+    values = np.linspace(-10.0, 10.0, 2001)
+
+    for chunk in np.array_split(values, 7):
+        summary.update(chunk)
+
+    assert summary.count == len(values)
+    assert len(summary.centroid_means) <= 32
+    assert summary.mean == pytest.approx(float(values.mean()), abs=1e-12)
+    assert summary.quantile(0.5) == pytest.approx(0.0, abs=0.4)
+    assert summary.quantile(0.95) == pytest.approx(float(np.quantile(values, 0.95)), abs=0.4)
+
+
+def test_derivative_normalizer_stream_fit_consumes_every_dataframe(artifact_dir: Path) -> None:
+    stats_path = artifact_dir / "streaming_derivatives_stats.yaml"
+    frames = [
+        pd.DataFrame({"price_kin_vel": [1.0, 2.0]}),
+        pd.DataFrame({"price_kin_vel": [3.0, 4.0, 5.0]}),
+    ]
+
+    normalizer = DerivativeNormalizer(stats_path, method="zscore").fit_stream(iter(frames))
+    payload = yaml.safe_load(stats_path.read_text(encoding="utf-8"))
+
+    assert normalizer.stats_["price_kin_vel"]["mean"] == pytest.approx(3.0)
+    assert normalizer.stats_["price_kin_vel"]["std"] == pytest.approx(np.std([1, 2, 3, 4, 5]))
+    assert payload["__metadata__"]["streaming_fit"]["dataframe_count"] == 2
+    assert payload["__metadata__"]["streaming_fit"]["processed_row_count"] == 5
+    assert payload["__metadata__"]["streaming_fit"]["fit_mode"] == "all_train_days_streaming"
 
 
 def test_derivative_normalizer_saves_metadata_without_polluting_loaded_stats() -> None:

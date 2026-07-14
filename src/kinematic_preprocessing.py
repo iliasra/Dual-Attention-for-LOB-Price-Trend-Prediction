@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, NamedTuple, Union
+from typing import Iterable, Literal, NamedTuple, Union
 import re
 
 import numpy as np
@@ -317,6 +317,191 @@ class DerivativeStats(NamedTuple):
     q999: float
     n_nan: int
     n_inf: int
+
+
+@dataclass(slots=True)
+class StreamingNumericSummary:
+    """Bounded-memory numeric summary updated by every finite train value.
+
+    Mean and population variance are exact up to floating-point roundoff.
+    Quantiles are estimated by a deterministic weighted asinh-histogram sketch, so
+    memory is independent of the number of train rows.
+    """
+
+    max_centroids: int = 4096
+    track_quantiles: bool = True
+    count: int = 0
+    mean: float = 0.0
+    m2: float = 0.0
+    n_nan: int = 0
+    n_inf: int = 0
+    centroid_means: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
+    centroid_weights: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
+
+    def __post_init__(self) -> None:
+        if self.max_centroids <= 0:
+            raise ValueError("max_centroids must be positive.")
+
+    def update(self, values: pd.Series | np.ndarray) -> None:
+        numeric = pd.to_numeric(pd.Series(np.asarray(values).ravel()), errors="coerce").to_numpy(dtype=np.float64)
+        self.n_nan += int(np.isnan(numeric).sum())
+        self.n_inf += int(np.isinf(numeric).sum())
+        finite = numeric[np.isfinite(numeric)]
+        if finite.size == 0:
+            return
+
+        batch_count = int(finite.size)
+        batch_mean = float(np.mean(finite))
+        batch_m2 = float(np.sum((finite - batch_mean) ** 2))
+        if self.count == 0:
+            self.mean = batch_mean
+            self.m2 = batch_m2
+            self.count = batch_count
+        else:
+            combined_count = self.count + batch_count
+            delta = batch_mean - self.mean
+            self.mean += delta * batch_count / combined_count
+            self.m2 += batch_m2 + delta * delta * self.count * batch_count / combined_count
+            self.count = combined_count
+
+        if not self.track_quantiles:
+            return
+        if len(self.centroid_means) + finite.size <= self.max_centroids:
+            self.centroid_means = np.concatenate((self.centroid_means, finite))
+            self.centroid_weights = np.concatenate(
+                (self.centroid_weights, np.ones(finite.size, dtype=np.float64))
+            )
+            return
+
+        # Histogram in asinh space: linear resolution near zero and logarithmic
+        # resolution in both tails. This consumes every value in O(n), unlike a
+        # per-day sort, while centroid sums preserve the original value scale.
+        transformed = np.arcsinh(finite)
+        old_transformed = np.arcsinh(self.centroid_means)
+        lower = float(
+            min(
+                np.min(transformed),
+                np.min(old_transformed) if old_transformed.size else np.inf,
+            )
+        )
+        upper = float(
+            max(
+                np.max(transformed),
+                np.max(old_transformed) if old_transformed.size else -np.inf,
+            )
+        )
+        if upper <= lower:
+            total_weight = float(self.centroid_weights.sum() + finite.size)
+            weighted_sum = float(np.dot(self.centroid_means, self.centroid_weights) + finite.sum())
+            self.centroid_means = np.asarray([weighted_sum / total_weight], dtype=np.float64)
+            self.centroid_weights = np.asarray([total_weight], dtype=np.float64)
+            return
+
+        scale = self.max_centroids / (upper - lower)
+        indices = np.minimum(
+            ((transformed - lower) * scale).astype(np.int64),
+            self.max_centroids - 1,
+        )
+        counts = np.bincount(indices, minlength=self.max_centroids).astype(np.float64)
+        sums = np.bincount(indices, weights=finite, minlength=self.max_centroids)
+        if old_transformed.size:
+            old_indices = np.minimum(
+                ((old_transformed - lower) * scale).astype(np.int64),
+                self.max_centroids - 1,
+            )
+            counts += np.bincount(
+                old_indices,
+                weights=self.centroid_weights,
+                minlength=self.max_centroids,
+            )
+            sums += np.bincount(
+                old_indices,
+                weights=self.centroid_means * self.centroid_weights,
+                minlength=self.max_centroids,
+            )
+        occupied = counts > 0.0
+        self.centroid_means = sums[occupied] / counts[occupied]
+        self.centroid_weights = counts[occupied]
+
+    def quantile(self, probability: float) -> float:
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("probability must be in [0, 1].")
+        if self.count == 0:
+            return 0.0
+        if not self.track_quantiles:
+            raise ValueError("Quantiles were disabled for this streaming summary.")
+        order = np.argsort(self.centroid_means, kind="mergesort")
+        means = self.centroid_means[order]
+        weights = self.centroid_weights[order]
+        positions = (np.cumsum(weights) - 0.5 * weights) / float(weights.sum())
+        return float(np.interp(probability, positions, means, left=means[0], right=means[-1]))
+
+    def absolute_deviation_quantile(self, center: float, probability: float) -> float:
+        if self.count == 0:
+            return 0.0
+        if not self.track_quantiles:
+            raise ValueError("Quantiles were disabled for this streaming summary.")
+        deviations = np.abs(self.centroid_means - float(center))
+        order = np.argsort(deviations, kind="mergesort")
+        sorted_deviations = deviations[order]
+        weights = self.centroid_weights[order]
+        positions = (np.cumsum(weights) - 0.5 * weights) / float(weights.sum())
+        return float(
+            np.interp(
+                probability,
+                positions,
+                sorted_deviations,
+                left=sorted_deviations[0],
+                right=sorted_deviations[-1],
+            )
+        )
+
+    def derivative_stats(self, *, method: DerivativeScalingMethod) -> DerivativeStats:
+        if self.count == 0:
+            median = mad = q001 = q999 = 0.0
+            std = 0.0
+            scale = 1.0
+            scale_source = "empty"
+        elif method == "zscore":
+            std = float(np.sqrt(max(self.m2 / self.count, 0.0)))
+            # These robust fields are not used by z-score transformation.
+            median = float(self.mean)
+            mad = 0.0
+            q001 = float(self.mean)
+            q999 = float(self.mean)
+            scale = std if std >= DERIVATIVE_SCALING_EPS else 1.0
+            scale_source = "std" if std >= DERIVATIVE_SCALING_EPS else "unit"
+        else:
+            std = float(np.sqrt(max(self.m2 / self.count, 0.0)))
+            median = self.quantile(0.5)
+            mad = self.absolute_deviation_quantile(median, 0.5)
+            q001 = self.quantile(0.001)
+            q999 = self.quantile(0.999)
+            if method == "quantile_scaling":
+                quantile_scale = (q999 - q001) / (2 * 3.090232306)
+                scale = max(std, quantile_scale)
+                scale_source = "std" if std >= quantile_scale else "quantile"
+            else:
+                scale = MAD_NORMAL_CONSISTENCY * mad
+                scale_source = "mad"
+                if scale < DERIVATIVE_SCALING_EPS:
+                    scale = std
+                    scale_source = "std"
+            if scale < DERIVATIVE_SCALING_EPS:
+                scale = 1.0
+                scale_source = "unit"
+        return DerivativeStats(
+            mean=float(self.mean),
+            std=float(std),
+            median=float(median),
+            mad=float(mad),
+            scale=float(scale),
+            scale_source=scale_source,
+            q001=float(q001),
+            q999=float(q999),
+            n_nan=int(self.n_nan),
+            n_inf=int(self.n_inf),
+        )
 
 def _zscore(series: pd.Series) -> ZScoreResult:
     with np.errstate(invalid="ignore"):
@@ -1646,6 +1831,95 @@ class DerivativeNormalizer:
         payload: dict[str, object] = dict(self.stats_)
         if metadata is not None:
             payload["__metadata__"] = metadata
+        save_yaml(self.output_path, payload)
+        return self
+
+    def fit_stream(
+        self,
+        dataframes: Iterable[pd.DataFrame],
+        *,
+        metadata: dict[str, object] | None = None,
+        max_centroids: int = 4096,
+    ) -> "DerivativeNormalizer":
+        """Fit on every streamed dataframe without retaining prior frames.
+
+        Exact first and second moments are combined online. Robust and tail
+        quantiles use a deterministic weighted asinh-histogram sketch fed by every
+        finite value.
+        """
+        column_specs: dict[str, dict[str, str]] = {}
+        summaries: dict[str, StreamingNumericSummary] = {}
+        dataframe_count = 0
+        row_count = 0
+        dataframe_iterator = iter(dataframes)
+        while True:
+            # Drop all references to the previous day before requesting the
+            # next generator item; otherwise generator preparation can overlap
+            # two full processed days in memory.
+            dataframe = None
+            transformed = None
+            try:
+                dataframe = next(dataframe_iterator)
+            except StopIteration:
+                break
+            dataframe_count += 1
+            row_count += int(len(dataframe))
+            for column, spec in self._column_specs(dataframe).items():
+                column_specs.setdefault(column, spec)
+                method = _normalize_scaling_method(
+                    spec["method"],
+                    context=f"Scaling method for column '{column}'",
+                )
+                summary = summaries.setdefault(
+                    column,
+                    StreamingNumericSummary(
+                        max_centroids=max_centroids,
+                        track_quantiles=method != "zscore",
+                    ),
+                )
+                transformed = self._apply_transform(
+                    dataframe[column],
+                    column=column,
+                    transform=spec.get("transform"),
+                )
+                summary.update(transformed)
+            transformed = None
+            dataframe = None
+        if dataframe_count == 0:
+            raise ValueError("Cannot fit derivative normalizer on an empty dataframe stream.")
+
+        self.stats_ = {}
+        for column, spec in column_specs.items():
+            method = _normalize_scaling_method(spec["method"], context=f"Scaling method for column '{column}'")
+            stats = summaries[column].derivative_stats(method=method)
+            self.stats_[column] = {
+                "mean": stats.mean,
+                "std": stats.std,
+                "median": stats.median,
+                "mad": stats.mad,
+                "scale": stats.scale,
+                "scale_source": stats.scale_source,
+                "q001": stats.q001,
+                "q999": stats.q999,
+                "n_nan": stats.n_nan,
+                "n_inf": stats.n_inf,
+                "method": method,
+                "family": spec["family"],
+            }
+            transform = spec.get("transform")
+            if transform is not None:
+                self.stats_[column]["transform"] = transform
+
+        payload: dict[str, object] = dict(self.stats_)
+        stream_metadata = {
+            "fit_mode": "all_train_days_streaming",
+            "dataframe_count": int(dataframe_count),
+            "processed_row_count": int(row_count),
+            "moments": "online_exact",
+            "quantiles": "deterministic_asinh_histogram_sketch",
+            "max_centroids_per_column": int(max_centroids),
+        }
+        payload["__metadata__"] = {**(metadata or {}), "streaming_fit": stream_metadata}
         save_yaml(self.output_path, payload)
         return self
 

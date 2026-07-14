@@ -717,6 +717,7 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     write_lobster_day(raw_dir, "TEST", "2020-01-01")
     write_lobster_day(raw_dir, "TEST", "2020-01-02")
     write_lobster_day(raw_dir, "TEST", "2020-01-03")
+    write_lobster_day(raw_dir, "TEST", "2020-01-04")
 
     base_config = load_config()
     payload = yaml.safe_load(base_config.path.read_text(encoding="utf-8"))
@@ -728,16 +729,16 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     payload["data"]["tick_size"] = 1.0
     payload["data"]["sequence_window"] = 3
     payload["dataset_splits"] = {
-        "train_dates": ["2020-01-01"],
-        "validation_dates": ["2020-01-02"],
-        "test_dates": ["2020-01-03"],
+        "train_dates": ["2020-01-01", "2020-01-02"],
+        "validation_dates": ["2020-01-03"],
+        "test_dates": ["2020-01-04"],
     }
     payload["folds"] = [
         {
             "id": "fold_001",
-            "train_dates": ["2020-01-01"],
-            "validation_dates": ["2020-01-02"],
-            "test_dates": ["2020-01-03"],
+            "train_dates": ["2020-01-01", "2020-01-02"],
+            "validation_dates": ["2020-01-03"],
+            "test_dates": ["2020-01-04"],
         }
     ]
     payload["preprocessing"]["snapshot_window"] = 4
@@ -775,8 +776,9 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
     assert not (artifact_dir / "processed" / "fold_001" / "train" / "TEST_2020-01-01_processed.csv").exists()
     train_features_path = artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-01_features.npy"
     assert train_features_path.exists()
-    assert (artifact_dir / "sequences" / "fold_001" / "validation" / "TEST_2020-01-02_features.npy").exists()
-    assert (artifact_dir / "sequences" / "fold_001" / "test" / "TEST_2020-01-03_features.npy").exists()
+    assert (artifact_dir / "sequences" / "fold_001" / "train" / "TEST_2020-01-02_features.npy").exists()
+    assert (artifact_dir / "sequences" / "fold_001" / "validation" / "TEST_2020-01-03_features.npy").exists()
+    assert (artifact_dir / "sequences" / "fold_001" / "test" / "TEST_2020-01-04_features.npy").exists()
     metadata_path = artifact_dir / "sequences" / "fold_001" / "preprocessing_metadata.yaml"
     feature_schema_path = artifact_dir / "sequences" / "fold_001" / "feature_schema.yaml"
     assert metadata_path.exists()
@@ -785,8 +787,12 @@ def test_processing_pipeline_writes_fold_scoped_outputs(artifact_dir: Path, caps
 
     metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
     feature_schema = yaml.safe_load(feature_schema_path.read_text(encoding="utf-8"))
+    derivative_stats = yaml.safe_load(
+        (artifact_dir / "derivatives" / "fold_001" / "derivatives_stats.yaml").read_text(encoding="utf-8")
+    )
     assert metadata["save_processed_dataframes"] is False
     assert metadata["adaptive_label_features"] == {"enabled": False, "method": None}
+    assert derivative_stats["__metadata__"]["streaming_fit"]["dataframe_count"] == 2
     assert len(feature_schema["ordered_feature_columns"]) == np.load(train_features_path).shape[1]
     assert set(ADAPTIVE_LABEL_FEATURE_COLUMNS).isdisjoint(feature_schema["ordered_feature_columns"])
     label_distribution = metadata["label_distribution"]

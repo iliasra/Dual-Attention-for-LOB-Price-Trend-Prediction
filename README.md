@@ -394,6 +394,39 @@ data/processed_dataframes/<fold_id>/   # only when save_processed_dataframes=tru
 data/derivatives_z_scores/<fold_id>/
 ```
 
+Paths in the YAML are resolved relative to the YAML file itself. With the
+default `configs/pipeline_config.yaml`, `../data/sequences` therefore means
+`<project>/data/sequences`, not `$HOME/data/sequences`.
+
+The train-only fitting passes use **every configured training day and every
+processed row**. Days are loaded and released sequentially, so RAM usage no
+longer grows with an expanding fold. Means and variances are accumulated online;
+robust and tail quantiles use a deterministic bounded-memory weighted
+asinh-histogram sketch updated by every finite value. The approximation method,
+number of train days, and total processed row count are recorded in the
+derivative-statistics metadata. Static PLGS/volume parameters and GCV
+aggregation follow the same
+all-train streaming principle.
+
+This trades additional sequential passes over train for bounded memory. The PBS
+preprocessing walltime is therefore set to 24 hours; peak memory is controlled
+by one full day plus fixed-size per-column sketches rather than by fold length.
+
+PBS preprocessing first removes inherited fold artifacts inside `$TMPDIR`, and
+copies a fold back with `rsync --delete` only after a fresh
+`sequence_manifest.yaml` exists. A successful destination contains `_SUCCESS`.
+Consequently, an old destination is replaced rather than merged with stale
+shards. Exit status `137` means the process was killed (normally an OOM at the
+PBS memory limit); in that case nothing is copied back and `_SUCCESS` is not
+created. The end of a successful log contains all of:
+
+```text
+Saved exact shard manifest for fold <fold_id>
+===== COPYING OUTPUTS BACK ... =====
+===== DONE <fold_id> =====
+Exit status=0
+```
+
 For a local or sequential preprocessing run without the cache requirement, use:
 
 ```bash
