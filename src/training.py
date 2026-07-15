@@ -19,11 +19,23 @@ try:
     from monitoring import directional_precision_at_fixed_rate, monitor_value
     from pr_metrics import per_class_ranking_metrics
     from run_logging import format_duration
+    from torch_optimization import (
+        compile_model_for_training,
+        load_uncompiled_state_dict,
+        uncompiled_state_dict,
+        unwrap_compiled_model,
+    )
 except ImportError:  # pragma: no cover
     from .configuration import TrainingConfig, load_config
     from .monitoring import directional_precision_at_fixed_rate, monitor_value
     from .pr_metrics import per_class_ranking_metrics
     from .run_logging import format_duration
+    from .torch_optimization import (
+        compile_model_for_training,
+        load_uncompiled_state_dict,
+        uncompiled_state_dict,
+        unwrap_compiled_model,
+    )
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:
@@ -1645,7 +1657,7 @@ class LobTrainer:
         dropped = ranked[self.config.top_k_checkpoints :]
         if any(item.checkpoint_label == candidate.checkpoint_label for item in kept):
             candidate.path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_torch_save(model.state_dict(), candidate.path)
+            atomic_torch_save(uncompiled_state_dict(model), candidate.path)
         for item in dropped:
             if item.path.exists():
                 item.path.unlink()
@@ -1746,7 +1758,7 @@ class LobTrainer:
         """Persist a complete training state that can resume optimizer progress."""
         atomic_torch_save(
             {
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": uncompiled_state_dict(model),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "scaler_state_dict": self.scaler.state_dict(),
@@ -1809,7 +1821,7 @@ class LobTrainer:
                     "training.sequence_supervision.mode "
                     f"({saved_mode!r} != {self.config.sequence_supervision.mode!r})."
                 )
-        model.load_state_dict(state["model_state_dict"])
+        load_uncompiled_state_dict(model, state["model_state_dict"])
         optimizer.load_state_dict(state["optimizer_state_dict"])
         scheduler.load_state_dict(state["scheduler_state_dict"])
         scaler_state = state.get("scaler_state_dict")
@@ -1843,6 +1855,7 @@ class LobTrainer:
         model = model.to(self.device)
         criterion = self._criterion()
         optimizer = self._optimizer(model)
+        model = compile_model_for_training(model, self.config.torch_compile, self.device)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config.epochs)
         best_monitor_value = float("inf") if self.config.monitor_mode == "min" else -float("inf")
         best_epoch = 0
@@ -1956,7 +1969,7 @@ class LobTrainer:
                 validations_without_improvement = 0
                 best_path = Path(self.config.best_model_path)
                 best_path.parent.mkdir(parents=True, exist_ok=True)
-                atomic_torch_save(model.state_dict(), best_path)
+                atomic_torch_save(uncompiled_state_dict(model), best_path)
                 print(
                     f"Saved new best model to {best_path} from {checkpoint_label} "
                     f"with {self.config.monitor}={best_monitor_value:.6f}."
@@ -2389,7 +2402,7 @@ class LobTrainer:
                     f"top_k_candidates=[{candidate_summary}]."
                 )
             state_dict = torch.load(load_path, map_location=self.device, weights_only=True)
-            model.load_state_dict(state_dict)
+            load_uncompiled_state_dict(model, state_dict)
             if load_path != best_path:
                 best_path.parent.mkdir(parents=True, exist_ok=True)
                 atomic_torch_save(state_dict, best_path)
@@ -2402,7 +2415,7 @@ class LobTrainer:
                 f"{self.config.monitor}={best_monitor_value:.6f}."
             )
         print(f"Training finished ({format_duration(perf_counter() - fit_start)}).")
-        return model, history
+        return unwrap_compiled_model(model), history
 
     def _run_epoch(
         self,

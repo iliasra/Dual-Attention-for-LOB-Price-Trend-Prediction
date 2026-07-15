@@ -357,6 +357,13 @@ training:
   model_dir: ../results
   use_amp: true
   deterministic_torch: false
+  torch_compile:
+    enabled: true # compile the model only; dataloaders, metrics, W&B and checkpoint I/O remain eager
+    backend: inductor # CUDA kernel fusion/code generation on the HPC Linux nodes
+    mode: default # balanced compilation time and steady-state throughput for architecture screening
+    fullgraph: false # tolerate a future unsupported operation instead of requiring one monolithic graph
+    dynamic: false # fixed sequence/chunk shapes get the most specialized kernels; tail batches may compile once more
+    require_cuda: true # silently keep CPU smoke tests and local debugging in eager mode
   temperature_scaling:
     enabled: false # classification-only calibration
     class_bias_calibration: true # learn per-class additive logits bias on validation

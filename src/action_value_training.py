@@ -15,10 +15,22 @@ try:
     from action_value import ActionValueMetrics, action_value_metrics
     from configuration import TrainingConfig
     from training import LobTrainer
+    from torch_optimization import (
+        compile_model_for_training,
+        load_uncompiled_state_dict,
+        uncompiled_state_dict,
+        unwrap_compiled_model,
+    )
 except ImportError:  # pragma: no cover
     from .action_value import ActionValueMetrics, action_value_metrics
     from .configuration import TrainingConfig
     from .training import LobTrainer
+    from .torch_optimization import (
+        compile_model_for_training,
+        load_uncompiled_state_dict,
+        uncompiled_state_dict,
+        unwrap_compiled_model,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,7 +306,7 @@ class ActionValueTrainer:
         kept = candidates[: int(self.config.top_k_checkpoints)]
         dropped = candidates[int(self.config.top_k_checkpoints) :]
         if any(item[1] == validation_index for item in kept):
-            _atomic_torch_save(model.state_dict(), candidate_path)
+            _atomic_torch_save(uncompiled_state_dict(model), candidate_path)
         for _value, _epoch, path in dropped:
             if path.exists():
                 path.unlink()
@@ -362,7 +374,7 @@ class ActionValueTrainer:
         _atomic_torch_save(
             {
                 "state_type": "action_value_regression",
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": uncompiled_state_dict(model),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "scaler_state_dict": self.scaler.state_dict(),
@@ -413,7 +425,7 @@ class ActionValueTrainer:
                 "accumulation, quantiles, validation schedule, or sequence supervision settings: "
                 f"differences={incompatible_signature!r}."
             )
-        model.load_state_dict(state["model_state_dict"])
+        load_uncompiled_state_dict(model, state["model_state_dict"])
         optimizer.load_state_dict(state["optimizer_state_dict"])
         scheduler.load_state_dict(state["scheduler_state_dict"])
         if state.get("scaler_state_dict") is not None:
@@ -665,6 +677,7 @@ class ActionValueTrainer:
         model = model.to(self.device)
         criterion = self._criterion()
         optimizer = LobTrainer(self.config, log_amp_status=False)._optimizer(model)
+        model = compile_model_for_training(model, self.config.torch_compile, self.device)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.config.epochs)
         validate_by_epoch = bool(self.config.validates_by_epoch)
         validation_interval = None if validate_by_epoch else int(self.config.validate_every_n_batches)
@@ -779,7 +792,7 @@ class ActionValueTrainer:
             if improved:
                 best_value = monitor_value
                 without_improvement = 0
-                _atomic_torch_save(model.state_dict(), self.config.best_model_path)
+                _atomic_torch_save(uncompiled_state_dict(model), self.config.best_model_path)
                 best_model_path = self.config.best_model_path
             elif validation_index > int(self.config.early_stopping_warmup):
                 without_improvement += 1
@@ -908,7 +921,7 @@ class ActionValueTrainer:
         if not best_model_path.exists():
             raise RuntimeError("Action-value training produced no best checkpoint.")
         state = torch.load(best_model_path, map_location=self.device, weights_only=True)
-        model.load_state_dict(state)
+        load_uncompiled_state_dict(model, state)
         self.selected_best_model_path = best_model_path
         print(f"Action-value training finished in {perf_counter() - started:.2f}s.")
-        return model, history
+        return unwrap_compiled_model(model), history

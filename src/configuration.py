@@ -252,6 +252,14 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "model_dir": None,
         "use_amp": None,
         "deterministic_torch": None,
+        "torch_compile": {
+            "enabled": None,
+            "backend": None,
+            "mode": None,
+            "fullgraph": None,
+            "dynamic": None,
+            "require_cuda": None,
+        },
         "temperature_scaling": {
             "enabled": None,
             "class_bias_calibration": None,
@@ -357,6 +365,13 @@ OPTIONAL_CONFIG_KEYS = {
     "training.early_stopping_warmup",
     "training.early_stopping_min_delta",
     "training.optimizer",
+    "training.torch_compile",
+    "training.torch_compile.enabled",
+    "training.torch_compile.backend",
+    "training.torch_compile.mode",
+    "training.torch_compile.fullgraph",
+    "training.torch_compile.dynamic",
+    "training.torch_compile.require_cuda",
     "training.temperature_scaling",
     "training.temperature_scaling.enabled",
     "training.temperature_scaling.class_bias_calibration",
@@ -2341,6 +2356,72 @@ class TrainingObjectiveConfig:
 
 
 @dataclass(slots=True)
+class TorchCompileConfig:
+    """Optional ``torch.compile`` settings for the model execution path."""
+
+    enabled: bool = False
+    backend: str = "inductor"
+    mode: str = "default"
+    fullgraph: bool = False
+    dynamic: bool = False
+    require_cuda: bool = True
+
+    def __post_init__(self) -> None:
+        self.backend = str(self.backend).strip()
+        self.mode = str(self.mode).strip().lower()
+        if not self.backend:
+            raise ValueError("training.torch_compile.backend must be a non-empty string.")
+        allowed_modes = {
+            "default",
+            "reduce-overhead",
+            "max-autotune",
+            "max-autotune-no-cudagraphs",
+        }
+        if self.mode not in allowed_modes:
+            raise ValueError(
+                "training.torch_compile.mode must be one of "
+                "'default', 'reduce-overhead', 'max-autotune', or "
+                "'max-autotune-no-cudagraphs'."
+            )
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "TorchCompileConfig":
+        payload = payload or {}
+        if not isinstance(payload, dict):
+            raise ValueError("training.torch_compile must be a mapping.")
+        unexpected = sorted(
+            set(payload)
+            - {"enabled", "backend", "mode", "fullgraph", "dynamic", "require_cuda"}
+        )
+        if unexpected:
+            raise ValueError(f"Unexpected training.torch_compile keys: {unexpected}.")
+        return cls(
+            enabled=_optional_bool(
+                payload.get("enabled"),
+                "training.torch_compile.enabled",
+                default=False,
+            ),
+            backend=str(payload.get("backend", "inductor")),
+            mode=str(payload.get("mode", "default")),
+            fullgraph=_optional_bool(
+                payload.get("fullgraph"),
+                "training.torch_compile.fullgraph",
+                default=False,
+            ),
+            dynamic=_optional_bool(
+                payload.get("dynamic"),
+                "training.torch_compile.dynamic",
+                default=False,
+            ),
+            require_cuda=_optional_bool(
+                payload.get("require_cuda"),
+                "training.torch_compile.require_cuda",
+                default=True,
+            ),
+        )
+
+
+@dataclass(slots=True)
 class TrainingConfig:
     device: str
     epochs: int
@@ -2372,6 +2453,7 @@ class TrainingConfig:
     model_dir: str
     use_amp: bool
     deterministic_torch: bool
+    torch_compile: TorchCompileConfig
     temperature_scaling: TrainingTemperatureScalingConfig
     directional_thresholds: TrainingDirectionalThresholdConfig
     sampling: TrainingSamplingConfig
@@ -2586,6 +2668,7 @@ class TrainingConfig:
             model_dir=str(payload["model_dir"]),
             use_amp=bool(payload["use_amp"]),
             deterministic_torch=bool(payload["deterministic_torch"]),
+            torch_compile=TorchCompileConfig.from_dict(payload.get("torch_compile")),
             temperature_scaling=TrainingTemperatureScalingConfig.from_dict(
                 payload.get("temperature_scaling"),
             ),

@@ -543,6 +543,13 @@ training:
   gradient_accumulation_steps: 1
   eval_batch_size: 128
   preload_data_to_memory: true
+  torch_compile:
+    enabled: true
+    backend: inductor
+    mode: default
+    fullgraph: false
+    dynamic: false
+    require_cuda: true
   sequence_supervision:
     mode: token_chunk
     loss_warmup_tokens: 128
@@ -561,6 +568,20 @@ while neutral labels receive the same expected contribution that neutral
 downsampling would have produced.
 The dataloader still iterates over chunks and no neutral token is randomly
 dropped from the loss.
+
+The main classification and action-value trainers can compile the model with
+`torch.compile`. Only forward/backward model execution is compiled: data
+loading, metrics, validation orchestration, W&B logging and checkpoint I/O stay
+in eager Python. Checkpoints always store the underlying eager model state, so
+they remain compatible with evaluation jobs and with older, non-compiled runs.
+`backend: inductor` enables kernel fusion on the Linux CUDA nodes. The first
+training batch and the first validation batch pay a compilation warm-up cost;
+compare throughput only after these steps. `mode: default` is the conservative
+choice for the A-series. `reduce-overhead` may help very small batches but uses
+more CUDA-graph machinery, while `max-autotune` substantially increases startup
+time. With `require_cuda: true`, CPU runs automatically stay eager. Set
+`enabled: false` when debugging stack traces or measuring a very short run for
+which compilation cannot amortize its startup cost.
 
 `preload_data_to_memory: true` can require substantial host RAM for large folds.
 The current PBS script requests fewer CPUs than older runs but keeps high memory
