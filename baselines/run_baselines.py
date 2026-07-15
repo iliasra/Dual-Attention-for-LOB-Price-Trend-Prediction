@@ -5,6 +5,7 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -19,13 +20,37 @@ for path in (ROOT, SRC):
 
 from action_value import action_value_metrics, action_value_policy_frontier
 from baselines.models import BaselineHead, LSTMBaseline, RecurrentBaseline, context_features, momentum_signal
+from configuration import WandbTrackingConfig, load_config
+from run_logging import timestamped_run_stem
 from training import classification_metrics_from_predictions
+from wandb_tracking import WandbTracker
+
+
+def flatten_numeric_metrics(prefix: str, value: object) -> dict[str, float]:
+    """Flatten nested metric payloads while excluding non-finite values."""
+    if isinstance(value, dict):
+        flattened: dict[str, float] = {}
+        for key, item in value.items():
+            child = f"{prefix}_{key}" if prefix else str(key)
+            flattened.update(flatten_numeric_metrics(child, item))
+        return flattened
+    if isinstance(value, (list, tuple, np.ndarray)):
+        flattened = {}
+        for index, item in enumerate(value):
+            flattened.update(flatten_numeric_metrics(f"{prefix}_{index}", item))
+        return flattened
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        numeric = float(value)
+        return {prefix: numeric} if np.isfinite(numeric) else {}
+    return {}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run compute-cheap LOB baselines on prepared shards.")
     parser.add_argument("--sequence-dir", type=Path, required=True, help="One prepared fold directory.")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--config", type=Path, default=None, help="Optional experiment YAML supplying tracking.wandb.")
+    parser.add_argument("--run-stem", default=None, help="W&B group shared by a baseline comparison.")
     parser.add_argument(
         "--evaluation-split",
         choices=("validation", "test"),
@@ -306,9 +331,11 @@ def fit_classical_model(
     train_x: np.ndarray,
     train_y: np.ndarray,
     validation_x: np.ndarray,
+    validation_y: np.ndarray,
     *,
     regression: bool,
     args: argparse.Namespace,
+    wandb_tracker: WandbTracker,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Fit a lazy-imported scikit-learn or XGBoost baseline."""
     if train_x.ndim != 2:
@@ -342,13 +369,7 @@ def fit_classical_model(
                 "tree_method": "hist",
             }
             if regression and train_y.ndim == 2:
-                from sklearn.multioutput import MultiOutputRegressor
-
-                inner_common = {**common, "n_jobs": 1}
-                model = MultiOutputRegressor(
-                    XGBRegressor(objective="reg:squarederror", **inner_common),
-                    n_jobs=args.n_jobs,
-                )
+                model = None  # fitted action-wise below to expose every boosting round
             elif regression:
                 model = XGBRegressor(objective="reg:squarederror", **common)
             else:
@@ -357,7 +378,56 @@ def fit_classical_model(
         package = "scikit-learn" if name == "random_forest" else "xgboost and scikit-learn"
         raise RuntimeError(f"{name} requires {package}; install the project requirements first.") from exc
 
-    model.fit(train_x, train_y)
+    if name == "xgboost" and regression and train_y.ndim == 2:
+        action_predictions = []
+        for action_index, action_name in enumerate(("long", "short")):
+            action_model = XGBRegressor(objective="reg:squarederror", **{**common, "n_jobs": 1})
+            action_model.fit(
+                train_x,
+                train_y[:, action_index],
+                eval_set=[
+                    (train_x, train_y[:, action_index]),
+                    (validation_x, validation_y[:, action_index]),
+                ],
+                verbose=False,
+            )
+            results = action_model.evals_result()
+            datasets = list(results)
+            metric_names = list(results[datasets[0]]) if datasets else []
+            rounds = len(results[datasets[0]][metric_names[0]]) if datasets and metric_names else 0
+            for round_index in range(rounds):
+                payload: dict[str, object] = {"global_step": round_index + 1, "epoch": round_index + 1}
+                for dataset_name, namespace in zip(datasets, ("train", "validation")):
+                    for metric_name, values in results[dataset_name].items():
+                        payload[f"{namespace}/xgboost_{action_name}_{metric_name}"] = float(values[round_index])
+                if wandb_tracker.log_training_steps_enabled:
+                    wandb_tracker.log_metrics(payload)
+            action_predictions.append(action_model.predict(validation_x))
+        return np.column_stack(action_predictions).astype(np.float32), None
+    if name == "xgboost":
+        model.fit(
+            train_x,
+            train_y,
+            eval_set=[(train_x, train_y), (validation_x, validation_y)],
+            verbose=False,
+        )
+        results = model.evals_result()
+        datasets = list(results)
+        metric_names = list(results[datasets[0]]) if datasets else []
+        rounds = len(results[datasets[0]][metric_names[0]]) if datasets and metric_names else 0
+        for round_index in range(rounds):
+            payload: dict[str, object] = {"global_step": round_index + 1, "epoch": round_index + 1}
+            for dataset_name, namespace in zip(datasets, ("train", "validation")):
+                for metric_name, values in results[dataset_name].items():
+                    payload[f"{namespace}/xgboost_{metric_name}"] = float(values[round_index])
+            if wandb_tracker.log_training_steps_enabled:
+                wandb_tracker.log_metrics(payload)
+    else:
+        if model is None:  # pragma: no cover - guarded by the action-wise XGBoost return above.
+            raise RuntimeError("Internal baseline model construction failed.")
+        model.fit(train_x, train_y)
+    if model is None:  # pragma: no cover - defensive type narrowing.
+        raise RuntimeError("Internal baseline model construction failed.")
     if regression:
         return np.asarray(model.predict(validation_x), dtype=np.float32), None
     probabilities = np.asarray(model.predict_proba(validation_x), dtype=np.float32)
@@ -371,7 +441,8 @@ def train_head(
     *,
     regression: bool,
     args: argparse.Namespace,
-) -> None:
+    wandb_tracker: WandbTracker,
+) -> int:
     device = torch.device(args.device)
     model.to(device)
     target_tensor = torch.from_numpy(y.astype(np.float32 if regression else np.int64, copy=False))
@@ -381,9 +452,10 @@ def train_head(
         shuffle=True,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
-    for _epoch in range(args.epochs):
+    global_step = 0
+    for epoch in range(1, args.epochs + 1):
         model.train()
-        for inputs, targets in loader:
+        for batch_in_epoch, (inputs, targets) in enumerate(loader, start=1):
             inputs = inputs.to(device)
             targets = targets.to(device)
             outputs = model(inputs)
@@ -391,6 +463,22 @@ def train_head(
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+            global_step += 1
+            wandb_tracker.log_training_step(
+                {
+                    "epoch": epoch,
+                    "batch_in_epoch": batch_in_epoch,
+                    "global_step": global_step,
+                    "optimizer_step": global_step,
+                    "train_loss_step": float(loss.detach().item()),
+                    "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                    "optimizer_step_completed": True,
+                    "optimizer_step_applied": True,
+                    "supervised_tokens_per_step": int(targets.shape[0]),
+                    "chunks_per_step": int(inputs.shape[0]),
+                }
+            )
+    return global_step
 
 
 @torch.inference_mode()
@@ -404,7 +492,25 @@ def predict(model: torch.nn.Module, inputs: np.ndarray, *, batch_size: int, devi
 
 def main() -> None:
     args = parse_args()
+    started = perf_counter()
     torch.manual_seed(args.seed)
+    wandb_config = (
+        load_config(args.config).tracking.wandb
+        if args.config is not None
+        else WandbTrackingConfig(enabled=False)
+    )
+    run_stem = args.run_stem or timestamped_run_stem(f"baseline-{args.model}")
+    tracker_fold_id = f"{args.sequence_dir.name}-{args.model}-{args.evaluation_split}"
+    wandb_tracker = WandbTracker.init(
+        wandb_config,
+        run_stem=run_stem,
+        fold_id=tracker_fold_id,
+        fold_log_dir=args.output.parent,
+        config_payload={
+            key: str(value) if isinstance(value, Path) else value
+            for key, value in vars(args).items()
+        },
+    )
     recurrent_models = {"lstm", "rnn", "gru"}
     if args.model in recurrent_models and (args.max_rows <= 0 or args.max_rows > 50_000):
         raise ValueError(
@@ -434,6 +540,7 @@ def main() -> None:
     regression = train_y.ndim == 2
     output_dim = 2 if regression else int(max(np.max(train_y), np.max(validation_y)) + 1)
     probabilities: np.ndarray | None = None
+    final_global_step = 0
 
     if args.model == "no_skill":
         if regression:
@@ -504,9 +611,13 @@ def main() -> None:
             train_x,
             train_y,
             validation_x,
+            validation_y,
             regression=regression,
             args=args,
+            wandb_tracker=wandb_tracker,
         )
+        if args.model == "xgboost":
+            final_global_step = int(args.n_estimators)
     else:
         if args.model == "lstm":
             model = LSTMBaseline(
@@ -528,7 +639,14 @@ def main() -> None:
         else:
             hidden_dim = args.hidden_dim if args.model == "mlp" else None
             model = BaselineHead(train_x.shape[1], output_dim, hidden_dim=hidden_dim)
-        train_head(model, train_x, train_y, regression=regression, args=args)
+        final_global_step = train_head(
+            model,
+            train_x,
+            train_y,
+            regression=regression,
+            args=args,
+            wandb_tracker=wandb_tracker,
+        )
         raw_predictions = predict(model, validation_x, batch_size=args.batch_size, device=args.device)
         if regression:
             predictions = raw_predictions
@@ -580,9 +698,21 @@ def main() -> None:
         },
         "metrics": metrics,
         "ranking_pnl_frontier": ranking_pnl_frontier,
+        "duration_seconds": float(perf_counter() - started),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    final_metrics: dict[str, object] = {"global_step": int(final_global_step)}
+    for key, value in flatten_numeric_metrics(args.evaluation_split, metrics).items():
+        final_metrics[f"selected/{key}"] = value
+    final_metrics["selected/duration_seconds"] = float(payload["duration_seconds"])
+    wandb_tracker.log_metrics(final_metrics)
+    wandb_tracker.log_artifact_files(
+        name=f"{run_stem}-{tracker_fold_id}-result",
+        artifact_type="baseline-result",
+        paths=[args.output],
+    )
+    wandb_tracker.finish(exit_code=0)
     print(json.dumps(payload, indent=2))
 
 

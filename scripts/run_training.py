@@ -2187,7 +2187,7 @@ def train_fold(
             artifact_type="model",
             paths=[candidate.path for candidate in trainer.top_checkpoint_candidates],
         )
-    wandb_tracker.finish()
+    wandb_tracker.finish(exit_code=0)
 
     return {
         "sequence_dir": str(fold_sequence_dir),
@@ -2297,6 +2297,7 @@ def main() -> None:
                 fold_sequence_dir=paths["sequence_dir"],
                 fold_log_dir=paths["log_dir"],
                 fold_result_dir=paths["result_dir"],
+                run_stem=run_stem,
                 seed=fold_config.seed,
                 fold_has_test_split=fold.has_test_dates,
                 resume_latest=bool(args.resume_latest),

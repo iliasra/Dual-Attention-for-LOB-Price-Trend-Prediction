@@ -220,5 +220,6 @@ tracking:
     mode: auto # auto uses WANDB_MODE when set, otherwise online with offline fallback
     dir: null # null writes W&B files inside the fold log directory
     tags: []
+    log_training_steps: true
     log_best_checkpoint: true
     log_top_k_checkpoints: false

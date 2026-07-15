@@ -19,14 +19,34 @@ from action_value_training import ActionValueTrainer
 from configuration import ExperimentConfig
 from datasets import EpochShuffledSampler
 from model import build_model
-from run_logging import save_run_summary
+from run_logging import model_parameter_summary, save_run_config_snapshot, save_run_summary
 from run_training import (
     TRAINING_STATE_FILENAME,
     build_dataset,
     resolve_model_max_dt,
     resolve_resume_checkpoint,
+    resume_wandb_run_id,
 )
-from utils import seed_torch_worker, set_global_seed
+from utils import load_yaml, seed_torch_worker, set_global_seed
+from wandb_tracking import WandbTracker
+
+
+def flatten_numeric_payload(prefix: str, value: object) -> dict[str, float]:
+    """Flatten nested final metrics for W&B while excluding non-finite values."""
+    if isinstance(value, dict):
+        flattened: dict[str, float] = {}
+        for key, item in value.items():
+            flattened.update(flatten_numeric_payload(f"{prefix}_{key}", item))
+        return flattened
+    if isinstance(value, (list, tuple, np.ndarray)):
+        flattened = {}
+        for index, item in enumerate(value):
+            flattened.update(flatten_numeric_payload(f"{prefix}_{index}", item))
+        return flattened
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        numeric = float(value)
+        return {prefix: numeric} if np.isfinite(numeric) else {}
+    return {}
 
 
 def save_policy_frontier_artifacts(
@@ -116,6 +136,7 @@ def train_action_value_fold(
     fold_sequence_dir: Path,
     fold_log_dir: Path,
     fold_result_dir: Path,
+    run_stem: str,
     seed: int,
     fold_has_test_split: bool,
     resume_latest: bool = False,
@@ -195,14 +216,53 @@ def train_action_value_fold(
         d_input=int(sample_features.shape[-1]),
         output_dim=int(config.training.objective.regression_output_dim),
     )
-    trainer = ActionValueTrainer(config.training)
-    model, history = trainer.fit(
-        model,
-        train_loader,
-        validation_loader,
-        training_state_path=training_state_path,
-        resume_checkpoint_path=resume_checkpoint_path,
+    run_config_path = fold_log_dir / "config.yaml"
+    save_run_config_snapshot(
+        config,
+        run_config_path,
+        fold_id=fold_id,
+        model_parameters=model_parameter_summary(model),
     )
+    wandb_tracker = WandbTracker.init(
+        config.tracking.wandb,
+        run_stem=run_stem,
+        fold_id=fold_id,
+        fold_log_dir=fold_log_dir,
+        resume_run_id=resume_wandb_run_id(resume_checkpoint_path),
+        config_payload={
+            "run_stem": run_stem,
+            "fold_id": fold_id,
+            "seed": seed,
+            "objective": "action_value_regression",
+            "config_path": str(config.path),
+        },
+    )
+    wandb_tracker.update_config(load_yaml(run_config_path))
+    trainer = ActionValueTrainer(config.training)
+    try:
+        model, history = trainer.fit(
+            model,
+            train_loader,
+            validation_loader,
+            training_state_path=training_state_path,
+            resume_checkpoint_path=resume_checkpoint_path,
+            wandb_run_id=wandb_tracker.run_id,
+            validation_callback=lambda result, global_step, optimizer_step: (
+                wandb_tracker.log_action_value_validation(
+                    result,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                )
+            ),
+            training_step_callback=(
+                wandb_tracker.log_training_step
+                if wandb_tracker.enabled and config.tracking.wandb.log_training_steps
+                else None
+            ),
+        )
+    except Exception:
+        wandb_tracker.finish(exit_code=1)
+        raise
     validation_loss, validation_metrics = trainer.evaluate(
         model,
         validation_loader,
@@ -283,6 +343,7 @@ def train_action_value_fold(
         "max_dt": max_dt_summary,
         "best_checkpoint": str(trainer.selected_best_model_path or config.training.best_model_path),
         "training_state_path": str(training_state_path),
+        "wandb_run_id": wandb_tracker.run_id,
         "top_k_checkpoints": [str(item[2]) for item in trainer.top_checkpoints],
         "validation": {
             "loss": validation_loss,
@@ -298,9 +359,74 @@ def train_action_value_fold(
         "artifacts": {
             "history": str(history_path),
             "metrics": str(metrics_path),
+            "config": str(run_config_path),
         },
     }
     save_run_summary(summary, metrics_path)
+    final_global_step = int(getattr(trainer, "last_train_epoch_state", {}).get("global_step", 0))
+    final_payload: dict[str, object] = {
+        "global_step": final_global_step,
+        "selected/validation_loss": float(validation_loss),
+    }
+    for key, value in validation_metrics.to_dict().items():
+        if value is not None:
+            final_payload[f"selected/validation_{key}"] = value
+    if validation_frontier:
+        final_payload["selected/validation_policy_ap"] = float(validation_frontier[0]["policy_ap"])
+    if validation_quantile_calibration is not None:
+        for key, value in flatten_numeric_payload(
+            "validation_quantile_calibration",
+            validation_quantile_calibration,
+        ).items():
+            final_payload[f"selected/{key}"] = value
+    if test_payload is not None:
+        final_payload["selected/test_loss"] = float(test_payload["loss"])
+        for key, value in test_payload["metrics"].items():
+            if value is not None:
+                final_payload[f"selected/test_{key}"] = value
+        if test_payload.get("ranking_pnl_frontier"):
+            final_payload["selected/test_policy_ap"] = float(
+                test_payload["ranking_pnl_frontier"][0]["policy_ap"]
+            )
+        if test_payload.get("quantile_calibration") is not None:
+            for key, value in flatten_numeric_payload(
+                "test_quantile_calibration",
+                test_payload["quantile_calibration"],
+            ).items():
+                final_payload[f"selected/{key}"] = value
+    wandb_tracker.log_metrics(final_payload)
+    artifact_paths = [run_config_path, history_path, metrics_path, validation_outputs_path]
+    for artifacts in (validation_frontier_artifacts, validation_quantile_artifacts or {}):
+        artifact_paths.extend(Path(path) for path in artifacts.values())
+    if test_payload is not None:
+        if test_payload.get("outputs"):
+            artifact_paths.append(Path(str(test_payload["outputs"])))
+        artifact_paths.extend(
+            Path(path)
+            for path in test_payload.get("ranking_pnl_frontier_artifacts", {}).values()
+        )
+        artifact_paths.extend(
+            Path(path)
+            for path in test_payload.get("quantile_calibration_artifacts", {}).values()
+        )
+    wandb_tracker.log_artifact_files(
+        name=f"{run_stem}-{fold_id}-action-value-artifacts",
+        artifact_type="training-artifacts",
+        paths=artifact_paths,
+    )
+    if config.tracking.wandb.log_best_checkpoint:
+        wandb_tracker.log_artifact_files(
+            name=f"{run_stem}-{fold_id}-best-model",
+            artifact_type="model",
+            paths=[config.training.best_model_path],
+        )
+    if config.tracking.wandb.log_top_k_checkpoints:
+        wandb_tracker.log_artifact_files(
+            name=f"{run_stem}-{fold_id}-top-k-checkpoints",
+            artifact_type="model",
+            paths=[item[2] for item in trainer.top_checkpoints],
+        )
+    wandb_tracker.finish(exit_code=0)
     return summary
 
 

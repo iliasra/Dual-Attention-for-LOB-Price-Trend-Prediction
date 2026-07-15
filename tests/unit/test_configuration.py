@@ -343,6 +343,7 @@ def test_wandb_tracking_defaults_are_loaded() -> None:
     assert config.tracking.wandb.project == "lob-price-trend"
     assert config.tracking.wandb.mode == "auto"
     assert config.tracking.wandb.tags == ["INTC24"]
+    assert config.tracking.wandb.log_training_steps is True
     assert config.tracking.wandb.log_best_checkpoint is True
     assert config.tracking.wandb.log_top_k_checkpoints is False
 
@@ -1708,7 +1709,7 @@ def test_active_configs_use_expected_validation_schedule() -> None:
     fi2010 = ExperimentConfig.from_yaml(Path("configs/config_TLOB_F1_2010.yaml"))
     fi2010_2 = ExperimentConfig.from_yaml(Path("configs/config_TLOB_F1_2010_2.yaml"))
 
-    assert pipeline.training.validate_every_n_batches == "epoch"
+    assert pipeline.training.validate_every_n_batches == 5000
     assert pipeline.training.early_stopping_patience == 0
     assert pipeline.training.early_stopping_warmup == 0
     assert fi2010.training.validate_every_n_batches == "epoch"

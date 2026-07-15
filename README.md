@@ -227,6 +227,20 @@ export WANDB_PROJECT=lob-price-trend
 export WANDB_DIR="$PROJECT_DIR/logs/wandb"
 ```
 
+The same integration covers classification and action-value regression. With
+`tracking.wandb.log_training_steps: true`, every DataLoader batch is logged on
+the explicit `global_step` axis, and validation metrics are logged at the same
+axis without relying on W&B's internal step counter.
+
+Baselines opt in by receiving the same YAML and an optional shared group name:
+
+```bash
+python baselines/run_baselines.py --config configs/pipeline_config.yaml --run-stem INTC-baselines --sequence-dir data/sequences/fold2324 --output results/baselines/mlp.json --model mlp
+```
+
+PyTorch baselines log every mini-batch, XGBoost logs every boosting round, and
+non-iterative baselines log their final metrics and JSON artifact.
+
 For compute nodes without outbound network access, run with offline mode and
 sync after the job:
 
@@ -244,9 +258,9 @@ python scripts/run_training.py --config configs/pipeline_config.yaml --fold-id <
 
 The complete training-state checkpoint stores the model, optimizer, scheduler,
 AMP scaler, early-stopping state, RNG states, history, and top-k checkpoint
-metadata. Classification additionally stores its validation index and W&B run
-id. Action-value regression resumes at the next fully validated epoch boundary;
-it intentionally does not attempt a partial-epoch replay. A checkpoint from
+metadata. Both objectives store the validation index and W&B run id.
+Action-value regression also stores its batch/global-step position and resumes
+after the latest validated intra-epoch boundary. A checkpoint from
 `last_window` training is not resumed into `token_chunk` training, and an
 action-value checkpoint is not interchangeable with a classification state.
 
@@ -577,7 +591,8 @@ qsub -v TRAINING_RUN_STEM="$RUN_STEM",TRAINING_RESUME_ARGS=--resume-latest run_t
 ```
 
 For action-value regression, `training_state_latest.pth` is written after every
-validated epoch and resumes at the next epoch. Keep the same config, objective,
+configured validation interval and at epoch end. It resumes at the exact next
+batch using the deterministic epoch sampler. Keep the same config, objective,
 quantiles, gradient accumulation, supervision mode, and `TRAINING_RUN_STEM`.
 
 Action-value training uses BF16 autocast when the CUDA device supports it (for

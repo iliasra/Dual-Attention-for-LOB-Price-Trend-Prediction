@@ -11,7 +11,12 @@ pytest.importorskip("torch")
 
 from configuration import WandbTrackingConfig
 from training import ClassificationMetrics, EpochResult
-from wandb_tracking import WandbTracker, epoch_result_to_wandb_metrics, wandb_run_id
+from wandb_tracking import (
+    WandbTracker,
+    action_value_result_to_wandb_metrics,
+    epoch_result_to_wandb_metrics,
+    wandb_run_id,
+)
 
 
 class FakeArtifact:
@@ -29,7 +34,12 @@ class FakeRun:
         self.config = {}
         self.logged: list[tuple[dict[str, object], int | None]] = []
         self.artifacts: list[FakeArtifact] = []
+        self.metric_definitions: list[tuple[str, str | None]] = []
         self.finished = False
+        self.exit_code: int | None = None
+
+    def define_metric(self, name: str, step_metric: str | None = None) -> None:
+        self.metric_definitions.append((name, step_metric))
 
     def log(self, payload: dict[str, object], step: int | None = None) -> None:
         self.logged.append((payload, step))
@@ -39,6 +49,7 @@ class FakeRun:
 
     def finish(self, exit_code: int | None = None) -> None:
         self.finished = True
+        self.exit_code = exit_code
 
 
 class ConfigDict(dict):
@@ -97,12 +108,12 @@ def test_epoch_result_to_wandb_metrics_uses_validation_step_fields() -> None:
 
     assert payload["validation_index"] == 3
     assert payload["global_step"] == 1500
-    assert payload["val_macro_f1"] == 0.75
-    assert payload["val_directional_macro_f1"] == 0.6
-    assert payload["val_directional_precision_at_fixed_rate"] == 0.66
-    assert payload["val_directional_precision_at_fixed_rate_k"] == 10.0
-    assert payload["val_directional_precision_at_fixed_rate_actual_rate"] == 0.01
-    assert payload["monitor_value"] == 0.75
+    assert payload["validation/macro_f1"] == 0.75
+    assert payload["validation/directional_macro_f1"] == 0.6
+    assert payload["validation/directional_precision_at_fixed_rate"] == 0.66
+    assert payload["validation/directional_precision_at_fixed_rate_k"] == 10.0
+    assert payload["validation/directional_precision_at_fixed_rate_actual_rate"] == 0.01
+    assert payload["validation/monitor_value"] == 0.75
 
 
 def test_wandb_tracker_initializes_and_logs_with_fake_module(
@@ -135,11 +146,13 @@ def test_wandb_tracker_initializes_and_logs_with_fake_module(
     assert init_calls[0]["id"] == wandb_run_id("run a", "fold/001")
     assert init_calls[0]["resume"] == "allow"
     assert init_calls[0]["mode"] == "offline"
+    assert ("train/*", "global_step") in fake_run.metric_definitions
+    assert ("validation/*", "global_step") in fake_run.metric_definitions
 
     result = EpochResult(train_loss=1.0, val_loss=0.5, val_metrics=_metrics(), validation_index=4)
     tracker.log_validation(result, monitor_value=0.5)
-    assert fake_run.logged[0][1] == 4
-    assert fake_run.logged[0][0]["val_macro_f1"] == 0.75
+    assert fake_run.logged[0][1] is None
+    assert fake_run.logged[0][0]["validation/macro_f1"] == 0.75
 
     stepped_result = EpochResult(
         train_loss=0.9,
@@ -149,8 +162,8 @@ def test_wandb_tracker_initializes_and_logs_with_fake_module(
         global_step=128,
     )
     tracker.log_validation(stepped_result, monitor_value=0.4)
-    assert fake_run.logged[1][1] == 128
-    assert fake_run.logged[1][0]["val_loss"] == 0.4
+    assert fake_run.logged[1][1] is None
+    assert fake_run.logged[1][0]["validation/loss"] == 0.4
 
     tracker.log_training_step(
         {
@@ -165,11 +178,11 @@ def test_wandb_tracker_initializes_and_logs_with_fake_module(
             "learning_rate": 1e-4,
         }
     )
-    assert fake_run.logged[2][1] == 129
-    assert fake_run.logged[2][0]["train_loss_step"] == 0.123
+    assert fake_run.logged[2][1] is None
+    assert fake_run.logged[2][0]["train/loss_step"] == 0.123
     assert fake_run.logged[2][0]["optimizer_step"] == 64
-    assert fake_run.logged[2][0]["gradient_accumulation_steps"] == 2
-    assert fake_run.logged[2][0]["optimizer_step_completed"] is True
+    assert fake_run.logged[2][0]["train/gradient_accumulation_steps"] == 2
+    assert fake_run.logged[2][0]["train/optimizer_step_completed"] is True
 
     artifact_file = artifact_dir / "metrics.csv"
     artifact_file.write_text("epoch,val_loss\n1,0.5\n", encoding="utf-8")
@@ -177,3 +190,40 @@ def test_wandb_tracker_initializes_and_logs_with_fake_module(
     assert fake_run.artifacts[0].files == [str(artifact_file)]
     tracker.finish()
     assert fake_run.finished
+
+
+def test_action_value_metrics_are_namespaced_on_explicit_global_step() -> None:
+    result = SimpleNamespace(
+        epoch=2,
+        train_loss=0.7,
+        validation_loss=0.5,
+        monitor_value=1.25,
+        validation_index=3,
+        batch_in_epoch=5000,
+        checkpoint_label="epoch_0002_step_00030000",
+        validation_metrics=SimpleNamespace(
+            to_dict=lambda: {
+                "rank_ic_mean": 0.12,
+                "fixed_rate_mean_pnl_ticks": 1.25,
+                "fixed_rate_overlap_resolved_count": 4,
+            }
+        ),
+    )
+
+    payload = action_value_result_to_wandb_metrics(result, global_step=30000, optimizer_step=15000)
+
+    assert payload["global_step"] == 30000
+    assert payload["optimizer_step"] == 15000
+    assert payload["train/interval_loss"] == 0.7
+    assert payload["validation/rank_ic_mean"] == 0.12
+    assert payload["validation/fixed_rate_mean_pnl_ticks"] == 1.25
+
+
+def test_unclosed_wandb_tracker_marks_process_failure() -> None:
+    run = FakeRun()
+    tracker = WandbTracker(run=run, wandb_module=SimpleNamespace(), run_id="failed-run")
+
+    tracker._finish_unclosed()
+
+    assert run.finished is True
+    assert run.exit_code == 1

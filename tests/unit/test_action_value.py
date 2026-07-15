@@ -332,6 +332,7 @@ def test_action_value_training_state_resumes_at_next_epoch(artifact_dir: Path) -
     config.monitor_mode = "min"
     config.epochs = 1
     config.early_stopping_patience = 0
+    config.validate_every_n_batches = "epoch"
     config.model_dir = str(tmp_path)
     features = torch.tensor([[[0.0, 0.0], [1.0, -1.0]], [[0.0, 0.0], [-2.0, 2.0]]])
     targets = torch.tensor([[1.5, -0.5], [-1.0, 1.0]])
@@ -349,6 +350,21 @@ def test_action_value_training_state_resumes_at_next_epoch(artifact_dir: Path) -
     assert len(first_history) == 1
     assert state_path.exists()
 
+    legacy_state = torch.load(state_path, map_location="cpu", weights_only=False)
+    for key in (
+        "next_batch_in_epoch",
+        "global_step",
+        "optimizer_step",
+        "validation_index",
+        "interval_loss_sum",
+        "interval_rows",
+        "wandb_run_id",
+    ):
+        legacy_state.pop(key, None)
+    legacy_state["resume_signature"].pop("validate_every_n_batches", None)
+    legacy_state["resume_signature"].pop("validate_at_epoch_end", None)
+    torch.save(legacy_state, state_path)
+
     config.epochs = 2
     resumed_trainer = ActionValueTrainer(config)
     _, resumed_history = resumed_trainer.fit(
@@ -363,3 +379,179 @@ def test_action_value_training_state_resumes_at_next_epoch(artifact_dir: Path) -
     resumed_state = torch.load(state_path, map_location="cpu", weights_only=False)
     assert resumed_state["next_epoch"] == 3
     assert resumed_trainer.selected_best_model_path is not None
+
+
+def test_action_value_validates_and_checkpoints_at_batch_intervals(artifact_dir: Path) -> None:
+    class TinyActionValueModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.head = nn.Linear(2, 2)
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor, *, tokenwise: bool = False) -> torch.Tensor:
+            del t
+            values = self.head(x[..., :2])
+            return values if tokenwise else values[:, -1]
+
+    config = load_config().training
+    config.device = "cpu"
+    config.use_amp = False
+    config.optimizer = "adamw"
+    config.objective.type = "action_value_regression"
+    config.objective.loss = "huber"
+    config.objective.quantiles = ()
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.epochs = 1
+    config.gradient_accumulation_steps = 3
+    config.validate_every_n_batches = 2
+    config.validate_at_epoch_end = False
+    config.early_stopping_patience = 0
+    config.top_k_checkpoints = 2
+    config.model_dir = str(artifact_dir)
+    features = torch.tensor([[[0.0, 0.0], [1.0, -1.0]], [[0.0, 0.0], [-2.0, 2.0]]])
+    targets = torch.tensor([[1.5, -0.5], [-1.0, 1.0]])
+    batch = (features, torch.zeros((2, 2)), targets)
+    train_loader = [batch for _ in range(5)]
+    validation_loader = [batch]
+    state_path = artifact_dir / "training_state_latest.pth"
+    validation_steps: list[tuple[int, int]] = []
+    training_steps: list[dict[str, object]] = []
+
+    trainer = ActionValueTrainer(config)
+    _, history = trainer.fit(
+        TinyActionValueModel(),
+        train_loader,
+        validation_loader,
+        training_state_path=state_path,
+        validation_callback=lambda _result, global_step, optimizer_step: validation_steps.append(
+            (global_step, optimizer_step)
+        ),
+        training_step_callback=training_steps.append,
+    )
+
+    assert validation_steps == [(2, 1), (4, 2)]
+    assert [item.global_step for item in history] == [2, 4]
+    assert [item.checkpoint_label for item in history] == [
+        "epoch_0001_step_00000002",
+        "epoch_0001_step_00000004",
+    ]
+    assert len(training_steps) == 5
+    assert [step["optimizer_step_completed"] for step in training_steps] == [False, True, False, True, True]
+    state = torch.load(state_path, map_location="cpu", weights_only=False)
+    assert state["next_epoch"] == 2
+    assert state["next_batch_in_epoch"] == 1
+    assert state["global_step"] == 5
+    assert state["optimizer_step"] == 3
+    assert state["validation_index"] == 2
+    assert state["interval_rows"] == len(targets)
+    assert 1 <= len(trainer.top_checkpoints) <= 2
+    assert all(path.exists() for _value, _index, path in trainer.top_checkpoints)
+
+
+def test_action_value_resume_skips_batches_before_last_validation(artifact_dir: Path) -> None:
+    class TinyActionValueModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.head = nn.Linear(2, 2)
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor, *, tokenwise: bool = False) -> torch.Tensor:
+            del t
+            values = self.head(x[..., :2])
+            return values if tokenwise else values[:, -1]
+
+    config = load_config().training
+    config.device = "cpu"
+    config.use_amp = False
+    config.optimizer = "adamw"
+    config.objective.type = "action_value_regression"
+    config.objective.loss = "huber"
+    config.objective.quantiles = ()
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.epochs = 1
+    config.gradient_accumulation_steps = 2
+    config.validate_every_n_batches = 2
+    config.validate_at_epoch_end = False
+    config.early_stopping_patience = 0
+    config.model_dir = str(artifact_dir)
+    features = torch.tensor([[[0.0, 0.0], [1.0, -1.0]], [[0.0, 0.0], [-2.0, 2.0]]])
+    targets = torch.tensor([[1.5, -0.5], [-1.0, 1.0]])
+    batch = (features, torch.zeros((2, 2)), targets)
+    loader = [batch for _ in range(5)]
+    state_path = artifact_dir / "training_state_latest.pth"
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        ActionValueTrainer(config).fit(
+            TinyActionValueModel(),
+            loader,
+            [batch],
+            training_state_path=state_path,
+            wandb_run_id="wandb-action-run",
+            validation_callback=lambda *_args: (_ for _ in ()).throw(RuntimeError("simulated interruption")),
+        )
+
+    interrupted = torch.load(state_path, map_location="cpu", weights_only=False)
+    assert interrupted["next_epoch"] == 1
+    assert interrupted["next_batch_in_epoch"] == 3
+    assert interrupted["global_step"] == 2
+    assert interrupted["wandb_run_id"] == "wandb-action-run"
+    resumed_steps: list[dict[str, object]] = []
+    _, history = ActionValueTrainer(config).fit(
+        TinyActionValueModel(),
+        loader,
+        [batch],
+        training_state_path=state_path,
+        resume_checkpoint_path=state_path,
+        wandb_run_id="wandb-action-run",
+        training_step_callback=resumed_steps.append,
+    )
+
+    assert [step["batch_in_epoch"] for step in resumed_steps] == [3, 4, 5]
+    assert [step["global_step"] for step in resumed_steps] == [3, 4, 5]
+    assert [item.global_step for item in history] == [2, 4]
+
+
+def test_action_value_interval_early_stopping_counts_validations(artifact_dir: Path) -> None:
+    class ConstantActionValueModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bias = nn.Parameter(torch.zeros(2))
+
+        def forward(self, x: torch.Tensor, t: torch.Tensor, *, tokenwise: bool = False) -> torch.Tensor:
+            del t
+            values = self.bias.expand(*x.shape[:-1], 2)
+            return values if tokenwise else values[:, -1]
+
+    config = load_config().training
+    config.device = "cpu"
+    config.use_amp = False
+    config.optimizer = "adamw"
+    config.learning_rate = 0.0
+    config.objective.type = "action_value_regression"
+    config.objective.loss = "huber"
+    config.objective.quantiles = ()
+    config.monitor = "val_loss"
+    config.monitor_mode = "min"
+    config.epochs = 1
+    config.gradient_accumulation_steps = 1
+    config.validate_every_n_batches = 2
+    config.validate_at_epoch_end = False
+    config.early_stopping_patience = 1
+    config.early_stopping_warmup = 0
+    config.model_dir = str(artifact_dir)
+    features = torch.ones((2, 2, 2))
+    targets = torch.ones((2, 2))
+    batch = (features, torch.zeros((2, 2)), targets)
+    steps: list[dict[str, object]] = []
+
+    _, history = ActionValueTrainer(config).fit(
+        ConstantActionValueModel(),
+        [batch for _ in range(8)],
+        [batch],
+        training_state_path=artifact_dir / "training_state_latest.pth",
+        training_step_callback=steps.append,
+    )
+
+    assert len(history) == 2
+    assert [item.global_step for item in history] == [2, 4]
+    assert len(steps) == 4

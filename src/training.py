@@ -2179,12 +2179,18 @@ class LobTrainer:
                     or validation_boundary
                 )
                 grad_norm = None
+                optimizer_step_applied = False
                 if optimizer_step_completed:
+                    scale_before_step = float(self.scaler.get_scale())
                     self.scaler.unscale_(optimizer)
                     self._average_accumulated_gradients(model, accumulation_count)
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
                     self.scaler.step(optimizer)
                     self.scaler.update()
+                    optimizer_step_applied = (
+                        not self.scaler.is_enabled()
+                        or float(self.scaler.get_scale()) >= scale_before_step
+                    )
                     optimizer_step += 1
                     accumulation_count = 0
                 if profiler.enabled:
@@ -2221,6 +2227,9 @@ class LobTrainer:
                         "gradient_accumulation_steps": int(accumulation_steps),
                         "effective_batch_size_chunks": int(chunk_count * accumulation_steps),
                         "optimizer_step_completed": bool(optimizer_step_completed),
+                        "optimizer_step_applied": bool(optimizer_step_applied),
+                        "optimizer_step_skipped": bool(optimizer_step_completed and not optimizer_step_applied),
+                        "amp_scale": float(self.scaler.get_scale()),
                         "supervised_tokens_per_step": int(supervised_targets.numel()),
                         "chunks_per_step": chunk_count,
                     }
@@ -2228,7 +2237,7 @@ class LobTrainer:
                         step_payload["neutral_loss_weight"] = float(neutral_loss_weight)
                     if sample_weight_sum is not None:
                         step_payload["sample_weight_sum"] = float(sample_weight_sum)
-                    if grad_norm is not None:
+                    if grad_norm is not None and bool(torch.isfinite(grad_norm)):
                         step_payload["gradient_norm"] = float(grad_norm.item())
                     if moe_loss is not None:
                         step_payload["train_moe_loss_step"] = float(moe_loss.item())
@@ -2495,12 +2504,18 @@ class LobTrainer:
             is_last_batch = data_loader_length is not None and current_batch >= data_loader_length
             optimizer_step_completed = accumulation_count >= accumulation_steps or is_last_batch
             grad_norm = None
+            optimizer_step_applied = False
             if optimizer_step_completed:
+                scale_before_step = float(self.scaler.get_scale())
                 self.scaler.unscale_(optimizer)
                 self._average_accumulated_gradients(model, accumulation_count)
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clip_norm)
                 self.scaler.step(optimizer)
                 self.scaler.update()
+                optimizer_step_applied = (
+                    not self.scaler.is_enabled()
+                    or float(self.scaler.get_scale()) >= scale_before_step
+                )
                 optimizer_step_count += 1
                 accumulation_count = 0
             if profile_enabled and profiler is not None:
@@ -2536,6 +2551,9 @@ class LobTrainer:
                     "gradient_accumulation_steps": int(accumulation_steps),
                     "effective_batch_size_chunks": int(chunk_count * accumulation_steps),
                     "optimizer_step_completed": bool(optimizer_step_completed),
+                    "optimizer_step_applied": bool(optimizer_step_applied),
+                    "optimizer_step_skipped": bool(optimizer_step_completed and not optimizer_step_applied),
+                    "amp_scale": float(self.scaler.get_scale()),
                     "supervised_tokens_per_step": int(supervised_targets.numel()),
                     "chunks_per_step": chunk_count,
                 }
@@ -2543,7 +2561,7 @@ class LobTrainer:
                     step_payload["neutral_loss_weight"] = float(neutral_loss_weight)
                 if sample_weight_sum is not None:
                     step_payload["sample_weight_sum"] = float(sample_weight_sum)
-                if grad_norm is not None:
+                if grad_norm is not None and bool(torch.isfinite(grad_norm)):
                     step_payload["gradient_norm"] = float(grad_norm.item())
                 if moe_loss is not None:
                     step_payload["train_moe_loss_step"] = float(moe_loss.item())

@@ -2608,6 +2608,7 @@ class WandbTrackingConfig:
     mode: str = "auto"
     dir: str | None = None
     tags: list[str] = field(default_factory=list)
+    log_training_steps: bool = True
     log_best_checkpoint: bool = True
     log_top_k_checkpoints: bool = False
 
@@ -2636,6 +2637,11 @@ class WandbTrackingConfig:
             mode=str(payload.get("mode", "auto")),
             dir=None if payload.get("dir") is None else str(payload.get("dir")),
             tags=list(tags),
+            log_training_steps=_optional_bool(
+                payload.get("log_training_steps"),
+                "tracking.wandb.log_training_steps",
+                default=True,
+            ),
             log_best_checkpoint=_optional_bool(
                 payload.get("log_best_checkpoint"),
                 "tracking.wandb.log_best_checkpoint",
@@ -2696,10 +2702,6 @@ class ExperimentConfig:
             if self.training.monitor_mode != expected_mode:
                 raise ValueError(
                     f"training.monitor_mode must be '{expected_mode}' for {self.training.monitor}."
-                )
-            if not self.training.validates_by_epoch:
-                raise ValueError(
-                    "action_value_regression currently requires training.validate_every_n_batches='epoch'."
                 )
             if self.training.temperature_scaling.enabled or self.training.directional_thresholds.enabled:
                 raise ValueError(

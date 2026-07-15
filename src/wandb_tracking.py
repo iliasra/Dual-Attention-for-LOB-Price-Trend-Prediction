@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import importlib
 import os
 import re
@@ -48,7 +49,23 @@ def _metrics(prefix: str, metrics: ClassificationMetrics | None) -> dict[str, fl
     ):
         value = _optional_float(getattr(metrics, name, None))
         if value is not None:
-            values[f"{prefix}_{name}"] = value
+            values[f"{prefix}/{name}"] = value
+    for name in (
+        "per_class_pr_ap",
+        "per_class_pr_auc",
+        "per_class_roc_auc",
+        "per_class_precision",
+        "per_class_recall",
+        "per_class_f1",
+        "per_class_expected_calibration_error",
+    ):
+        sequence = getattr(metrics, name, None)
+        if sequence is None:
+            continue
+        for class_index, item in enumerate(sequence):
+            value = _optional_float(item)
+            if value is not None:
+                values[f"{prefix}/{name}/class_{class_index}"] = value
     return values
 
 
@@ -59,24 +76,26 @@ def epoch_result_to_wandb_metrics(
 ) -> dict[str, Any]:
     """Convert one validation result to a W&B-friendly metric payload."""
     payload: dict[str, Any] = {
-        "train_loss": float(result.train_loss),
-        "val_loss": float(result.val_loss),
+        "train/loss": float(result.train_loss),
+        "validation/loss": float(result.val_loss),
     }
-    for key in ("epoch", "validation_index", "batch_in_epoch", "global_step", "checkpoint_label"):
+    for key in ("epoch", "validation_index", "batch_in_epoch", "global_step"):
         value = getattr(result, key)
         if value is not None:
             payload[key] = value
+    if result.checkpoint_label is not None:
+        payload["validation/checkpoint_label"] = result.checkpoint_label
     if monitor_value is not None:
-        payload["monitor_value"] = float(monitor_value)
+        payload["validation/monitor_value"] = float(monitor_value)
 
     payload.update(_metrics("train", result.train_metrics))
-    payload.update(_metrics("val", result.val_metrics))
+    payload.update(_metrics("validation", result.val_metrics))
     if result.test_metrics is not None:
         payload.update(_metrics("test", result.test_metrics))
     if result.val_argmax_metrics is not None:
-        payload.update(_metrics("val_argmax", result.val_argmax_metrics))
+        payload.update(_metrics("validation/argmax", result.val_argmax_metrics))
     if result.test_argmax_metrics is not None:
-        payload.update(_metrics("test_argmax", result.test_argmax_metrics))
+        payload.update(_metrics("test/argmax", result.test_argmax_metrics))
     for prefix, values in (
         ("val_threshold", result.val_threshold_metrics),
         ("test_threshold", result.test_threshold_metrics),
@@ -86,22 +105,83 @@ def epoch_result_to_wandb_metrics(
         for key, value in values.items():
             numeric = _optional_float(value)
             if numeric is not None:
-                payload[f"{prefix}_{key}"] = numeric
+                namespace = "validation" if prefix.startswith("val") else "test"
+                payload[f"{namespace}/{prefix}_{key}"] = numeric
     if result.test_pnl_metrics:
         for key, value in result.test_pnl_metrics.items():
             numeric = _optional_float(value)
             if numeric is not None:
-                payload[key] = numeric
+                payload[f"test/{key}"] = numeric
     return payload
+
+
+def action_value_result_to_wandb_metrics(
+    result: Any,
+    *,
+    global_step: int,
+    optimizer_step: int,
+) -> dict[str, Any]:
+    """Convert one action-value validation result to namespaced W&B scalars."""
+    payload: dict[str, Any] = {
+        "global_step": int(global_step),
+        "optimizer_step": int(optimizer_step),
+        "epoch": int(result.epoch),
+        "train/interval_loss": float(result.train_loss),
+        "validation/loss": float(result.validation_loss),
+        "validation/monitor_value": float(result.monitor_value),
+    }
+    for key, value in result.validation_metrics.to_dict().items():
+        numeric = _optional_float(value)
+        if numeric is not None:
+            payload[f"validation/{key}"] = numeric
+    for name in ("validation_index", "batch_in_epoch"):
+        value = getattr(result, name, None)
+        if value is not None:
+            payload[name] = int(value)
+    checkpoint_label = getattr(result, "checkpoint_label", None)
+    if checkpoint_label:
+        payload["validation/checkpoint_label"] = str(checkpoint_label)
+    return payload
+
+
+def _namespaced_training_step(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep counters explicit and put per-step diagnostics under ``train/``."""
+    counters = {"global_step", "optimizer_step", "epoch", "batch_in_epoch"}
+    converted: dict[str, Any] = {key: value for key, value in payload.items() if key in counters}
+    aliases = {
+        "train_loss_step": "loss_step",
+        "train_base_loss_step": "base_loss_step",
+        "train_auxiliary_loss_step": "auxiliary_loss_step",
+        "train_moe_loss_step": "moe_loss_step",
+        "train_central_loss_step": "central_loss_step",
+        "train_quantile_loss_step": "quantile_loss_step",
+        "train_quantile_crossing_loss_step": "quantile_crossing_loss_step",
+    }
+    for key, value in payload.items():
+        if key in counters:
+            continue
+        converted[f"train/{aliases.get(key, key)}"] = value
+    return converted
 
 
 class WandbTracker:
     """Small optional W&B adapter that keeps training code independent from wandb."""
 
-    def __init__(self, run: Any | None = None, wandb_module: Any | None = None, run_id: str | None = None) -> None:
+    def __init__(
+        self,
+        run: Any | None = None,
+        wandb_module: Any | None = None,
+        run_id: str | None = None,
+        *,
+        log_training_steps: bool = True,
+    ) -> None:
         self.run = run
         self._wandb = wandb_module
         self.run_id = run_id
+        self.log_training_steps_enabled = bool(log_training_steps)
+        self._finished = False
+        if self.enabled:
+            atexit.register(self._finish_unclosed)
 
     @property
     def enabled(self) -> bool:
@@ -158,7 +238,14 @@ class WandbTracker:
                 run = wandb.init(**init_kwargs, mode=mode)
                 if index > 0:
                     print("W&B online initialization failed; using offline mode.")
-                return cls(run=run, wandb_module=wandb, run_id=run_id)
+                tracker = cls(
+                    run=run,
+                    wandb_module=wandb,
+                    run_id=run_id,
+                    log_training_steps=config.log_training_steps,
+                )
+                tracker._define_metrics()
+                return tracker
             except Exception as exc:  # pragma: no cover - depends on W&B/network state.
                 last_error = exc
                 if mode != "online":
@@ -175,24 +262,50 @@ class WandbTracker:
         except Exception as exc:  # pragma: no cover - defensive against W&B runtime state.
             print(f"W&B config update failed ({exc}); continuing.")
 
+    def _define_metrics(self) -> None:
+        if not self.enabled or not hasattr(self.run, "define_metric"):
+            return
+        try:
+            self.run.define_metric("global_step")
+            for namespace in ("train/*", "validation/*", "test/*", "selected/*"):
+                self.run.define_metric(namespace, step_metric="global_step")
+        except Exception as exc:  # pragma: no cover - depends on W&B runtime state.
+            print(f"W&B metric definition failed ({exc}); continuing.")
+
+    def log_metrics(self, payload: dict[str, Any]) -> None:
+        """Log one payload without relying on W&B's internal step argument."""
+        if not self.enabled:
+            return
+        try:
+            self.run.log(payload)
+        except Exception as exc:  # pragma: no cover - defensive against W&B runtime state.
+            print(f"W&B metric logging failed ({exc}); continuing.")
+
     def log_validation(self, result: EpochResult, *, monitor_value: float | None = None) -> None:
         if not self.enabled:
             return
         payload = epoch_result_to_wandb_metrics(result, monitor_value=monitor_value)
-        step = payload.get("global_step") or payload.get("validation_index")
-        try:
-            self.run.log(payload, step=None if step is None else int(step))
-        except Exception as exc:  # pragma: no cover - defensive against W&B runtime state.
-            print(f"W&B metric logging failed ({exc}); continuing.")
+        self.log_metrics(payload)
+
+    def log_action_value_validation(
+        self,
+        result: Any,
+        *,
+        global_step: int,
+        optimizer_step: int,
+    ) -> None:
+        self.log_metrics(
+            action_value_result_to_wandb_metrics(
+                result,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+            )
+        )
 
     def log_training_step(self, payload: dict[str, Any]) -> None:
-        if not self.enabled:
+        if not self.enabled or not self.log_training_steps_enabled:
             return
-        step = payload.get("global_step")
-        try:
-            self.run.log(payload, step=None if step is None else int(step))
-        except Exception as exc:  # pragma: no cover - defensive against W&B runtime state.
-            print(f"W&B training-step logging failed ({exc}); continuing.")
+        self.log_metrics(_namespaced_training_step(payload))
 
     def log_artifact_files(self, *, name: str, artifact_type: str, paths: list[Path]) -> None:
         if not self.enabled:
@@ -209,12 +322,18 @@ class WandbTracker:
             print(f"W&B artifact logging failed ({exc}); continuing.")
 
     def finish(self, *, exit_code: int | None = None) -> None:
-        if not self.enabled:
+        if not self.enabled or self._finished:
             return
         try:
             if exit_code is None:
                 self.run.finish()
             else:
                 self.run.finish(exit_code=exit_code)
+            self._finished = True
         except Exception as exc:  # pragma: no cover - defensive against W&B runtime state.
             print(f"W&B finish failed ({exc}); continuing.")
+
+    def _finish_unclosed(self) -> None:
+        """Mark an uncaught process failure when a caller could not finish explicitly."""
+        if self.enabled and not self._finished:
+            self.finish(exit_code=1)
