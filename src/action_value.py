@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 
@@ -8,6 +8,9 @@ try:
     from monitoring import exclusive_directional_top_k
 except ImportError:  # pragma: no cover
     from .monitoring import exclusive_directional_top_k
+
+
+ACTION_VALUE_METRICS_SCHEMA_VERSION = 2
 
 
 def _average_ranks(values: np.ndarray) -> np.ndarray:
@@ -40,7 +43,12 @@ def spearman_rank_correlation(predictions: np.ndarray, targets: np.ndarray) -> f
 
 
 def binary_average_precision(scores: np.ndarray, positives: np.ndarray) -> float:
-    """Return non-interpolated average precision for a binary economic event."""
+    """Return threshold-based average precision for a binary economic event.
+
+    Equal scores are evaluated as one threshold group. This makes the metric
+    independent of row order and gives a constant score exactly the event
+    prevalence, instead of rewarding whichever labels happen to appear first.
+    """
     score = np.asarray(scores, dtype=np.float64).reshape(-1)
     positive = np.asarray(positives, dtype=bool).reshape(-1)
     valid = np.isfinite(score)
@@ -50,9 +58,20 @@ def binary_average_precision(scores: np.ndarray, positives: np.ndarray) -> float
     if positive_count == 0:
         return 0.0
     order = np.argsort(-score, kind="mergesort")
+    ranked_score = score[order]
     ranked_positive = positive[order].astype(np.float64)
-    precision = np.cumsum(ranked_positive) / np.arange(1, len(order) + 1, dtype=np.float64)
-    return float(np.sum(precision * ranked_positive) / positive_count)
+    cumulative_true_positive = np.cumsum(ranked_positive)
+
+    # One PR point per distinct score threshold, including the final row.
+    threshold_ends = np.flatnonzero(
+        np.r_[ranked_score[1:] != ranked_score[:-1], True]
+    )
+    true_positive = cumulative_true_positive[threshold_ends]
+    predicted_positive = threshold_ends.astype(np.float64) + 1.0
+    precision_at_threshold = true_positive / predicted_positive
+    recall_at_threshold = true_positive / float(positive_count)
+    recall_increment = np.diff(np.r_[0.0, recall_at_threshold])
+    return float(np.sum(recall_increment * precision_at_threshold))
 
 
 def action_value_quantile_calibration(
@@ -130,7 +149,13 @@ def action_value_quantile_calibration(
 
 @dataclass(frozen=True, slots=True)
 class ActionValueMetrics:
-    """Ranking and executable-PnL metrics for long/short value regression."""
+    """Ranking and executable-PnL metrics for long/short value regression.
+
+    ``oracle_mean_pnl_ticks`` is the economic oracle averaged over every row:
+    it may choose long, short, or no-trade (zero PnL). The zeros from no-trade
+    rows remain in the denominator. ``forced_oracle_mean_pnl_ticks`` is the
+    legacy diagnostic that must choose either long or short on every row.
+    """
 
     n: int
     mae_long_ticks: float
@@ -151,9 +176,26 @@ class ActionValueMetrics:
     fixed_rate_win_rate: float
     fixed_rate_overlap_resolved_count: int
     oracle_mean_pnl_ticks: float
+    forced_oracle_mean_pnl_ticks: float = 0.0
 
     def to_dict(self) -> dict[str, int | float | None]:
-        return asdict(self)
+        """Serialize metrics while making pre-schema-v2 objects unambiguous.
+
+        Old checkpoints may unpickle an object without the newly added forced
+        oracle slot. In that case their ``oracle_mean_pnl_ticks`` was actually
+        the forced oracle. Preserve it under the explicit legacy name and mark
+        the unavailable economic oracle as null instead of silently relabeling
+        the historical value.
+        """
+        payload = {
+            metric_field.name: getattr(self, metric_field.name)
+            for metric_field in fields(self)
+            if hasattr(self, metric_field.name)
+        }
+        if not hasattr(self, "forced_oracle_mean_pnl_ticks"):
+            payload["forced_oracle_mean_pnl_ticks"] = float(self.oracle_mean_pnl_ticks)
+            payload["oracle_mean_pnl_ticks"] = None
+        return payload
 
 
 def _pnl_summary(values: np.ndarray) -> tuple[int, float, float, float]:
@@ -209,6 +251,7 @@ def action_value_metrics(
             fixed_rate_win_rate=0.0,
             fixed_rate_overlap_resolved_count=0,
             oracle_mean_pnl_ticks=0.0,
+            forced_oracle_mean_pnl_ticks=0.0,
         )
 
     rank_long = spearman_rank_correlation(predicted[:, 0], realized[:, 0])
@@ -236,6 +279,8 @@ def action_value_metrics(
         fixed_count, fixed_mean, fixed_total, fixed_win = _pnl_summary(fixed_pnl)
         fixed_actual_rate = float(fixed_count / n_samples)
 
+    forced_oracle_pnl = np.maximum(realized[:, 0], realized[:, 1])
+    economic_oracle_pnl = np.maximum(forced_oracle_pnl, 0.0)
     return ActionValueMetrics(
         n=n_samples,
         mae_long_ticks=float(np.mean(np.abs(predicted[:, 0] - realized[:, 0]))),
@@ -255,7 +300,8 @@ def action_value_metrics(
         fixed_rate_total_pnl_ticks=fixed_total,
         fixed_rate_win_rate=fixed_win,
         fixed_rate_overlap_resolved_count=overlap_count,
-        oracle_mean_pnl_ticks=float(np.maximum(realized[:, 0], realized[:, 1]).mean()),
+        oracle_mean_pnl_ticks=float(economic_oracle_pnl.mean()),
+        forced_oracle_mean_pnl_ticks=float(forced_oracle_pnl.mean()),
     )
 
 

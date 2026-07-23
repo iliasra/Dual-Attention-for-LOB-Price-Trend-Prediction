@@ -25,6 +25,7 @@ from calibration import (
     save_temperature_scaling_artifact,
 )
 from datasets import (
+    attach_evaluation_metadata,
     EpochNeutralDownsamplingSampler,
     EpochShuffledSampler,
     LOBDataset,
@@ -79,6 +80,24 @@ from wandb_tracking import WandbTracker
 
 
 TRAINING_STATE_FILENAME = "training_state_latest.pth"
+
+
+def resolve_test_evaluation_plan(
+    *,
+    evaluate_test_after_fit: bool,
+    fold_has_test_split: bool | None,
+) -> tuple[bool, str | None]:
+    """Decide whether a runner may open the test split.
+
+    The configuration gate takes precedence over split availability so
+    development runs cannot inspect test data even when test dates exist.
+    """
+    if not evaluate_test_after_fit:
+        return False, "training.evaluate_test_after_fit=false"
+    if fold_has_test_split is False:
+        return False, "fold has no configured test split"
+    return True, None
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train LOB model on one or more folds.")
@@ -189,8 +208,14 @@ def build_dataset(
     config: ExperimentConfig,
     *,
     preload_to_memory: bool = False,
+    supervision_support: str = "common",
+    supervision_time_window: tuple[float, float] | None = None,
 ) -> LOBDataset | LOBTokenChunkDataset:
     x_paths, t_paths, y_paths = sequence_paths(sequence_dir, split)
+    configured_window = config.training.supervision_time_window
+    resolved_time_window = supervision_time_window
+    if resolved_time_window is None and configured_window.enabled:
+        resolved_time_window = (float(configured_window.start_seconds), float(configured_window.end_seconds))
     if config.training.sequence_supervision.token_chunk_enabled:
         stride = config.training.sequence_supervision.resolved_chunk_stride(config.data.sequence_window)
         dataset = LOBTokenChunkDataset(
@@ -201,6 +226,8 @@ def build_dataset(
             loss_warmup_tokens=int(config.training.sequence_supervision.loss_warmup_tokens or 0),
             chunk_stride=stride,
             preload_to_memory=preload_to_memory,
+            supervision_support=supervision_support,
+            supervision_time_window=resolved_time_window,
         )
     else:
         dataset = LOBDataset(
@@ -209,6 +236,8 @@ def build_dataset(
             y_paths,
             sequence_window=config.data.sequence_window,
             preload_to_memory=preload_to_memory,
+            supervision_support=supervision_support,
+            supervision_time_window=resolved_time_window,
         )
     validate_prepared_target_contract(sequence_dir, split, config, dataset)
     if preload_to_memory:
@@ -1566,7 +1595,17 @@ def train_fold(
         )
 
     test_dataset: LOBDataset | None = None
-    if fold_has_test_split is False:
+    open_test_split, test_skip_reason = resolve_test_evaluation_plan(
+        evaluate_test_after_fit=config.training.evaluate_test_after_fit,
+        fold_has_test_split=fold_has_test_split,
+    )
+    if not open_test_split and not config.training.evaluate_test_after_fit:
+        has_test_split = False
+        print(
+            f"Fold '{fold_id}' test evaluation disabled by training.evaluate_test_after_fit; "
+            "the test dataset will not be opened."
+        )
+    elif not open_test_split:
         has_test_split = False
         print(f"Fold '{fold_id}' has no configured test split; test evaluation will be skipped.")
     else:
@@ -1583,6 +1622,7 @@ def train_fold(
                 "Test dates must be configured and preprocessed explicitly."
             )
         if not has_test_split:
+            test_skip_reason = "fold has no configured test split"
             print(f"Fold '{fold_id}' has no configured test split; test evaluation will be skipped.")
 
     max_dt_summary = resolve_model_max_dt(config, train_dataset)
@@ -1945,6 +1985,15 @@ def train_fold(
             f"train_macro_f1={train_confusion_metrics.macro_f1:.4f} "
             f"({format_duration(train_confusion_duration_seconds)})."
         )
+    validation_outputs_for_artifacts = attach_evaluation_metadata(
+        validation_outputs_for_artifacts,
+        validation_dataset,
+    )
+    if test_outputs_for_artifacts is not None and test_dataset is not None:
+        test_outputs_for_artifacts = attach_evaluation_metadata(
+            test_outputs_for_artifacts,
+            test_dataset,
+        )
     save_probability_outputs(validation_outputs_for_artifacts, validation_probabilities_path, config)
     if test_outputs_for_artifacts is not None and test_probabilities_path is not None:
         save_probability_outputs(test_outputs_for_artifacts, test_probabilities_path, config)
@@ -1958,7 +2007,7 @@ def train_fold(
         checkpoint_label=best_checkpoint_label,
         fold=fold_id,
     )
-    pnl_result = skipped_pnl_result("fold has no configured test split")
+    pnl_result = skipped_pnl_result(test_skip_reason or "test outputs are unavailable")
     if test_outputs_for_artifacts is not None and test_dataset is not None:
         try:
             pnl_result = compute_pnl_from_prediction_outputs(
@@ -2196,6 +2245,8 @@ def train_fold(
         "best_model_path": str(config.training.best_model_path),
         "training_state_path": str(training_state_path),
         "wandb_run_id": wandb_tracker.run_id,
+        "test_evaluation_skipped": test_loader is None,
+        "test_evaluation_skip_reason": test_skip_reason,
         "model_max_dt": max_dt_summary,
         "class_weights": class_weight_summary,
         "auxiliary_losses": auxiliary_loss_summary,

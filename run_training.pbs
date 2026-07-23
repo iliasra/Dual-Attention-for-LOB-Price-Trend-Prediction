@@ -274,6 +274,8 @@ rsync -a \
   --exclude="data" \
   --exclude="logs" \
   --exclude="results" \
+  --exclude="output" \
+  --exclude="backtest" \
   "$PROJECT_DIR/" "$WORK_DIR/"
 
 echo

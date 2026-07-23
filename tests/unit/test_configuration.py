@@ -14,11 +14,36 @@ def _as_classification_config(payload: dict) -> dict:
     payload["data"]["target_columns"] = None
     payload["preprocessing"]["labels"]["strategy"] = "smoothing"
     payload["training"]["objective"]["type"] = "classification"
+    payload["training"]["objective"]["loss"] = "cross_entropy"
     payload["training"]["monitor"] = "val_loss"
     payload["training"]["monitor_mode"] = "min"
     payload["training"]["temperature_scaling"]["enabled"] = False
     payload["training"]["directional_thresholds"]["enabled"] = False
     return payload
+
+
+def test_objective_loss_matches_objective_type(artifact_dir: Path) -> None:
+    payload = yaml.safe_load(load_config().path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
+    path = artifact_dir / "classification_cross_entropy.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(path)
+    assert loaded.training.objective.loss == "cross_entropy"
+
+    payload["training"]["objective"]["type"] = "action_value_regression"
+    payload["training"]["objective"]["loss"] = "cross_entropy"
+    payload["preprocessing"]["labels"]["strategy"] = "executable_return"
+    payload["data"]["target_columns"] = [
+        "long_net_return_ticks",
+        "short_net_return_ticks",
+    ]
+    payload["training"]["monitor"] = "val_rank_ic"
+    payload["training"]["monitor_mode"] = "max"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires a regression loss"):
+        ExperimentConfig.from_yaml(path)
 
 
 @pytest.fixture()
@@ -300,6 +325,28 @@ def test_training_sequence_supervision_token_chunk_settings_are_loaded(artifact_
     assert loaded.training.sequence_supervision.resolved_chunk_stride(loaded.data.sequence_window) == 128
 
 
+def test_training_supervision_time_window_is_loaded_and_validated(artifact_dir: Path) -> None:
+    payload = yaml.safe_load(load_config().path.read_text(encoding="utf-8"))
+    payload["training"]["supervision_time_window"] = {
+        "enabled": True,
+        "start_seconds": 34200.0,
+        "end_seconds": 37800.0,
+    }
+    path = artifact_dir / "early.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(path)
+
+    assert loaded.training.supervision_time_window.enabled
+    assert loaded.training.supervision_time_window.start_seconds == 34200.0
+    assert loaded.training.supervision_time_window.end_seconds == 37800.0
+
+    payload["training"]["supervision_time_window"]["end_seconds"] = 34000.0
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="supervision_time_window must satisfy"):
+        ExperimentConfig.from_yaml(path)
+
+
 def test_training_sequence_supervision_accepts_legacy_neutral_sampling(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
@@ -340,6 +387,7 @@ def test_wandb_tracking_defaults_are_loaded() -> None:
     config = load_config()
 
     assert config.tracking.wandb.enabled is True
+    assert config.tracking.wandb.required is False
     assert config.tracking.wandb.project == "lob-price-trend"
     assert config.tracking.wandb.mode == "auto"
     assert config.tracking.wandb.tags == ["INTC24"]
@@ -376,6 +424,44 @@ def test_wandb_tracking_settings_are_validated(artifact_dir: Path) -> None:
     assert loaded.tracking.wandb.enabled is True
     assert loaded.tracking.wandb.mode == "offline"
     assert loaded.tracking.wandb.tags == ["hpc"]
+
+
+def test_wandb_required_settings_are_validated(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding='utf-8'))
+    wandb = payload['tracking']['wandb']
+
+    wandb['enabled'] = False
+    wandb['required'] = True
+    config_path = artifact_dir / 'wandb_required_but_disabled.yaml'
+    config_path.write_text(yaml.safe_dump(payload), encoding='utf-8')
+    with pytest.raises(ValueError, match='required=true requires.*enabled=true'):
+        ExperimentConfig.from_yaml(config_path)
+
+    wandb['enabled'] = True
+    wandb['mode'] = 'disabled'
+    config_path = artifact_dir / 'wandb_required_disabled_mode.yaml'
+    config_path.write_text(yaml.safe_dump(payload), encoding='utf-8')
+    with pytest.raises(ValueError, match='required=true is incompatible.*mode=disabled'):
+        ExperimentConfig.from_yaml(config_path)
+
+    wandb['mode'] = 'auto'
+    config_path = artifact_dir / 'wandb_required_auto.yaml'
+    config_path.write_text(yaml.safe_dump(payload), encoding='utf-8')
+    loaded = ExperimentConfig.from_yaml(config_path)
+    assert loaded.tracking.wandb.enabled is True
+    assert loaded.tracking.wandb.required is True
+
+
+def test_wandb_required_must_be_boolean(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding='utf-8'))
+    payload['tracking']['wandb']['required'] = 'maybe'
+    config_path = artifact_dir / 'wandb_required_not_boolean.yaml'
+    config_path.write_text(yaml.safe_dump(payload), encoding='utf-8')
+
+    with pytest.raises(ValueError, match=r'tracking\.wandb\.required'):
+        ExperimentConfig.from_yaml(config_path)
 
 
 def test_fast_kinematic_config_values_are_loaded() -> None:
@@ -1385,6 +1471,27 @@ def test_training_validate_every_n_batches_defaults_to_epoch_and_validates(artif
             ExperimentConfig.from_yaml(config_path)
 
 
+def test_training_evaluate_test_after_fit_is_optional_and_boolean(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["training"].pop("evaluate_test_after_fit", None)
+    config_path = artifact_dir / "legacy_without_test_gate.yaml"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(config_path)
+    assert loaded.training.evaluate_test_after_fit is True
+
+    payload["training"]["evaluate_test_after_fit"] = False
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    loaded = ExperimentConfig.from_yaml(config_path)
+    assert loaded.training.evaluate_test_after_fit is False
+
+    payload["training"]["evaluate_test_after_fit"] = "nope"
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="evaluate_test_after_fit"):
+        ExperimentConfig.from_yaml(config_path)
+
+
 def test_training_tailored_monitor_requires_params_and_max_mode(artifact_dir: Path) -> None:
     config = load_config()
     payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
@@ -1747,6 +1854,107 @@ def test_action_value_regression_config_is_cross_validated(artifact_dir: Path) -
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="target_columns"):
         ExperimentConfig.from_yaml(path)
+
+
+def test_classification_requires_null_target_columns(artifact_dir: Path) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
+    payload["data"]["target_columns"] = ["trend_label"]
+    path = artifact_dir / "classification_with_target_columns.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match=r"classification requires data\.target_columns=null",
+    ):
+        ExperimentConfig.from_yaml(path)
+
+
+@pytest.mark.parametrize(
+    "excluded_columns,missing_column",
+    [
+        ([], "long_net_return_ticks"),
+        (["long_net_return_ticks"], "short_net_return_ticks"),
+        (["short_net_return_ticks"], "long_net_return_ticks"),
+    ],
+)
+def test_executable_return_classification_requires_both_target_exclusions(
+    artifact_dir: Path,
+    excluded_columns: list[str],
+    missing_column: str,
+) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
+    payload["preprocessing"]["labels"]["strategy"] = "executable_return"
+    payload["data"]["feature_exclude_columns"] = excluded_columns
+    path = artifact_dir / f"missing_{missing_column}.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=missing_column):
+        ExperimentConfig.from_yaml(path)
+
+
+def test_executable_return_classification_accepts_both_target_exclusions(
+    artifact_dir: Path,
+) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    _as_classification_config(payload)
+    payload["preprocessing"]["labels"]["strategy"] = "executable_return"
+    payload["data"]["feature_exclude_columns"] = [
+        "long_net_return_ticks",
+        "short_net_return_ticks",
+    ]
+    path = artifact_dir / "safe_executable_classification.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(path)
+
+    assert loaded.data.target_columns is None
+
+
+@pytest.mark.parametrize(
+    "target_columns",
+    [
+        ["short_net_return_ticks", "long_net_return_ticks"],
+        ["long_net_return_ticks", "other_target"],
+        ["long_net_return_ticks", "short_net_return_ticks", "other_target"],
+    ],
+)
+def test_action_value_regression_requires_exact_ordered_target_columns(
+    artifact_dir: Path,
+    target_columns: list[str],
+) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["data"]["target_columns"] = target_columns
+    path = artifact_dir / "invalid_regression_targets.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exactly"):
+        ExperimentConfig.from_yaml(path)
+
+
+@pytest.mark.parametrize(
+    "feature_exclude_columns",
+    [[], ["long_net_return_ticks", "short_net_return_ticks"]],
+)
+def test_action_value_regression_allows_optional_redundant_feature_exclusions(
+    artifact_dir: Path,
+    feature_exclude_columns: list[str],
+) -> None:
+    config = load_config()
+    payload = yaml.safe_load(config.path.read_text(encoding="utf-8"))
+    payload["data"]["feature_exclude_columns"] = feature_exclude_columns
+    path = artifact_dir / "regression_feature_exclusions.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    loaded = ExperimentConfig.from_yaml(path)
+
+    assert loaded.training.objective.is_regression
+    assert loaded.data.feature_exclude_columns == feature_exclude_columns
 
 
 def test_directional_threshold_config_validates_methods_and_floors(artifact_dir: Path) -> None:

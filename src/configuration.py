@@ -35,6 +35,9 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
     "preprocessing": {
         "snapshot_window": None,
         "save_processed_dataframes": None,
+        "common_endpoint_support": {
+            "enabled": None,
+        },
         "labels": {
             "strategy": None,
             "smoothing": {
@@ -222,6 +225,7 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
         "early_stopping_min_delta": None,
         "validate_every_n_batches": None,
         "validate_at_epoch_end": None,
+        "evaluate_test_after_fit": None,
         "monitor": None,
         "monitor_mode": None,
         "top_k_checkpoints": None,
@@ -287,6 +291,11 @@ REQUIRED_CONFIG_SCHEMA: dict[str, Any] = {
             "neutral_weighting": None,
             "neutral_sampling": None,
         },
+        "supervision_time_window": {
+            "enabled": None,
+            "start_seconds": None,
+            "end_seconds": None,
+        },
         "objective": {
             "type": None,
             "loss": None,
@@ -337,6 +346,7 @@ OPTIONAL_CONFIG_KEYS = {
     "training.top_k_checkpoints",
     "training.validate_every_n_batches",
     "training.validate_at_epoch_end",
+    "training.evaluate_test_after_fit",
     "training.auxiliary_losses",
     "training.auxiliary_losses.movement_weight",
     "training.auxiliary_losses.direction_weight",
@@ -346,6 +356,8 @@ OPTIONAL_CONFIG_KEYS = {
     "training.auxiliary_losses.movement_pos_weight_max",
     "training.auxiliary_losses.direction_class_weight_beta",
     "preprocessing.save_processed_dataframes",
+    "preprocessing.common_endpoint_support",
+    "preprocessing.common_endpoint_support.enabled",
     "preprocessing.kinematic_tokenization.orderbook_top_k_levels",
     "preprocessing.sample_clock",
     "preprocessing.sample_clock.mode",
@@ -394,6 +406,10 @@ OPTIONAL_CONFIG_KEYS = {
     "training.sequence_supervision.chunk_stride",
     "training.sequence_supervision.neutral_weighting",
     "training.sequence_supervision.neutral_sampling",
+    "training.supervision_time_window",
+    "training.supervision_time_window.enabled",
+    "training.supervision_time_window.start_seconds",
+    "training.supervision_time_window.end_seconds",
     "training.objective",
     "training.objective.quantiles",
     "training.objective.quantile_loss_weight",
@@ -1597,6 +1613,27 @@ def _folds_from_payload(payload: dict[str, Any], dataset_splits: DatasetSplitCon
 
 
 @dataclass(slots=True)
+class CommonEndpointSupportConfig:
+    """Build target-specific runs on the same BROAD/EXEC decision endpoints."""
+
+    enabled: bool = False
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "CommonEndpointSupportConfig":
+        payload = payload or {}
+        unexpected = sorted(set(payload) - {"enabled"})
+        if unexpected:
+            raise ValueError(
+                "Invalid experiment config; unexpected key(s) in "
+                f"preprocessing.common_endpoint_support: {unexpected}"
+            )
+        enabled = payload.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ValueError("preprocessing.common_endpoint_support.enabled must be a boolean.")
+        return cls(enabled=enabled)
+
+
+@dataclass(slots=True)
 class PreprocessingConfig:
     snapshot_window: int
     labels: LabelConfig
@@ -1611,6 +1648,7 @@ class PreprocessingConfig:
     causal_market_features: CausalMarketFeaturesConfig = field(default_factory=CausalMarketFeaturesConfig)
     microprice: MicropriceConfig = field(default_factory=MicropriceConfig)
     sample_clock: SampleClockConfig = field(default_factory=SampleClockConfig)
+    common_endpoint_support: CommonEndpointSupportConfig = field(default_factory=CommonEndpointSupportConfig)
     save_processed_dataframes: bool = False
 
     def __post_init__(self) -> None:
@@ -1647,6 +1685,9 @@ class PreprocessingConfig:
             causal_market_features=CausalMarketFeaturesConfig.from_dict(payload.get("causal_market_features")),
             microprice=MicropriceConfig.from_dict(payload.get("microprice")),
             sample_clock=SampleClockConfig.from_dict(payload.get("sample_clock")),
+            common_endpoint_support=CommonEndpointSupportConfig.from_dict(
+                payload.get("common_endpoint_support")
+            ),
             save_processed_dataframes=bool(payload.get("save_processed_dataframes", False)),
         )
 
@@ -1887,6 +1928,47 @@ class TrainingSamplingConfig:
             return cls(neutral_to_directional_ratio=None)
         return cls(
             neutral_to_directional_ratio=_optional_float(payload.get("neutral_to_directional_ratio")),
+        )
+
+
+@dataclass(slots=True)
+class TrainingSupervisionTimeWindowConfig:
+    """Optional inclusive wall-clock filter applied only to supervised endpoints."""
+
+    enabled: bool = False
+    start_seconds: float | None = None
+    end_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.enabled:
+            return
+        if self.start_seconds is None or self.end_seconds is None:
+            raise ValueError(
+                "training.supervision_time_window requires start_seconds and end_seconds when enabled."
+            )
+        if not 0.0 <= self.start_seconds < self.end_seconds <= 86_400.0:
+            raise ValueError(
+                "training.supervision_time_window must satisfy 0 <= start_seconds < end_seconds <= 86400."
+            )
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "TrainingSupervisionTimeWindowConfig":
+        if payload is None:
+            return cls()
+        unexpected = sorted(set(payload) - {"enabled", "start_seconds", "end_seconds"})
+        if unexpected:
+            raise ValueError(
+                "Invalid experiment config; unexpected key(s) in training.supervision_time_window: "
+                f"{unexpected}"
+            )
+        return cls(
+            enabled=_optional_bool(
+                payload.get("enabled"),
+                "training.supervision_time_window.enabled",
+                default=False,
+            ),
+            start_seconds=_optional_float(payload.get("start_seconds")),
+            end_seconds=_optional_float(payload.get("end_seconds")),
         )
 
 
@@ -2299,7 +2381,7 @@ class TrainingObjectiveConfig:
     """Select classification or executable action-value regression."""
 
     type: str = "classification"
-    loss: str = "huber"
+    loss: str = "cross_entropy"
     huber_delta: float = 1.0
     quantiles: tuple[float, ...] = (0.1, 0.5, 0.9)
     quantile_loss_weight: float = 0.25
@@ -2312,8 +2394,15 @@ class TrainingObjectiveConfig:
         self.loss = str(self.loss).strip().lower()
         if self.type not in {"classification", "action_value_regression"}:
             raise ValueError("training.objective.type must be 'classification' or 'action_value_regression'.")
-        if self.loss not in {"huber", "mse", "huber_quantile"}:
-            raise ValueError("training.objective.loss must be 'huber', 'mse', or 'huber_quantile'.")
+        if self.loss not in {"cross_entropy", "huber", "mse", "huber_quantile"}:
+            raise ValueError(
+                "training.objective.loss must be 'cross_entropy', 'huber', 'mse', "
+                "or 'huber_quantile'."
+            )
+        if self.type == "action_value_regression" and self.loss == "cross_entropy":
+            raise ValueError(
+                "training.objective.type=action_value_regression requires a regression loss."
+            )
         self.quantiles = tuple(float(value) for value in self.quantiles)
         if not self.quantiles or any(not 0.0 < value < 1.0 for value in self.quantiles):
             raise ValueError("training.objective.quantiles must contain values in (0, 1).")
@@ -2345,7 +2434,7 @@ class TrainingObjectiveConfig:
         payload = payload or {}
         return cls(
             type=str(payload.get("type", "classification")),
-            loss=str(payload.get("loss", "huber")),
+            loss=str(payload.get("loss", "cross_entropy")),
             huber_delta=float(payload.get("huber_delta", 1.0)),
             quantiles=tuple(payload.get("quantiles", (0.1, 0.5, 0.9))),
             quantile_loss_weight=float(payload.get("quantile_loss_weight", 0.25)),
@@ -2458,8 +2547,10 @@ class TrainingConfig:
     directional_thresholds: TrainingDirectionalThresholdConfig
     sampling: TrainingSamplingConfig
     sequence_supervision: TrainingSequenceSupervisionConfig
+    supervision_time_window: TrainingSupervisionTimeWindowConfig
     objective: TrainingObjectiveConfig = field(default_factory=TrainingObjectiveConfig)
     class_weights: list[float] | None = None
+    evaluate_test_after_fit: bool = True
 
     def __post_init__(self) -> None:
         """Check training worker settings."""
@@ -2651,6 +2742,11 @@ class TrainingConfig:
                 "training.validate_at_epoch_end",
                 default=True,
             ),
+            evaluate_test_after_fit=_optional_bool(
+                payload.get("evaluate_test_after_fit"),
+                "training.evaluate_test_after_fit",
+                default=True,
+            ),
             monitor=str(payload["monitor"]),
             monitor_mode=str(payload["monitor_mode"]),
             monitor_params=TrainingMonitorParamsConfig.from_dict(payload.get("monitor_params")),
@@ -2679,6 +2775,9 @@ class TrainingConfig:
             sequence_supervision=TrainingSequenceSupervisionConfig.from_dict(
                 payload.get("sequence_supervision"),
             ),
+            supervision_time_window=TrainingSupervisionTimeWindowConfig.from_dict(
+                payload.get("supervision_time_window"),
+            ),
             objective=TrainingObjectiveConfig.from_dict(payload.get("objective")),
         )
 
@@ -2686,6 +2785,7 @@ class TrainingConfig:
 @dataclass(slots=True)
 class WandbTrackingConfig:
     enabled: bool = False
+    required: bool = False
     project: str = "lob-price-trend"
     entity: str | None = None
     mode: str = "auto"
@@ -2699,6 +2799,10 @@ class WandbTrackingConfig:
         self.mode = self.mode.lower()
         if self.mode not in {"auto", "online", "offline", "disabled"}:
             raise ValueError("tracking.wandb.mode must be one of auto, online, offline, disabled.")
+        if self.required and not self.enabled:
+            raise ValueError('tracking.wandb.required=true requires tracking.wandb.enabled=true.')
+        if self.required and self.mode == 'disabled':
+            raise ValueError('tracking.wandb.required=true is incompatible with tracking.wandb.mode=disabled.')
         if not self.project:
             raise ValueError("tracking.wandb.project must be a non-empty string.")
         self.tags = [str(tag) for tag in self.tags]
@@ -2714,6 +2818,7 @@ class WandbTrackingConfig:
         if isinstance(tags, str):
             tags = [tags]
         return cls(
+            required=_optional_bool(payload.get('required'), 'tracking.wandb.required', default=False),
             enabled=_optional_bool(payload.get("enabled"), "tracking.wandb.enabled", default=False),
             project=str(payload.get("project", "lob-price-trend")),
             entity=None if payload.get("entity") is None else str(payload.get("entity")),
@@ -2766,16 +2871,17 @@ class ExperimentConfig:
     def __post_init__(self) -> None:
         if self.training.sequence_supervision.token_chunk_enabled:
             self.training.sequence_supervision.resolved_chunk_stride(self.data.sequence_window)
+        executable_target_columns = ["long_net_return_ticks", "short_net_return_ticks"]
         if self.training.objective.is_regression:
             if self.preprocessing.labels.strategy != "executable_return":
                 raise ValueError(
                     "training.objective.type=action_value_regression requires "
                     "preprocessing.labels.strategy=executable_return."
                 )
-            if self.data.target_columns is None or len(self.data.target_columns) != 2:
+            if self.data.target_columns != executable_target_columns:
                 raise ValueError(
-                    "action_value_regression requires exactly two data.target_columns "
-                    "ordered as [long_value, short_value]."
+                    "action_value_regression requires data.target_columns to be exactly "
+                    "[long_net_return_ticks, short_net_return_ticks] in that order."
                 )
             if self.training.monitor not in {"val_loss", "val_pnl", "val_rank_ic"}:
                 raise ValueError(
@@ -2796,6 +2902,28 @@ class ExperimentConfig:
                 f"training.monitor={self.training.monitor} requires "
                 "training.objective.type=action_value_regression."
             )
+        elif self.data.target_columns is not None:
+            raise ValueError(
+                "training.objective.type=classification requires data.target_columns=null."
+            )
+
+        if (
+            not self.training.objective.is_regression
+            and self.preprocessing.labels.strategy == "executable_return"
+        ):
+            missing_exclusions = [
+                column
+                for column in executable_target_columns
+                if column not in self.data.feature_exclude_columns
+            ]
+            if missing_exclusions:
+                raise ValueError(
+                    "classification with preprocessing.labels.strategy=executable_return requires "
+                    "data.feature_exclude_columns to contain long_net_return_ticks and "
+                    "short_net_return_ticks; missing: "
+                    + ", ".join(missing_exclusions)
+                    + "."
+                )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ExperimentConfig":

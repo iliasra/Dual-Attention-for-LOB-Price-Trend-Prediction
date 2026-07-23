@@ -124,6 +124,54 @@ def test_lob_dataset_getitem_returns_sequence_window_starting_at_idx(artifact_di
     assert y_label.item() == 0
 
 
+def test_lob_dataset_masks_only_endpoints_and_keeps_censored_rows_as_context(artifact_dir: Path) -> None:
+    x_path = artifact_dir / "masked_features.npy"
+    t_path = artifact_dir / "masked_times.npy"
+    y_path = artifact_dir / "masked_labels.npy"
+    mask_path = artifact_dir / "masked_supervision_mask.npy"
+    broad_mask_path = artifact_dir / "masked_broad_supervision_mask.npy"
+    np.save(x_path, np.arange(6, dtype=np.float32)[:, None])
+    np.save(t_path, np.arange(6, dtype=np.float64))
+    np.save(y_path, np.arange(6, dtype=np.int64))
+    np.save(mask_path, np.asarray([False, False, False, True, False, True]))
+    np.save(broad_mask_path, np.asarray([False, False, False, True, True, True]))
+
+    common = LOBDataset([str(x_path)], [str(t_path)], [str(y_path)], sequence_window=3)
+    broad = LOBDataset(
+        [str(x_path)],
+        [str(t_path)],
+        [str(y_path)],
+        sequence_window=3,
+        supervision_support="broad",
+    )
+
+    assert len(common) == 2
+    assert common.supervised_labels().tolist() == [3, 5]
+    np.testing.assert_allclose(common[0][0].numpy().ravel(), [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(common[1][0].numpy().ravel(), [3.0, 4.0, 5.0])
+    assert broad.supervised_labels().tolist() == [3, 4, 5]
+
+
+def test_lob_dataset_early_window_masks_endpoints_without_truncating_context(artifact_dir: Path) -> None:
+    x_path = artifact_dir / "early_features.npy"
+    t_path = artifact_dir / "early_times.npy"
+    y_path = artifact_dir / "early_labels.npy"
+    np.save(x_path, np.arange(7, dtype=np.float32)[:, None])
+    np.save(t_path, np.asarray([34198.0, 34199.0, 34200.0, 34201.0, 34202.0, 34203.0, 34204.0]))
+    np.save(y_path, np.arange(7, dtype=np.int64))
+
+    dataset = LOBDataset(
+        [str(x_path)],
+        [str(t_path)],
+        [str(y_path)],
+        sequence_window=3,
+        supervision_time_window=(34200.0, 34202.0),
+    )
+
+    assert dataset.supervised_labels().tolist() == [2, 3, 4]
+    np.testing.assert_allclose(dataset[0][0].numpy().ravel(), [0.0, 1.0, 2.0])
+
+
 def test_lob_dataset_preserves_microsecond_deltas_at_absolute_market_times(artifact_dir: Path) -> None:
     x_path = artifact_dir / "precise_features.npy"
     t_path = artifact_dir / "precise_times.npy"
@@ -199,6 +247,28 @@ def test_lob_token_chunk_dataset_supervises_tail_tokens_once(artifact_dir: Path)
         *ids_2[mask_2].tolist(),
     ]
     assert supervised_ids == list(range(3, 10))
+
+
+def test_lob_token_chunk_dataset_intersects_loss_mask_with_endpoint_mask(artifact_dir: Path) -> None:
+    labels = list(range(10))
+    x_path, t_path, y_path = save_compact_arrays(artifact_dir, labels)
+    mask_path = artifact_dir / "sample_supervision_mask.npy"
+    np.save(mask_path, np.asarray([False, False, False, True, False, True, False, False, False, True]))
+    dataset = LOBTokenChunkDataset(
+        [str(x_path)],
+        [str(t_path)],
+        [str(y_path)],
+        sequence_window=6,
+        loss_warmup_tokens=3,
+        chunk_stride=3,
+    )
+
+    supervised = []
+    for index in range(len(dataset)):
+        _x, _t, targets, mask, _ids = dataset[index]
+        supervised.extend(targets[mask].tolist())
+    assert supervised == [3, 5, 9]
+    assert dataset.supervised_labels().tolist() == [3, 5, 9]
 
 
 def test_lob_dataset_rejects_inconsistent_feature_widths(artifact_dir: Path) -> None:

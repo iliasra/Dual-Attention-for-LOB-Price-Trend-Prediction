@@ -61,7 +61,9 @@ def momentum_signal(
     price = values[:, feature_index].astype(np.float64, copy=False)
     end = np.arange(window - 1, len(price), dtype=np.int64)
     mode = str(mode).strip().lower()
-    if mode == "difference":
+    if mode == "direct":
+        signal = price[end]
+    elif mode == "difference":
         if not 1 <= lookback < window:
             raise ValueError("lookback must be in [1, window).")
         signal = price[end] - price[end - lookback]
@@ -73,23 +75,84 @@ def momentum_signal(
         long_mean = (cumulative[end + 1] - cumulative[end + 1 - long_window]) / float(long_window)
         signal = short_mean - long_mean
     else:
-        raise ValueError("momentum mode must be 'difference' or 'ma_crossover'.")
+        raise ValueError("momentum mode must be 'direct', 'difference' or 'ma_crossover'.")
     return np.asarray(signal, dtype=np.float32)
 
 
-class BaselineHead(nn.Module):
-    """Linear or one-hidden-layer baseline for classification/regression."""
+def dense_mlp_parameter_count(input_dim: int, output_dim: int, hidden_dim: int, hidden_layers: int) -> int:
+    """Return the exact parameter count of an equal-width dense MLP."""
+    if min(input_dim, output_dim, hidden_dim, hidden_layers) <= 0:
+        raise ValueError("MLP dimensions and hidden_layers must be positive.")
+    first_layer = input_dim * hidden_dim + hidden_dim
+    hidden_tail = (hidden_layers - 1) * (hidden_dim * hidden_dim + hidden_dim)
+    output_layer = hidden_dim * output_dim + output_dim
+    return int(first_layer + hidden_tail + output_layer)
 
-    def __init__(self, input_dim: int, output_dim: int, *, hidden_dim: int | None = None) -> None:
+
+def resolve_mlp_hidden_dim(
+    input_dim: int,
+    output_dim: int,
+    *,
+    hidden_layers: int,
+    target_parameters: int,
+) -> int:
+    """Choose the positive integer width closest to a parameter budget."""
+    if min(input_dim, output_dim, hidden_layers, target_parameters) <= 0:
+        raise ValueError("MLP dimensions, hidden_layers and target_parameters must be positive.")
+
+    # P(h) = (L - 1) h^2 + (input + output + L) h + output.
+    linear_coefficient = input_dim + output_dim + hidden_layers
+    if hidden_layers == 1:
+        continuous_width = (target_parameters - output_dim) / float(linear_coefficient)
+    else:
+        quadratic_coefficient = hidden_layers - 1
+        discriminant = linear_coefficient**2 + 4 * quadratic_coefficient * (target_parameters - output_dim)
+        continuous_width = (
+            -linear_coefficient + np.sqrt(max(float(discriminant), 0.0))
+        ) / (2.0 * quadratic_coefficient)
+
+    center = max(1, int(round(continuous_width)))
+    candidates = range(max(1, center - 2), center + 3)
+    return min(
+        candidates,
+        key=lambda width: (
+            abs(dense_mlp_parameter_count(input_dim, output_dim, width, hidden_layers) - target_parameters),
+            width,
+        ),
+    )
+
+
+class BaselineHead(nn.Module):
+    """Linear or configurable equal-width MLP for classification/regression."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        *,
+        hidden_dim: int | None = None,
+        hidden_layers: int = 1,
+        dropout: float = 0.0,
+    ) -> None:
         super().__init__()
+        if input_dim <= 0 or output_dim <= 0:
+            raise ValueError("Baseline input_dim and output_dim must be positive.")
+        if not 0.0 <= float(dropout) < 1.0:
+            raise ValueError("MLP dropout must be in [0, 1).")
         if hidden_dim is None:
             self.network = nn.Linear(input_dim, output_dim)
         else:
-            self.network = nn.Sequential(
-                nn.Linear(input_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, output_dim),
-            )
+            if hidden_dim <= 0 or hidden_layers <= 0:
+                raise ValueError("MLP hidden_dim and hidden_layers must be positive.")
+            layers: list[nn.Module] = []
+            current_dim = input_dim
+            for _ in range(hidden_layers):
+                layers.extend([nn.Linear(current_dim, hidden_dim), nn.GELU()])
+                if dropout > 0.0:
+                    layers.append(nn.Dropout(float(dropout)))
+                current_dim = hidden_dim
+            layers.append(nn.Linear(current_dim, output_dim))
+            self.network = nn.Sequential(*layers)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.network(inputs)

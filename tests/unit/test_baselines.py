@@ -16,15 +16,24 @@ from baselines.models import (
     LSTMBaseline,
     RecurrentBaseline,
     context_features,
+    dense_mlp_parameter_count,
     momentum_signal,
+    resolve_mlp_hidden_dim,
     sampled_context_sequences,
 )
 from baselines.run_baselines import (
+    baseline_regression_loss,
+    fit_classical_model,
+    infer_baseline_task,
+    label_persistence_predictions,
     load_delayed_target_split,
     load_split,
-    fit_classical_model,
     main as run_baselines_main,
     momentum_predictions,
+    no_skill_predictions,
+    resolve_feature_indices,
+    resolve_row_caps,
+    time_of_day_predictions,
     train_head,
 )
 
@@ -46,6 +55,35 @@ def test_last_mean_context_is_causal_and_has_expected_shape() -> None:
     np.testing.assert_allclose(result, [[2.0, 1.5], [4.0, 3.0], [8.0, 6.0]])
 
 
+def test_momentum_features_are_resolved_by_schema_name(artifact_dir: Path) -> None:
+    (artifact_dir / "feature_schema.yaml").write_text(
+        "ordered_feature_columns:\n- bid_price_1\n- ask_price_1\n- causal_midprice_momentum_ticks_20\n",
+        encoding="utf-8",
+    )
+
+    assert resolve_feature_indices(
+        artifact_dir,
+        feature_names=["causal_midprice_momentum_ticks_20"],
+        feature_index=None,
+        feature_schema=None,
+    ) == (2,)
+    assert resolve_feature_indices(
+        artifact_dir,
+        feature_names=["bid_price_1", "ask_price_1"],
+        feature_index=None,
+        feature_schema=None,
+    ) == (0, 1)
+
+
+def test_direct_momentum_uses_precomputed_signal_without_differencing() -> None:
+    values = np.asarray([[1.0], [2.0], [4.0], [8.0]], dtype=np.float32)
+
+    np.testing.assert_allclose(
+        momentum_signal(values, window=3, feature_index=0, mode="direct"),
+        [4.0, 8.0],
+    )
+
+
 def test_baseline_head_supports_two_action_values() -> None:
     model = BaselineHead(4, 2, hidden_dim=8)
 
@@ -53,6 +91,119 @@ def test_baseline_head_supports_two_action_values() -> None:
 
     assert outputs.shape == (3, 2)
     assert torch.isfinite(outputs).all()
+
+
+def test_multilayer_mlp_resolves_width_near_parameter_budget() -> None:
+    target = 25_000
+    width = resolve_mlp_hidden_dim(12, 3, hidden_layers=3, target_parameters=target)
+    model = BaselineHead(12, 3, hidden_dim=width, hidden_layers=3, dropout=0.2)
+    actual = sum(parameter.numel() for parameter in model.parameters())
+
+    assert actual == dense_mlp_parameter_count(12, 3, width, 3)
+    assert abs(actual - target) <= abs(dense_mlp_parameter_count(12, 3, width + 1, 3) - target)
+    if width > 1:
+        assert abs(actual - target) <= abs(dense_mlp_parameter_count(12, 3, width - 1, 3) - target)
+    assert sum(isinstance(module, torch.nn.Dropout) for module in model.modules()) == 3
+
+
+def test_row_cap_defaults_and_legacy_alias() -> None:
+    modern = SimpleNamespace(max_rows=None, max_train_rows=None, max_eval_rows=None)
+    legacy = SimpleNamespace(max_rows=123, max_train_rows=None, max_eval_rows=None)
+    override = SimpleNamespace(max_rows=123, max_train_rows=10, max_eval_rows=None)
+
+    assert resolve_row_caps(modern) == (200_000, 0)
+    assert resolve_row_caps(legacy) == (123, 123)
+    assert resolve_row_caps(override) == (10, 123)
+
+
+def test_classification_output_dim_is_configured_not_inferred_from_held_out() -> None:
+    regression, output_dim = infer_baseline_task(
+        np.asarray([0, 1, 1], dtype=np.int64),
+        np.asarray([2, 2], dtype=np.int64),
+        num_classes=3,
+    )
+
+    assert regression is False
+    assert output_dim == 3
+    with pytest.raises(ValueError, match="outside configured"):
+        infer_baseline_task(
+            np.asarray([0, 1], dtype=np.int64),
+            np.asarray([2], dtype=np.int64),
+            num_classes=2,
+        )
+
+
+def test_neural_regression_loss_supports_huber_delta_and_mse() -> None:
+    outputs = torch.tensor([[0.0, 0.0]])
+    targets = torch.tensor([[1.0, 3.0]])
+
+    huber = baseline_regression_loss(outputs, targets, loss_name="huber", huber_delta=0.5)
+    mse = baseline_regression_loss(outputs, targets, loss_name="mse", huber_delta=0.5)
+
+    assert huber.item() == pytest.approx(torch.nn.functional.huber_loss(outputs, targets, delta=0.5).item())
+    assert mse.item() == pytest.approx(5.0)
+
+
+def test_no_skill_classification_returns_train_prevalence_probabilities() -> None:
+    predictions, probabilities = no_skill_predictions(
+        np.asarray([0, 1, 1, 1, 2], dtype=np.int64),
+        evaluation_rows=4,
+        output_dim=3,
+    )
+
+    np.testing.assert_array_equal(predictions, np.full(4, 1))
+    assert probabilities is not None
+    np.testing.assert_allclose(probabilities, np.tile([0.2, 0.6, 0.2], (4, 1)))
+
+
+def test_time_of_day_classification_uses_train_bins_and_laplace_smoothing() -> None:
+    predictions, probabilities = time_of_day_predictions(
+        np.asarray([60.0, 120.0, 180.0, 1_000.0]),
+        np.asarray([0, 0, 1, 2], dtype=np.int64),
+        np.asarray([300.0, 1_200.0, 4_000.0, 86_700.0]),
+        bin_minutes=15.0,
+        laplace_alpha=1.0,
+        output_dim=3,
+    )
+
+    assert probabilities is not None
+    np.testing.assert_allclose(probabilities[0], [3.0 / 6.0, 2.0 / 6.0, 1.0 / 6.0])
+    np.testing.assert_allclose(probabilities[1], [0.25, 0.25, 0.5])
+    np.testing.assert_allclose(probabilities[2], [3.0 / 7.0, 2.0 / 7.0, 2.0 / 7.0])
+    np.testing.assert_allclose(probabilities[3], probabilities[0])
+    np.testing.assert_array_equal(predictions, [0, 2, 0, 0])
+
+
+def test_time_of_day_regression_uses_global_train_fallback_for_unseen_bin() -> None:
+    train_values = np.asarray([[1.0, 2.0], [3.0, 4.0], [10.0, 20.0]], dtype=np.float32)
+    predictions, probabilities = time_of_day_predictions(
+        np.asarray([60.0, 120.0, 1_000.0]),
+        train_values,
+        np.asarray([300.0, 4_000.0, 86_700.0]),
+        bin_minutes=15.0,
+        laplace_alpha=1.0,
+        output_dim=2,
+    )
+
+    assert probabilities is None
+    np.testing.assert_allclose(predictions[0], [2.0, 3.0])
+    np.testing.assert_allclose(predictions[1], train_values.mean(axis=0))
+    np.testing.assert_allclose(predictions[2], predictions[0])
+
+
+def test_label_persistence_probabilities_are_fit_from_train_transitions() -> None:
+    predictions, probabilities = label_persistence_predictions(
+        np.asarray([0, 0, 1, 1], dtype=np.int64),
+        np.asarray([0, 0, 2, 2], dtype=np.int64),
+        np.asarray([0, 1, 2], dtype=np.int64),
+        output_dim=3,
+        laplace_alpha=1.0,
+    )
+
+    np.testing.assert_allclose(probabilities[0], [0.6, 0.2, 0.2])
+    np.testing.assert_allclose(probabilities[1], [0.2, 0.2, 0.6])
+    np.testing.assert_allclose(probabilities[2], [1.0 / 3.0] * 3)
+    np.testing.assert_array_equal(predictions, [0, 2, 0])
 
 
 @pytest.mark.parametrize("regression", [False, True])
@@ -131,7 +282,7 @@ def test_xgboost_baseline_logs_every_boosting_round(monkeypatch: pytest.MonkeyPa
     validation_x = np.ones((3, 2), dtype=np.float32)
     validation_y = np.asarray([0, 1, 2], dtype=np.int64)
 
-    predictions, probabilities = fit_classical_model(
+    predictions, probabilities, fitted = fit_classical_model(
         "xgboost",
         train_x,
         train_y,
@@ -144,6 +295,7 @@ def test_xgboost_baseline_logs_every_boosting_round(monkeypatch: pytest.MonkeyPa
 
     assert predictions.shape == (3,)
     assert probabilities is not None
+    assert fitted is not None
     assert [payload["global_step"] for payload in tracker.payloads] == [1, 2]
     assert tracker.payloads[-1]["validation/xgboost_mlogloss"] == 0.9
 
@@ -255,6 +407,28 @@ def test_sequence_loader_samples_windows_after_row_selection(artifact_dir: Path)
     np.testing.assert_array_equal(targets, labels[3:])
 
 
+def test_sequence_loader_applies_endpoint_mask_without_removing_context(artifact_dir: Path) -> None:
+    split_dir = artifact_dir / "train"
+    split_dir.mkdir()
+    features = np.arange(6, dtype=np.float32)[:, None]
+    labels = np.arange(6, dtype=np.int64)
+    np.save(split_dir / "day_features.npy", features)
+    np.save(split_dir / "day_labels.npy", labels)
+    np.save(split_dir / "day_supervision_mask.npy", [False, False, True, False, True, False])
+
+    inputs, targets = load_split(
+        artifact_dir,
+        "train",
+        window=3,
+        context="last",
+        max_rows=0,
+        seed=1,
+    )
+
+    np.testing.assert_array_equal(inputs[:, 0], [2.0, 4.0])
+    np.testing.assert_array_equal(targets, [2, 4])
+
+
 def test_delayed_label_loader_never_crosses_day_boundary(artifact_dir: Path) -> None:
     split_dir = artifact_dir / "validation"
     split_dir.mkdir()
@@ -277,7 +451,7 @@ def test_delayed_label_loader_never_crosses_day_boundary(artifact_dir: Path) -> 
 
 @pytest.mark.parametrize(
     "model_name",
-    ["no_skill", "momentum", "momentum_ma", "label_persistence", "linear", "mlp", "lstm"],
+    ["no_skill", "time_of_day", "momentum", "momentum_ma", "label_persistence", "linear", "mlp", "lstm"],
 )
 def test_baseline_runner_smoke_for_dependency_free_models(
     artifact_dir: Path,
@@ -291,7 +465,12 @@ def test_baseline_runner_smoke_for_dependency_free_models(
         features = np.column_stack([time, np.sin(time)]).astype(np.float32)
         labels = np.asarray(([0, 1, 2] * 8), dtype=np.int64)
         np.save(split_dir / "day_features.npy", features)
+        np.save(split_dir / "day_times.npy", 34_200.0 + time)
         np.save(split_dir / "day_labels.npy", labels)
+    (artifact_dir / "feature_schema.yaml").write_text(
+        "ordered_feature_columns:\n- bid_price_1\n- ask_price_1\n",
+        encoding="utf-8",
+    )
     output = artifact_dir / f"{model_name}.json"
     argv = [
         "run_baselines.py",
@@ -329,8 +508,19 @@ def test_baseline_runner_smoke_for_dependency_free_models(
                 "0",
             ]
         )
+        if model_name == "momentum":
+            argv.extend(["--momentum-feature-name", "bid_price_1"])
+        else:
+            argv.extend(
+                [
+                    "--momentum-feature-name",
+                    "bid_price_1",
+                    "--momentum-feature-name",
+                    "ask_price_1",
+                ]
+            )
     if model_name == "label_persistence":
-        argv.extend(["--label-lag", "2"])
+        argv.extend(["--label-lag", "2", "--label-horizon", "2"])
     if model_name == "lstm":
         argv.extend(["--lstm-steps", "3", "--hidden-dim", "4"])
     monkeypatch.setattr(sys, "argv", argv)
@@ -341,6 +531,58 @@ def test_baseline_runner_smoke_for_dependency_free_models(
     assert payload["model"] == model_name
     assert payload["validation_rows"] > 0
     assert "metrics" in payload
+
+
+def test_runner_uses_full_eval_default_and_reports_resolved_mlp_parameters(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for split, rows in (("train", 30), ("validation", 40)):
+        split_dir = artifact_dir / split
+        split_dir.mkdir()
+        time = np.arange(rows, dtype=np.float32)
+        np.save(split_dir / "day_features.npy", np.column_stack([time, np.sin(time)]).astype(np.float32))
+        np.save(split_dir / "day_labels.npy", (np.arange(rows) % 3).astype(np.int64))
+    output = artifact_dir / "parameter_matched_mlp.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_baselines.py",
+            "--sequence-dir",
+            str(artifact_dir),
+            "--output",
+            str(output),
+            "--model",
+            "mlp",
+            "--window",
+            "4",
+            "--max-train-rows",
+            "7",
+            "--mlp-layers",
+            "2",
+            "--mlp-dropout",
+            "0.1",
+            "--target-parameters",
+            "1000",
+            "--epochs",
+            "1",
+            "--batch-size",
+            "4",
+            "--device",
+            "cpu",
+        ],
+    )
+
+    run_baselines_main()
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["train_rows"] == 7
+    assert payload["evaluation_rows"] == 37
+    assert payload["parameters"]["max_eval_rows"] == 0
+    assert payload["parameters"]["resolved_hidden_dim"] is not None
+    assert payload["parameters"]["actual_parameter_count"] == payload["model_parameters"]["total"]
+    assert payload["model_parameters"]["total"] > 0
 
 
 def test_baseline_runner_uses_configured_wandb_for_steps_and_final_artifact(

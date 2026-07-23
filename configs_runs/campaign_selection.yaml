@@ -1,0 +1,47 @@
+schema_version: 1
+status: provisional
+h_star:
+  value: 100
+  source: fallback_pending_train_only_L2
+loss_star:
+  value: huber
+  source: incumbent_pending_P0_P1
+feature_star:
+  value: kin
+  source: incumbent_pending_validation
+w_star:
+  start_seconds: null
+  end_seconds: null
+  early_configs_generated: false
+  reason: W_STAR is not selected yet; pass both window bounds after train-only diagnostics
+split_counts:
+  train: 124
+  validation: 13
+  test: 14
+  holdout: 13
+holdout_dates:
+- '2024-06-10'
+- '2024-06-11'
+- '2024-06-12'
+- '2024-06-13'
+- '2024-06-14'
+- '2024-06-17'
+- '2024-06-18'
+- '2024-06-20'
+- '2024-06-21'
+- '2024-06-24'
+- '2024-06-25'
+- '2024-06-26'
+- '2024-06-27'
+aliases:
+  AV-K-S42:
+    alias_of: P0
+    new_fit: false
+deferred_test_control:
+  supported_by_parser: true
+  evaluate_test_after_fit: false
+  status: configured
+strict_wandb_control:
+  supported_by_parser: true
+  required: true
+secrets_in_repository: false

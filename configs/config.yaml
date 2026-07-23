@@ -50,6 +50,8 @@ folds:
 preprocessing:
   snapshot_window: 100
   save_processed_dataframes: false # set true to also save large normalized CSV debug/audit files
+  common_endpoint_support:
+    enabled: false # enable for matched BROAD/EXEC_CLS/EXEC_AV preprocessing
   labels:
     strategy: smoothing # allowed: smoothing, triple_barrier
     smoothing:
@@ -245,6 +247,10 @@ training:
     down_quantile: null # required only for top_x_quantile; 0.01 selects the top 1% p_down validation scores
   sampling:
     neutral_to_directional_ratio: 10.0 # downsampling of neutral class
+  supervision_time_window:
+    enabled: false # when true, supervise only endpoints inside the inclusive wall-clock window
+    start_seconds: null # seconds since midnight; context rows before this bound remain available
+    end_seconds: null # seconds since midnight
 
 tracking:
   wandb:

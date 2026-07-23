@@ -21,7 +21,12 @@ if str(SRC_DIR) not in sys.path:
 
 from configuration import ExperimentConfig
 from calibration import apply_logit_calibration_to_outputs
-from datasets import LOBDataset, LOBTokenChunkDataset, sequence_window_labels
+from datasets import (
+    LOBDataset,
+    LOBTokenChunkDataset,
+    attach_evaluation_metadata,
+    sequence_window_labels,
+)
 from model import build_model
 from pnl_metrics import compute_pnl_from_prediction_outputs, resolve_raw_data_dir, save_pnl_artifacts
 from run_logging import (
@@ -62,6 +67,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also write per-sample post-softmax probabilities to probabilities.csv.",
     )
+    parser.add_argument(
+        "--endpoint-support",
+        choices=("common", "broad", "exec"),
+        default="common",
+        help="Endpoint mask used for frozen inference; training uses the common mask.",
+    )
+    parser.add_argument("--supervision-start-seconds", type=float, default=None)
+    parser.add_argument("--supervision-end-seconds", type=float, default=None)
     parser.add_argument(
         "--temperature-scaling",
         type=Path,
@@ -208,6 +221,9 @@ def build_evaluation_dataset(
     sequence_dir: Path,
     split: str | None,
     config: ExperimentConfig,
+    *,
+    supervision_support: str = "common",
+    supervision_time_window: tuple[float, float] | None = None,
 ) -> tuple[LOBDataset | LOBTokenChunkDataset, Path]:
     """Build the evaluation dataset from a parent or direct sequence directory."""
     x_paths, t_paths, y_paths, split_dir = sequence_paths(sequence_dir, split)
@@ -220,9 +236,18 @@ def build_evaluation_dataset(
             sequence_window=config.data.sequence_window,
             loss_warmup_tokens=int(config.training.sequence_supervision.loss_warmup_tokens or 0),
             chunk_stride=stride,
+            supervision_support=supervision_support,
+            supervision_time_window=supervision_time_window,
         )
     else:
-        dataset = LOBDataset(x_paths, t_paths, y_paths, sequence_window=config.data.sequence_window)
+        dataset = LOBDataset(
+            x_paths,
+            t_paths,
+            y_paths,
+            sequence_window=config.data.sequence_window,
+            supervision_support=supervision_support,
+            supervision_time_window=supervision_time_window,
+        )
     if len(dataset) == 0:
         raise ValueError(f"No full sequence windows found in {split_dir}.")
     return dataset, split_dir
@@ -593,10 +618,25 @@ def main() -> None:
         else load_logit_calibration(args.temperature_scaling, config)
     )
 
+    override_values = (args.supervision_start_seconds, args.supervision_end_seconds)
+    if (override_values[0] is None) != (override_values[1] is None):
+        raise ValueError("Set both --supervision-start-seconds and --supervision-end-seconds, or neither.")
+    configured_window = config.training.supervision_time_window
+    supervision_time_window = (
+        (float(override_values[0]), float(override_values[1]))
+        if override_values[0] is not None
+        else (
+            (float(configured_window.start_seconds), float(configured_window.end_seconds))
+            if configured_window.enabled
+            else None
+        )
+    )
     dataset, resolved_sequence_path = build_evaluation_dataset(
         args.sequence_dir,
         args.split,
         config,
+        supervision_support=args.endpoint_support,
+        supervision_time_window=supervision_time_window,
     )
     x_sample = dataset[0][0]
     model = build_model(config.model, d_input=x_sample.shape[-1])
@@ -634,6 +674,8 @@ def main() -> None:
         apply_logit_calibration_to_result(result, config, logit_calibration)
     if directional_thresholds is not None:
         apply_directional_thresholds_to_result(result, config, directional_thresholds)
+    if result.prediction_outputs is not None:
+        result.prediction_outputs = attach_evaluation_metadata(result.prediction_outputs, dataset)
     duration_seconds = perf_counter() - start
 
     pnl_result = None

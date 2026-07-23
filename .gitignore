@@ -7,6 +7,8 @@
 *.e[0-9]*
 
 docs/*
+backtest/
+configs_runs/READINESS_PIPELINE.md
 
 # Results/logs dir
 backtest/*

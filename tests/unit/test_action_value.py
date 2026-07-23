@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import io
 import shutil
 
 import numpy as np
@@ -10,12 +11,19 @@ import torch.nn as nn
 import yaml
 
 from action_value import (
+    ACTION_VALUE_METRICS_SCHEMA_VERSION,
+    ActionValueMetrics,
     action_value_metrics,
     action_value_policy_frontier,
     action_value_quantile_calibration,
     spearman_rank_correlation,
 )
-from action_value_training import ActionValueRegressionLoss, ActionValueTrainer, split_action_value_outputs
+from action_value_training import (
+    ActionValueEpochResult,
+    ActionValueRegressionLoss,
+    ActionValueTrainer,
+    split_action_value_outputs,
+)
 from configuration import TrainingConfig, load_config
 
 
@@ -70,6 +78,103 @@ def test_action_value_metrics_separate_ranking_from_realized_pnl() -> None:
     assert metrics.fixed_rate_win_rate == pytest.approx(1.0)
 
 
+def test_economic_oracle_can_abstain_when_both_actions_lose() -> None:
+    predictions = np.zeros((2, 2), dtype=np.float32)
+    targets = np.asarray([[-2.0, -1.0], [-4.0, -3.0]], dtype=np.float32)
+
+    metrics = action_value_metrics(predictions, targets)
+
+    assert metrics.oracle_mean_pnl_ticks == pytest.approx(0.0)
+    assert metrics.forced_oracle_mean_pnl_ticks == pytest.approx(-2.0)
+
+
+def test_economic_oracle_averages_no_trade_zeros_over_all_rows() -> None:
+    predictions = np.zeros((3, 2), dtype=np.float32)
+    targets = np.asarray([[2.0, -1.0], [-2.0, 1.0], [-3.0, -4.0]], dtype=np.float32)
+
+    metrics = action_value_metrics(predictions, targets)
+
+    assert metrics.oracle_mean_pnl_ticks == pytest.approx(1.0)
+    assert metrics.forced_oracle_mean_pnl_ticks == pytest.approx(0.0)
+
+
+def test_empty_action_value_split_has_zero_economic_and_forced_oracles() -> None:
+    empty = np.empty((0, 2), dtype=np.float32)
+
+    metrics = action_value_metrics(empty, empty)
+
+    assert metrics.oracle_mean_pnl_ticks == 0.0
+    assert metrics.forced_oracle_mean_pnl_ticks == 0.0
+
+
+def test_binary_average_precision_groups_ties_and_is_row_order_invariant() -> None:
+    from action_value import binary_average_precision
+
+    scores = np.ones(5, dtype=np.float64)
+    positives = np.asarray([True, False, False, True, False])
+
+    first = binary_average_precision(scores, positives)
+    permuted = binary_average_precision(scores[::-1], positives[::-1])
+
+    assert first == pytest.approx(2.0 / 5.0)
+    assert permuted == pytest.approx(first)
+
+
+def test_action_value_metrics_serialization_marks_legacy_oracle_unambiguously() -> None:
+    metrics = action_value_metrics(
+        np.zeros((1, 2), dtype=np.float32),
+        np.asarray([[2.0, -1.0]], dtype=np.float32),
+    )
+    checkpoint = io.BytesIO()
+    torch.save({"metrics_schema_version": ACTION_VALUE_METRICS_SCHEMA_VERSION, "metrics": metrics}, checkpoint)
+    checkpoint.seek(0)
+    restored = torch.load(checkpoint, map_location="cpu", weights_only=False)
+
+    assert restored["metrics_schema_version"] == 2
+    assert restored["metrics"].to_dict()["oracle_mean_pnl_ticks"] == pytest.approx(2.0)
+    assert restored["metrics"].to_dict()["forced_oracle_mean_pnl_ticks"] == pytest.approx(2.0)
+
+    # Frozen slot dataclasses are restored by applying this ordered state. An
+    # old checkpoint contains one fewer value because the forced-oracle field
+    # did not exist when it was written.
+    legacy_state = [getattr(metrics, field_name) for field_name in metrics.__dataclass_fields__]
+    legacy_state = legacy_state[:-1]
+    legacy_state[-1] = -1.25
+    legacy_metrics = ActionValueMetrics.__new__(ActionValueMetrics)
+    legacy_metrics.__setstate__(legacy_state)
+    legacy_payload = legacy_metrics.to_dict()
+
+    assert legacy_payload["oracle_mean_pnl_ticks"] is None
+    assert legacy_payload["forced_oracle_mean_pnl_ticks"] == pytest.approx(-1.25)
+
+
+def test_schema_v2_yaml_exposes_both_oracle_definitions() -> None:
+    metrics = action_value_metrics(
+        np.zeros((2, 2), dtype=np.float32),
+        np.asarray([[2.0, -1.0], [-4.0, -3.0]], dtype=np.float32),
+    )
+    epoch = ActionValueEpochResult(
+        epoch=1,
+        train_loss=0.5,
+        validation_loss=0.4,
+        validation_metrics=metrics,
+        monitor_value=0.0,
+    )
+    serialized = yaml.safe_load(
+        yaml.safe_dump(
+            {
+                "metrics_schema_version": ACTION_VALUE_METRICS_SCHEMA_VERSION,
+                "epochs": [epoch.to_dict()],
+            }
+        )
+    )
+
+    assert serialized["metrics_schema_version"] == 2
+    yaml_metrics = serialized["epochs"][0]["validation_metrics"]
+    assert yaml_metrics["oracle_mean_pnl_ticks"] == pytest.approx(1.0)
+    assert yaml_metrics["forced_oracle_mean_pnl_ticks"] == pytest.approx(-0.5)
+
+
 def test_action_value_fixed_rate_never_trades_same_row_twice() -> None:
     predictions = np.asarray(
         [
@@ -97,9 +202,11 @@ def test_policy_frontier_joins_profitable_pr_ranking_and_pnl() -> None:
 
     assert [row["trade_count"] for row in frontier] == [1, 2, 4]
     assert frontier[0]["profitable_precision"] == pytest.approx(1.0)
+    assert frontier[0]["profitable_recall"] == pytest.approx(0.25)
     assert frontier[0]["mean_pnl_ticks"] == pytest.approx(2.0)
     assert frontier[1]["profitable_precision"] == pytest.approx(0.5)
     assert frontier[-1]["total_pnl_ticks"] == pytest.approx(2.0)
+    assert frontier[-1]["profitable_recall"] == pytest.approx(0.5)
     assert 0.0 <= frontier[0]["policy_ap"] <= 1.0
 
 

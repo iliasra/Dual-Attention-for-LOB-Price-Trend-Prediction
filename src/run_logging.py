@@ -813,6 +813,31 @@ def prediction_outputs_to_frame(outputs: dict[str, Any], config: ExperimentConfi
             for class_id in predictions
         ],
     }
+    for metadata_column in (
+        "date",
+        "raw_event_index",
+        "decision_time",
+        "entry_index",
+        "exit_index",
+        "realized_long",
+        "realized_short",
+        "broad_label",
+        "exec_label",
+        "broad_valid",
+        "exec_valid",
+        "feature_history_valid",
+        "common_endpoint_valid",
+        "censor_reason_code",
+    ):
+        if metadata_column not in outputs:
+            continue
+        values = np.asarray(outputs[metadata_column]).reshape(-1)
+        if values.shape[0] != targets.shape[0]:
+            raise ValueError(
+                f"Prediction metadata column {metadata_column!r} has {values.shape[0]} rows, "
+                f"expected {targets.shape[0]}."
+            )
+        frame_payload[metadata_column] = values
     argmax_predictions = outputs.get("argmax_predictions")
     if argmax_predictions is not None:
         argmax_predictions_array = np.asarray(argmax_predictions, dtype=np.int64).reshape(-1)

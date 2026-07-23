@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 import shutil
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 
 pytest.importorskip("torch")
 
 from configuration import WandbTrackingConfig
+from action_value import action_value_metrics
 from training import ClassificationMetrics, EpochResult
 from wandb_tracking import (
     WandbTracker,
@@ -193,6 +196,10 @@ def test_wandb_tracker_initializes_and_logs_with_fake_module(
 
 
 def test_action_value_metrics_are_namespaced_on_explicit_global_step() -> None:
+    metrics = action_value_metrics(
+        np.zeros((2, 2)),
+        np.asarray([[2.0, -1.0], [-4.0, -3.0]]),
+    )
     result = SimpleNamespace(
         epoch=2,
         train_loss=0.7,
@@ -201,13 +208,7 @@ def test_action_value_metrics_are_namespaced_on_explicit_global_step() -> None:
         validation_index=3,
         batch_in_epoch=5000,
         checkpoint_label="epoch_0002_step_00030000",
-        validation_metrics=SimpleNamespace(
-            to_dict=lambda: {
-                "rank_ic_mean": 0.12,
-                "fixed_rate_mean_pnl_ticks": 1.25,
-                "fixed_rate_overlap_resolved_count": 4,
-            }
-        ),
+        validation_metrics=metrics,
     )
 
     payload = action_value_result_to_wandb_metrics(result, global_step=30000, optimizer_step=15000)
@@ -215,8 +216,10 @@ def test_action_value_metrics_are_namespaced_on_explicit_global_step() -> None:
     assert payload["global_step"] == 30000
     assert payload["optimizer_step"] == 15000
     assert payload["train/interval_loss"] == 0.7
-    assert payload["validation/rank_ic_mean"] == 0.12
-    assert payload["validation/fixed_rate_mean_pnl_ticks"] == 1.25
+    assert payload["validation/rank_ic_mean"] == 0.0
+    assert payload["validation/fixed_rate_mean_pnl_ticks"] == 0.0
+    assert payload["validation/oracle_mean_pnl_ticks"] == pytest.approx(1.0)
+    assert payload["validation/forced_oracle_mean_pnl_ticks"] == pytest.approx(-0.5)
 
 
 def test_unclosed_wandb_tracker_marks_process_failure() -> None:
@@ -227,3 +230,67 @@ def test_unclosed_wandb_tracker_marks_process_failure() -> None:
 
     assert run.finished is True
     assert run.exit_code == 1
+
+
+def test_required_wandb_raises_when_package_is_missing(monkeypatch, artifact_dir: Path) -> None:
+    real_import_module = importlib.import_module
+
+    def missing_wandb(name: str, package: str | None = None):
+        if name == 'wandb':
+            raise ImportError('missing for test')
+        return real_import_module(name, package)
+
+    monkeypatch.setattr('wandb_tracking.importlib.import_module', missing_wandb)
+
+    with pytest.raises(RuntimeError, match='W&B tracking is required.*not installed'):
+        WandbTracker.init(
+            WandbTrackingConfig(enabled=True, required=True, mode='online'),
+            run_stem='strict',
+            fold_id='fold',
+            fold_log_dir=artifact_dir,
+        )
+
+
+def test_required_auto_attempts_online_only_and_raises(monkeypatch, artifact_dir: Path) -> None:
+    attempted_modes: list[str] = []
+    monkeypatch.setenv('WANDB_MODE', 'offline')
+
+    def failing_init(**kwargs: object) -> FakeRun:
+        attempted_modes.append(str(kwargs['mode']))
+        raise ConnectionError('offline network')
+
+    monkeypatch.setitem(sys.modules, 'wandb', SimpleNamespace(init=failing_init, Artifact=FakeArtifact))
+
+    with pytest.raises(RuntimeError, match='W&B tracking is required.*initialization failed'):
+        WandbTracker.init(
+            WandbTrackingConfig(enabled=True, required=True, mode='auto'),
+            run_stem='strict',
+            fold_id='fold',
+            fold_log_dir=artifact_dir,
+        )
+
+    assert attempted_modes == ['online']
+
+
+def test_optional_auto_still_falls_back_to_offline(monkeypatch, artifact_dir: Path) -> None:
+    fake_run = FakeRun()
+    attempted_modes: list[str] = []
+
+    def fallback_init(**kwargs: object) -> FakeRun:
+        mode = str(kwargs['mode'])
+        attempted_modes.append(mode)
+        if mode == 'online':
+            raise ConnectionError('offline network')
+        return fake_run
+
+    monkeypatch.setitem(sys.modules, 'wandb', SimpleNamespace(init=fallback_init, Artifact=FakeArtifact))
+
+    tracker = WandbTracker.init(
+        WandbTrackingConfig(enabled=True, mode='auto'),
+        run_stem='optional',
+        fold_id='fold',
+        fold_log_dir=artifact_dir,
+    )
+
+    assert tracker.enabled is True
+    assert attempted_modes == ['online', 'offline']

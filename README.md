@@ -249,6 +249,24 @@ export WANDB_MODE=offline
 wandb sync --sync-all <wandb_run_or_directory>
 ```
 
+### Final experiments campaign
+
+The thesis experiment configurations are generated under `configs_runs/`:
+
+```bash
+python scripts/generate_experiment_configs.py \
+  --h-star 100 \
+  --loss-star huber \
+  --feature-star kin
+```
+
+The generated development configs deliberately set:
+
+```yaml
+training:
+  evaluate_test_after_fit: false
+```
+
 Training can resume from the complete state checkpoint with:
 
 ```bash
@@ -701,6 +719,126 @@ python scripts/evaluate_model.py \
 
 Directional thresholds should be fit on validation probabilities and then
 applied to test probabilities, so test metrics remain out-of-sample.
+
+### 6.1 Matched BROAD / EXEC_CLS / EXEC_AV evaluation
+
+The final INTC configurations enable:
+
+```yaml
+preprocessing:
+  common_endpoint_support:
+    enabled: true
+```
+
+In this mode preprocessing assigns `raw_event_index` before target filtering,
+computes causal message/snapshot features on the complete day, calculates both
+BROAD Method-C and executable-return targets, and stores the complete causal
+feature stream plus separate common/BROAD/EXEC endpoint masks. Censored rows
+therefore remain in the 256-event context but never contribute to the loss.
+Each shard also contains `*_endpoint_metadata.npz` and
+`*_support_audit.npz`; the sequence manifest is schema version 2. Old caches
+remain readable but do not contain enough identity information for the strict
+three-objective comparison. Changing this setting therefore requires rerunning
+preprocessing.
+
+After training on the common mask, run frozen inference on each natural support
+without refitting (BROAD on B, both EXEC models on E):
+
+```bash
+python scripts/evaluate_model.py --config configs_runs/BR-K-S42.yaml \
+  --checkpoint results/<BROAD_RUN>/<fold>/best_lob_transformer.pth \
+  --sequence-dir data/sequences_final/broad_kin/<fold> --split test \
+  --endpoint-support broad --save-probabilities \
+  --output-dir logs/<BROAD_RUN>/<fold>/frozen_broad_test
+
+python scripts/evaluate_model.py --config configs_runs/EC-K-S42.yaml \
+  --checkpoint results/<EXEC_CLS_RUN>/<fold>/best_lob_transformer.pth \
+  --sequence-dir data/sequences_final/exec_cls_kin/<fold> --split test \
+  --endpoint-support exec --save-probabilities \
+  --output-dir logs/<EXEC_CLS_RUN>/<fold>/frozen_exec_test
+
+python scripts/evaluate_action_value.py --config configs_runs/AV-K-S42.yaml \
+  --checkpoint results/<EXEC_AV_RUN>/<fold>/best_lob_transformer.pth \
+  --sequence-dir data/sequences_final/exec_av_kin/<fold> --split test \
+  --endpoint-support exec \
+  --output-dir logs/<EXEC_AV_RUN>/<fold>/frozen_exec_test
+```
+
+Then run the common evaluator:
+
+```bash
+python scripts/evaluate_common_executable.py \
+  --broad logs/<BROAD_RUN>/<fold>/frozen_broad_test/probabilities.csv \
+  --exec-cls logs/<EXEC_CLS_RUN>/<fold>/frozen_exec_test/probabilities.csv \
+  --exec-av logs/<EXEC_AV_RUN>/<fold>/frozen_exec_test/test_action_values.npz \
+  --support-audit data/sequences_final/broad_kin/<fold> \
+  --output-dir results/common_test_comparison
+```
+
+The evaluator joins only on `(date, raw_event_index)`, verifies identical EXEC
+outcomes, reports economic policies on `triple_common` and `exec_full`, and
+reports native BROAD task metrics on B. Fixed budgets are applied independently per day and direction;
+long/short choices are exclusive and at most one inclusive `[entry, exit]`
+interval may be active. Exact score ties use a stable seeded hash rather than
+row order. Headline economic conclusions must use `triple_common`; native
+macro-F1 values remain task-specific and are not directly comparable across
+BROAD and EXEC_CLS.
+
+### 6.2 Frozen ML baselines
+
+MLP and XGBoost baselines can persist the fitted estimator and its train-only
+standardization statistics. The test or holdout is then opened by a separate
+inference-only command: it never loads the train split and never calls `fit`.
+
+```bash
+python baselines/run_baselines.py --config configs_runs/ML1.yaml \
+  --run-stem ML1 --sequence-dir data/sequences_final/exec_cls_kin/intc_dev \
+  --model mlp --context last_mean --output results/baselines/ML1.json \
+  --model-output results/baselines/artifacts/ML1.pkl
+
+python scripts/evaluate_baseline.py \
+  --artifact results/baselines/artifacts/ML1.pkl \
+  --sequence-dir data/sequences_final/exec_cls_kin/intc_dev \
+  --split holdout --output results/baselines/ML1_holdout_frozen.json
+```
+
+The baseline commands and their frozen test/holdout counterparts are also
+written to `configs_runs/runs_manifest.yaml`.
+
+### 6.3 Early-session endpoint mask and CPU label audit
+
+Once `W_STAR` has been selected using train-only diagnostics, regenerate the
+campaign with both bounds in seconds since midnight. This emits the nine
+conditional early-session YAML files. Only supervised endpoints are masked;
+the complete preceding sequence remains available as causal context and no new
+preprocessing cache is required.
+
+```bash
+python scripts/generate_experiment_configs.py \
+  --w-star-start-seconds 34200 --w-star-end-seconds 37800
+```
+
+The L0/L2/L4 support, horizon, clustering, elapsed-time, event-spacing and ESS
+tables are generated in one CPU command from preprocessing audit artifacts:
+
+```bash
+python scripts/audit_labels.py \
+  --audit H050=data/sequences_final/audit_l2_h050_exec_av_base/intc_dev/train \
+  --audit H100=data/sequences_final/audit_l2_h100_exec_av_base/intc_dev/train \
+  --audit H250=data/sequences_final/audit_l2_h250_exec_av_base/intc_dev/train \
+  --audit H500=data/sequences_final/audit_l2_h500_exec_av_base/intc_dev/train \
+  --output-dir results/label_audits \
+  --realization-config configs_runs/L3-BROAD-EXANTE.yaml
+```
+
+The ex-ante/ex-post Method-C realization analysis remains in
+`scripts/analyze_label_realization.py`; both timing conventions are computed
+jointly from the same raw frame.
+
+All baseline loaders use the persisted common endpoint mask by default. This
+removes censored endpoints from their losses and metrics while retaining every
+preceding row needed to construct the causal input window. `--endpoint-support`
+can select the BROAD or EXEC natural support for a secondary frozen diagnostic.
 
 ## Status
 

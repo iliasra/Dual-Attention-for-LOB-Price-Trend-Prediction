@@ -124,7 +124,14 @@ export NUMEXPR_NUM_THREADS=4
 
 echo "===== COPYING CODE TO TMPDIR ====="
 mkdir -p "$WORK_DIR"
-rsync -a --exclude="data" "$PROJECT_DIR/" "$WORK_DIR/"
+rsync -a \
+  --exclude=".git" \
+  --exclude="data" \
+  --exclude="logs" \
+  --exclude="results" \
+  --exclude="output" \
+  --exclude="backtest" \
+  "$PROJECT_DIR/" "$WORK_DIR/"
 
 echo "===== STAGING RAW FILES FOR $SYMBOL $DATE ====="
 PROJECT_RAW_DATA_DIR="$(resolve_raw_data_dir "$PROJECT_CONFIG_PATH")"

@@ -109,6 +109,18 @@ SPLIT_NAMES = ("train", "validation", "test")
 DERIVATIVES_STATS_FILENAME = "derivatives_stats.yaml"
 FEATURE_SCHEMA_FILENAME = "feature_schema.yaml"
 SEQUENCE_MANIFEST_FILENAME = "sequence_manifest.yaml"
+RAW_EVENT_INDEX_COLUMN = "raw_event_index"
+COMMON_SUPPORT_COLUMNS = (
+    "broad_valid",
+    "exec_valid",
+    "feature_history_valid",
+    "common_endpoint_valid",
+    "broad_trend_label",
+    "exec_trend_label",
+    "entry_index",
+    "exit_index",
+    "censor_reason_code",
+)
 
 
 @dataclass(slots=True)
@@ -156,6 +168,7 @@ class ProcessedDay:
     joined: pd.DataFrame | None
     labeled: pd.DataFrame | None
     message_features: pd.DataFrame | None
+    support_audit: pd.DataFrame | None = None
     processed: pd.DataFrame | None = None
     normalized: pd.DataFrame | None = None
     processed_csv_path: Path | None = None
@@ -166,6 +179,7 @@ class ProcessedDay:
         self.raw = None
         self.joined = None
         self.labeled = None
+        self.support_audit = None
 
     def release_processed_frames(self) -> None:
         """Release feature, processed, and normalized frames after saving."""
@@ -248,6 +262,11 @@ class LobProcessingPipeline:
     def uses_volume_clock(self) -> bool:
         """Return whether preprocessing samples events into volume bars."""
         return self.config.preprocessing.sample_clock.enabled
+
+    def uses_common_endpoint_support(self) -> bool:
+        """Return whether BROAD/EXEC intersection preprocessing is enabled."""
+        support = getattr(self.config.preprocessing, "common_endpoint_support", None)
+        return bool(getattr(support, "enabled", False))
 
     def _sample_clock_metadata(self) -> dict[str, object]:
         """Return serializable sample-clock settings for preprocessing artifacts."""
@@ -431,6 +450,7 @@ class LobProcessingPipeline:
             joined=prepared_day.joined,
             labeled=prepared_day.labeled,
             message_features=prepared_day.message_features,
+            support_audit=prepared_day.support_audit,
         )
 
     def prepared_splits_for_fold(
@@ -493,6 +513,9 @@ class LobProcessingPipeline:
             kind="mergesort",
             ignore_index=True,
         )
+        if RAW_EVENT_INDEX_COLUMN in joined.columns:
+            raise ValueError(f"Raw input unexpectedly contains reserved column {RAW_EVENT_INDEX_COLUMN!r}.")
+        joined[RAW_EVENT_INDEX_COLUMN] = np.arange(len(joined), dtype=np.int64)
         joined["delta_t"] = joined[self.config.data.time_column] - joined[self.config.data.time_column].shift(1)
         trimmed = self.session_filter.transform(joined) #session_filter.transform gets rid of first/last 15 mins
         print(f"Loaded and trimmed {pair.label}: {len(trimmed)} rows.")
@@ -645,7 +668,7 @@ class LobProcessingPipeline:
         label_config = self.config.preprocessing.labels
         smoothing_config = label_config.smoothing
         return (
-            label_config.strategy.lower() == "smoothing"
+            (label_config.strategy.lower() == "smoothing" or self.uses_common_endpoint_support())
             and is_fitted_smoothing_threshold(smoothing_config.threshold)
             and smoothing_config.resolved_fit_scope() == "train"
         )
@@ -655,7 +678,7 @@ class LobProcessingPipeline:
         label_config = self.config.preprocessing.labels
         smoothing_config = label_config.smoothing
         return (
-            label_config.strategy.lower() == "smoothing"
+            (label_config.strategy.lower() == "smoothing" or self.uses_common_endpoint_support())
             and is_fitted_smoothing_threshold(smoothing_config.threshold)
             and smoothing_config.resolved_fit_scope() == "per_split"
         )
@@ -761,6 +784,8 @@ class LobProcessingPipeline:
         """Add target labels and pre-snapshot model features to one sampled day."""
         sampled = self._require_frame(day, "joined", "label generation")
         print(f"Starting label generation for {day.pair.label}.")
+        if self.uses_common_endpoint_support():
+            return self._build_common_endpoint_day(day, sampled)
         labeled = self.labeler.transform(
             sampled,
             smoothing_threshold_override=self._resolved_smoothing_threshold(day.split),
@@ -769,6 +794,92 @@ class LobProcessingPipeline:
         day.labeled = labeled
         day.message_features = self._message_features_from_labeled(labeled)
         print(f"Finished raw feature preparation for {day.pair.label}: {day.message_features.shape[0]} rows.")
+        return day
+
+    def _labels_for_strategy(self, sampled: pd.DataFrame, strategy: str, split: str) -> pd.DataFrame:
+        """Calculate one target family on the untouched sampled day."""
+        label_config = replace(self.config.preprocessing.labels, strategy=strategy)
+        labeler = TargetLabelPipeline(label_config)
+        threshold_override = self._resolved_smoothing_threshold(split) if strategy == "smoothing" else None
+        return labeler.transform(sampled, smoothing_threshold_override=threshold_override)
+
+    @staticmethod
+    def _payload_by_raw_index(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        if RAW_EVENT_INDEX_COLUMN not in frame.columns:
+            raise ValueError(f"Labeled frame is missing {RAW_EVENT_INDEX_COLUMN!r}.")
+        if frame[RAW_EVENT_INDEX_COLUMN].duplicated().any():
+            raise ValueError("Target generation produced duplicate raw_event_index values.")
+        return frame.set_index(RAW_EVENT_INDEX_COLUMN).loc[:, columns]
+
+    def _build_common_endpoint_day(self, day: ProcessedDay, sampled: pd.DataFrame) -> ProcessedDay:
+        """Attach BROAD and EXEC targets after feature calculation without positional joins."""
+        strategy = self.config.preprocessing.labels.strategy
+        if strategy not in {"smoothing", "executable_return"}:
+            raise ValueError(
+                "preprocessing.common_endpoint_support.enabled=true supports only smoothing "
+                "and executable_return targets."
+            )
+        if RAW_EVENT_INDEX_COLUMN not in sampled.columns or sampled[RAW_EVENT_INDEX_COLUMN].duplicated().any():
+            raise ValueError("Common endpoint support requires unique raw_event_index values.")
+
+        # Both targets are calculated from the same untouched day.  Their legacy
+        # labelers may drop invalid rows, so all reattachment is key-based.
+        broad = self._labels_for_strategy(sampled, "smoothing", day.split)
+        executable = self._labels_for_strategy(sampled, "executable_return", day.split)
+        broad_payload = self._payload_by_raw_index(broad, [self.config.data.label_column]).rename(
+            columns={self.config.data.label_column: "broad_trend_label"}
+        )
+        exec_payload = self._payload_by_raw_index(
+            executable,
+            [self.config.data.label_column, "long_net_return_ticks", "short_net_return_ticks"],
+        ).rename(columns={self.config.data.label_column: "exec_trend_label"})
+
+        full = sampled.copy()
+        keys = full[RAW_EVENT_INDEX_COLUMN].to_numpy(dtype=np.int64)
+        broad_aligned = broad_payload.reindex(keys)
+        exec_aligned = exec_payload.reindex(keys)
+        full["broad_trend_label"] = broad_aligned["broad_trend_label"].to_numpy()
+        full["exec_trend_label"] = exec_aligned["exec_trend_label"].to_numpy()
+        full["long_net_return_ticks"] = exec_aligned["long_net_return_ticks"].to_numpy(dtype=float)
+        full["short_net_return_ticks"] = exec_aligned["short_net_return_ticks"].to_numpy(dtype=float)
+        full["broad_valid"] = full["broad_trend_label"].notna().to_numpy(dtype=bool)
+        full["exec_valid"] = (
+            full[["exec_trend_label", "long_net_return_ticks", "short_net_return_ticks"]]
+            .notna()
+            .all(axis=1)
+            .to_numpy(dtype=bool)
+        )
+        full["feature_history_valid"] = True
+        full["common_endpoint_valid"] = full["broad_valid"] & full["exec_valid"]
+
+        raw_ids = pd.Series(keys, index=full.index, dtype=np.int64)
+        executable_config = self.config.preprocessing.labels.executable_return
+        full["entry_index"] = raw_ids.shift(-executable_config.entry_lag_events)
+        full["exit_index"] = raw_ids.shift(-executable_config.horizon_events)
+        full["censor_reason_code"] = (
+            (~full["broad_valid"]).astype(np.uint8)
+            + 2 * (~full["exec_valid"]).astype(np.uint8)
+        )
+
+        active_label = "broad_trend_label" if strategy == "smoothing" else "exec_trend_label"
+        full[self.config.data.label_column] = full[active_label]
+        day.labeled = full
+        day.support_audit = full.loc[
+            :,
+            [
+                RAW_EVENT_INDEX_COLUMN,
+                self.downstream_data_config.time_column,
+                *COMMON_SUPPORT_COLUMNS,
+                "long_net_return_ticks",
+                "short_net_return_ticks",
+            ],
+        ].copy()
+        print(f"Starting message feature processing for {day.pair.label} on the unfiltered day.")
+        day.message_features = self._message_features_from_labeled(full)
+        print(
+            f"Finished common-support preparation for {day.pair.label}: "
+            f"{int(full['common_endpoint_valid'].sum())}/{len(full)} common endpoints."
+        )
         return day
 
     def prepare_pair(self, pair: LobFilePair, split: str) -> ProcessedDay:
@@ -1502,7 +1613,10 @@ class LobProcessingPipeline:
         for day in days:
             labeled = self._require_frame(day, "labeled", "label distribution")
             if label_column in labeled.columns:
-                label_values.append(labeled[label_column])
+                if self.uses_common_endpoint_support() and "common_endpoint_valid" in labeled.columns:
+                    label_values.append(labeled.loc[labeled["common_endpoint_valid"].astype(bool), label_column])
+                else:
+                    label_values.append(labeled[label_column])
         labels = pd.concat(label_values, ignore_index=True) if label_values else pd.Series(dtype=int)
         total = int(len(labels))
         distribution: dict[str, object] = {"total": total}
@@ -1560,7 +1674,10 @@ class LobProcessingPipeline:
         if label_column not in labeled.columns:
             return
 
-        labels = labeled[label_column]
+        if self.uses_common_endpoint_support() and "common_endpoint_valid" in labeled.columns:
+            labels = labeled.loc[labeled["common_endpoint_valid"].astype(bool), label_column]
+        else:
+            labels = labeled[label_column]
         split_counts = accumulator[split]
         split_counts["total"] += int(len(labels))
         for class_value in (-1, 0, 1):
@@ -1783,14 +1900,9 @@ class LobProcessingPipeline:
                 f"missing columns={missing}, extra columns={extra}."
             )
 
-        data_config = getattr(self, "downstream_data_config", self.config.data)
-        excluded_columns = {
-            data_config.time_column,
-            data_config.label_column,
-            *data_config.feature_exclude_columns,
-            *(data_config.target_columns or []),
-        }
-        non_feature_columns = [column for column in normalized.columns if column in excluded_columns]
+        # Keep every target/evaluation metadata column, but never expose it to
+        # the network. DailySequenceBuilder owns the canonical feature denylist.
+        non_feature_columns = [column for column in normalized.columns if column not in current_features]
         day.normalized = normalized.loc[:, non_feature_columns + ordered_feature_columns]
 
     def apply_feature_schema(self, processed_splits: dict[str, list[ProcessedDay]], schema_path: Path) -> list[str]:
@@ -1977,8 +2089,136 @@ class LobProcessingPipeline:
                     day.processed_csv_path = None
 
                 prefix = sequence_split_dir / day.pair.output_stem
-                day.sequence_paths = self.sequence_builder.save(normalized, prefix)
+                sequence_frame, supervision_masks = self._sequence_output_frame(normalized, day.pair.label)
+                day.normalized = normalized
+                day.sequence_paths = self.sequence_builder.save(sequence_frame, prefix)
+                self._save_supervision_masks(prefix, supervision_masks)
+                self._save_endpoint_artifacts(day, normalized, prefix)
                 print(f"Saved outputs for {day.pair.label} ({split}).")
+
+    @staticmethod
+    def _save_supervision_masks(prefix: Path, masks: dict[str, np.ndarray]) -> None:
+        suffixes = {
+            "common": "_supervision_mask.npy",
+            "broad": "_broad_supervision_mask.npy",
+            "exec": "_exec_supervision_mask.npy",
+        }
+        for support, mask in masks.items():
+            np.save(prefix.with_name(f"{prefix.name}{suffixes[support]}"), np.asarray(mask, dtype=bool))
+
+    def _sequence_output_frame(
+        self,
+        frame: pd.DataFrame,
+        label: str,
+    ) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
+        """Keep the full causal context and return a separate endpoint supervision mask."""
+        if not self.uses_common_endpoint_support():
+            return frame, {"common": np.ones(len(frame), dtype=bool)}
+        required = {"common_endpoint_valid", self.config.data.label_column, RAW_EVENT_INDEX_COLUMN}
+        missing = sorted(required - set(frame.columns))
+        if missing:
+            raise ValueError(f"Common-support snapshot frame for {label} is missing {missing}.")
+        masks = {
+            "common": frame["common_endpoint_valid"].fillna(False).to_numpy(dtype=bool),
+            "broad": frame["broad_valid"].fillna(False).to_numpy(dtype=bool),
+            "exec": frame["exec_valid"].fillna(False).to_numpy(dtype=bool),
+        }
+        eligible = masks["common"] & (
+            np.arange(len(frame), dtype=np.int64) >= self.config.data.sequence_window - 1
+        )
+        if not eligible.any():
+            raise ValueError(
+                f"{label} has no common endpoint with sequence_window="
+                f"{self.config.data.sequence_window} rows of causal context."
+            )
+        output = frame.copy()
+        active_support = (
+            "broad"
+            if self.config.preprocessing.labels.strategy == "smoothing"
+            else "exec"
+        )
+        active_mask = masks[active_support]
+        if self.config.data.target_columns:
+            output.loc[~active_mask, self.config.data.target_columns] = 0.0
+        else:
+            mapping = self.config.data.label_mapping
+            neutral_source = min(mapping, key=lambda key: abs(int(mapping[key]) - 1))
+            output.loc[~active_mask, self.config.data.label_column] = neutral_source
+        return output, masks
+
+    def _endpoint_metadata_payload(self, frame: pd.DataFrame, date: str) -> dict[str, np.ndarray]:
+        if RAW_EVENT_INDEX_COLUMN not in frame.columns:
+            return {}
+        fallback_time_column = getattr(getattr(self, "downstream_data_config", None), "time_column", "time")
+        time_column = "volume_wall_time" if "volume_wall_time" in frame.columns else fallback_time_column
+        required = {
+            RAW_EVENT_INDEX_COLUMN,
+            time_column,
+            "entry_index",
+            "exit_index",
+            "long_net_return_ticks",
+            "short_net_return_ticks",
+            "broad_trend_label",
+            "exec_trend_label",
+        }
+        missing = sorted(required - set(frame.columns))
+        if missing:
+            return {}
+        payload: dict[str, np.ndarray] = {
+            "date": np.full(len(frame), str(date), dtype=f"<U{max(len(str(date)), 1)}"),
+            "raw_event_index": frame[RAW_EVENT_INDEX_COLUMN].to_numpy(dtype=np.int64),
+            "decision_time": frame[time_column].to_numpy(dtype=np.float64),
+            "entry_index": frame["entry_index"].fillna(-1).to_numpy(dtype=np.int64),
+            "exit_index": frame["exit_index"].fillna(-1).to_numpy(dtype=np.int64),
+            "realized_long": frame["long_net_return_ticks"].to_numpy(dtype=np.float32),
+            "realized_short": frame["short_net_return_ticks"].to_numpy(dtype=np.float32),
+            "broad_label": frame["broad_trend_label"].fillna(127).to_numpy(dtype=np.int8),
+            "exec_label": frame["exec_trend_label"].fillna(127).to_numpy(dtype=np.int8),
+        }
+        for column in ("broad_valid", "exec_valid", "feature_history_valid", "common_endpoint_valid"):
+            if column in frame.columns:
+                payload[column] = frame[column].to_numpy(dtype=bool)
+        if "censor_reason_code" in frame.columns:
+            payload["censor_reason_code"] = frame["censor_reason_code"].to_numpy(dtype=np.uint8)
+        return payload
+
+    def _save_endpoint_artifacts(self, day: ProcessedDay, frame: pd.DataFrame, prefix: Path) -> None:
+        payload = self._endpoint_metadata_payload(frame, day.pair.date)
+        if payload:
+            np.savez_compressed(prefix.with_name(f"{prefix.name}_endpoint_metadata.npz"), **payload)
+
+        audit = day.support_audit
+        if audit is None:
+            return
+        audit = audit.copy()
+        row_position = np.arange(len(audit), dtype=np.int64)
+        context_rows = (
+            self.config.preprocessing.snapshot_window - 1
+            + self.config.data.sequence_window - 1
+        )
+        feature_history_valid = row_position >= context_rows
+        target_valid = audit["broad_valid"].to_numpy(bool) & audit["exec_valid"].to_numpy(bool)
+        audit["feature_history_valid"] = feature_history_valid
+        audit["common_endpoint_valid"] = target_valid & audit["feature_history_valid"]
+        audit["censor_reason_code"] = (
+            (~audit["broad_valid"].to_numpy(bool)).astype(np.uint8)
+            + 2 * (~audit["exec_valid"].to_numpy(bool)).astype(np.uint8)
+            + 4 * (~audit["feature_history_valid"].to_numpy(bool)).astype(np.uint8)
+        )
+        audit_payload = {
+            "date": np.full(len(audit), day.pair.date, dtype=f"<U{max(len(day.pair.date), 1)}"),
+        }
+        audit_time_column = (
+            "volume_wall_time" if "volume_wall_time" in audit.columns else self.config.data.time_column
+        )
+        if audit_time_column in audit.columns:
+            audit_payload["decision_time"] = audit[audit_time_column].to_numpy(dtype=np.float64)
+        for column in audit.columns:
+            values = audit[column].to_numpy()
+            if values.dtype == object:
+                continue
+            audit_payload[column] = values
+        np.savez_compressed(prefix.with_name(f"{prefix.name}_support_audit.npz"), **audit_payload)
 
     def _build_and_save_one_day(
         self,
@@ -2018,7 +2258,10 @@ class LobProcessingPipeline:
             day.processed_csv_path = None
 
         prefix = sequence_split_dir / day.pair.output_stem
-        day.sequence_paths = self.sequence_builder.save(normalized, prefix)
+        sequence_frame, supervision_masks = self._sequence_output_frame(normalized, day.pair.label)
+        day.sequence_paths = self.sequence_builder.save(sequence_frame, prefix)
+        self._save_supervision_masks(prefix, supervision_masks)
+        self._save_endpoint_artifacts(day, normalized, prefix)
         print(f"Saved outputs for {day.pair.label} ({split}).")
         return normalized.shape
 
@@ -2112,7 +2355,14 @@ class LobProcessingPipeline:
                     "features": f"{split}/{stem}_features.npy",
                     "times": f"{split}/{stem}_times.npy",
                     "labels": f"{split}/{stem}_labels.npy",
+                    "supervision_mask": f"{split}/{stem}_supervision_mask.npy",
                 }
+                optional_support_files = {
+                    "broad_supervision_mask": f"{split}/{stem}_broad_supervision_mask.npy",
+                    "exec_supervision_mask": f"{split}/{stem}_exec_supervision_mask.npy",
+                }
+                metadata_relative = f"{split}/{stem}_endpoint_metadata.npz"
+                support_audit_relative = f"{split}/{stem}_support_audit.npz"
                 missing = [name for name, relative in files.items() if not (fold_sequence_dir / relative).exists()]
                 if missing:
                     raise FileNotFoundError(f"Cannot finalize shard manifest for {stem}; missing {missing}.")
@@ -2120,15 +2370,27 @@ class LobProcessingPipeline:
                     {
                         "stem": stem,
                         **files,
+                        **{
+                            name: relative if (fold_sequence_dir / relative).exists() else None
+                            for name, relative in optional_support_files.items()
+                        },
+                        "endpoint_metadata": metadata_relative
+                        if (fold_sequence_dir / metadata_relative).exists()
+                        else None,
+                        "support_audit": support_audit_relative
+                        if (fold_sequence_dir / support_audit_relative).exists()
+                        else None,
                         "rows": int(shape[0]),
                         "processed_columns": int(shape[1]),
                     }
                 )
             manifest_splits[split] = entries
         manifest = {
-            "version": 1,
+            "version": 2,
             "fold_id": fold.id,
             "target_columns": list(self.config.data.target_columns or []),
+            "common_endpoint_support": self.uses_common_endpoint_support(),
+            "sample_key": ["date", RAW_EVENT_INDEX_COLUMN],
             "splits": manifest_splits,
         }
         manifest_path = fold_sequence_dir / SEQUENCE_MANIFEST_FILENAME

@@ -207,7 +207,11 @@ class WandbTracker:
 
         try:
             wandb = importlib.import_module("wandb")
-        except ImportError:
+        except ImportError as exc:
+            if config.required:
+                raise RuntimeError(
+                    'W&B tracking is required, but the wandb package is not installed.'
+                ) from exc
             print("W&B tracking requested but wandb is not installed; continuing without W&B.")
             return cls.disabled()
 
@@ -230,12 +234,16 @@ class WandbTracker:
         }
 
         env_mode = os.environ.get("WANDB_MODE")
-        requested_mode = env_mode or config.mode
+        requested_mode = config.mode if config.required else (env_mode or config.mode)
         modes = [requested_mode] if requested_mode != "auto" else ["online", "offline"]
+        if config.required and requested_mode == 'auto':
+            modes = ['online']
         last_error: Exception | None = None
         for index, mode in enumerate(modes):
             try:
                 run = wandb.init(**init_kwargs, mode=mode)
+                if run is None:
+                    raise RuntimeError(f'wandb.init(mode={mode!r}) returned no run.')
                 if index > 0:
                     print("W&B online initialization failed; using offline mode.")
                 tracker = cls(
@@ -248,6 +256,10 @@ class WandbTracker:
                 return tracker
             except Exception as exc:  # pragma: no cover - depends on W&B/network state.
                 last_error = exc
+                if config.required:
+                    raise RuntimeError(
+                        f'W&B tracking is required, but initialization failed in mode {mode!r}.'
+                    ) from exc
                 if mode != "online":
                     break
                 print(f"W&B online initialization failed ({exc}); falling back to offline mode.")

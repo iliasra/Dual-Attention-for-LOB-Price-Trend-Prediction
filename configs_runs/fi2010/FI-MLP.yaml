@@ -1,0 +1,318 @@
+seed: 42
+experiment:
+  name: FI-MLP
+data:
+  raw_data_dir: ../../data/F1_2010
+  processed_data_dir: ../../data/processed_dataframes_fi2010
+  sequence_data_dir: ../../data/sequences
+  logs_dir: ../../logs
+  tick_size: 1.0
+  time_column: time
+  label_column: trend_label
+  label_mapping:
+    -1: 2
+    0: 1
+    1: 0
+  price_columns: auto
+  volume_columns: auto
+  feature_exclude_columns: []
+  sequence_window: 128
+  target_columns: null
+dataset_splits:
+  train_dates:
+  - 0001-train
+  validation_dates:
+  - 0002-validation
+  test_dates:
+  - 0003-test
+folds:
+- id: fi2010_tlob_h100
+  train_dates:
+  - 0001-train
+  validation_dates:
+  - 0002-validation
+  test_dates:
+  - 0003-test
+preprocessing:
+  snapshot_window: 1
+  save_processed_dataframes: false
+  labels:
+    strategy: smoothing
+    smoothing:
+      method: C
+      threshold: 0.0
+      fit_scope: null
+      k: 0
+      h: 1
+      bid_column: bid_price_1
+      ask_column: ask_price_1
+      adaptive_threshold:
+        enabled: false
+        exit_spread_window: 1
+        volatility_window: 1
+        round_trip_fees_bps: 0.0
+        volatility_lambda: 0.0
+        label_timing: ex_ante
+        include_exante_features: false
+    triple_barrier:
+      horizon: 1
+      upper_barrier_ticks: 0.0
+      lower_barrier_ticks: 0.0
+      bid_column: bid_price_1
+      ask_column: ask_price_1
+      price_column: null
+  message:
+    size_column: size
+    price_column: price
+    order_id_column: order_id
+    categorical_value_map:
+      type:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      direction:
+      - -1
+      - 1
+    drop_columns:
+    - price
+    - size
+    - type
+    - direction
+    - order_id
+  temporal_features:
+    add_day_sincos: false
+    day_frequency: 1
+    keep_timestamp: true
+    market_open_seconds: 0
+    market_close_seconds: 1
+    start_offset_minutes: 0
+    end_offset_minutes: 0
+  normalization:
+    derivatives_stats_dir: ../../data/derivatives_z_scores_fi2010
+    scope: train_only
+    derivative_scaling_method: zscore
+    position_scaling_method: zscore
+    size_log1p_scaling_method: zscore
+    price_static_scaling_method: zscore
+    adaptive_label_feature_scaling_method: zscore
+    delta_t_transform: log1p
+    delta_t_scaling_method: robust_mad
+  kinematic_tokenization:
+    method: fast
+    chunk_size: 1
+    n_df_candidates: 1
+  price_kinematic:
+    enabled: false
+    columns: auto
+    reference: tick
+    basis:
+      alpha: 0.0
+    fast:
+      n_basis: 4
+      df: 1.0
+      eval_at: 0.0
+  price_static:
+    enabled: false
+    columns: auto
+    tau_start: 0.0
+    tau_clip: null
+    tau_max: null
+  volume_kinematic:
+    enabled: false
+    columns: auto
+    reference: tick
+    basis:
+      alpha: 0.0
+    fast:
+      n_basis: 4
+      df: 1.0
+      eval_at: 0.0
+  volume_static:
+    enabled: false
+    columns: auto
+    quantile: 0.0
+    target: 0.5
+  causal_market_features:
+    enabled: false
+    volatility_windows:
+    - 32
+    - 128
+    - 256
+    spread_regime_window: 128
+    imbalance_levels:
+    - 1
+    - 5
+    microprice_levels: 5
+    ofi_windows:
+    - 10
+    - 50
+    - 100
+    intensity_windows:
+    - 10
+    - 50
+    - 100
+    momentum_windows:
+    - 5
+    - 20
+    - 100
+    trade_type_values:
+    - 4
+    - 5
+  microprice:
+    enabled: false
+    levels: 1
+  sample_clock:
+    mode: event
+    volume_step_shares: 500
+    volume_source: traded
+    trade_type_values:
+    - 4
+    - 5
+model:
+  d_input: 144
+  d_model: 256
+  feature_embed_dim: 32
+  feature_num_frequencies: 8
+  feature_sigma: 1.0
+  num_layers: 2
+  latent_spatial_embed_dim: 16
+  num_heads: 4
+  max_dt_quantile: 95.0
+  max_dt: null
+  use_moe: false
+  num_experts: 4
+  top_k: 2
+  num_classes: 3
+  rope_type: hybrid_crope
+  rope_base: 10000
+  attention_dropout: 0.1
+  moe_dropout: 0.1
+  moe_expansion_factor: 4
+  moe_router_noise: 0.01
+  moe_load_balancing_weight: 0.01
+  classifier_dropout: 0.1
+  classifier_pooling:
+    methods:
+    - last
+    - mean
+    last_k: 16
+  auxiliary_heads:
+    enabled: false
+    movement: true
+    direction: true
+    hidden_dim: null
+  feature_include_raw_value: true
+  use_spatial_attention: true
+  use_temporal_attention: true
+  moe_router_z_loss_weight: 0.001
+  local_attention_context_tokens: 128
+training:
+  device: cuda
+  epochs: 20
+  batch_size: 64
+  eval_batch_size: 256
+  num_workers: 0
+  early_stopping_patience: 0
+  early_stopping_warmup: 0
+  early_stopping_min_delta: 0.0
+  validate_every_n_batches: epoch
+  validate_at_epoch_end: false
+  monitor: val_macro_f1
+  monitor_mode: max
+  top_k_checkpoints: 3
+  monitor_params:
+    base_metric: val_directional_macro_f1
+    lambda_ece: 0.0
+    lambda_rate: 0.1
+    fixed_rate: 0.005
+  persistent_workers: false
+  optimizer: adamw
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  focal_gamma: 0.0
+  class_weight_beta: 0.25
+  class_weight_min: 0.75
+  class_weight_max: 1.5
+  auxiliary_losses:
+    movement_weight: 0.05
+    direction_weight: 0.05
+    consistency_weight: 0.0
+    movement_pos_weight: auto_clipped
+    movement_pos_weight_min: 0.5
+    movement_pos_weight_max: 5.0
+    direction_class_weight_beta: 0.0
+  grad_clip_norm: 1.0
+  model_dir: ../../results
+  use_amp: true
+  deterministic_torch: false
+  temperature_scaling:
+    enabled: false
+    class_bias_calibration: true
+  directional_thresholds:
+    enabled: false
+    method: top_x_quantile
+    score: precision_at_fixed_rate
+    min: 0.1
+    max: 0.95
+    step: 0.05
+    delta: 0.0
+    up_precision_floor: null
+    down_precision_floor: null
+    up_quantile: 0.005
+    down_quantile: 0.005
+  sampling:
+    neutral_to_directional_ratio: null
+  gradient_accumulation_steps: 1
+  prefetch_factor: null
+  preload_data_to_memory: false
+  torch_compile:
+    enabled: true
+    backend: inductor
+    mode: default
+    fullgraph: false
+    dynamic: false
+    require_cuda: true
+  sequence_supervision:
+    mode: last_window
+    loss_warmup_tokens: null
+    chunk_stride: null
+    neutral_weighting: none
+  evaluate_test_after_fit: false
+  objective:
+    type: classification
+    loss: cross_entropy
+    huber_delta: 1.0
+    quantiles:
+    - 0.1
+    - 0.5
+    - 0.9
+    quantile_loss_weight: 0.25
+    quantile_crossing_weight: 0.1
+    decision_threshold_ticks: 0.0
+    fixed_rate: 0.005
+tracking:
+  wandb:
+    enabled: true
+    project: lob-price-trend
+    entity: ilias-ramim-imperial-college-london
+    mode: online
+    dir: null
+    tags:
+    - thesis-final
+    - FI2010
+    - mlp
+    - FI-MLP
+    log_training_steps: true
+    log_best_checkpoint: true
+    log_top_k_checkpoints: false
+    required: true
+run_metadata:
+  campaign: thesis_final_fi2010
+  config_id: FI-MLP
+  role: mlp
+  target: fi2010_classification
+  representation: published_features
+  preprocessing_group: fi2010_tlob_h100
+  selection_status: fixed

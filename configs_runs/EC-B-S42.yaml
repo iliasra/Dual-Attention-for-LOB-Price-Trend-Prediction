@@ -1,0 +1,634 @@
+seed: 42
+experiment:
+  name: EC-B-S42
+data:
+  raw_data_dir: ../data/INTC_batch_2
+  processed_data_dir: ../data/processed_final/exec_cls_base
+  sequence_data_dir: ../data/sequences_final/exec_cls_base
+  logs_dir: ../logs
+  tick_size: 100.0
+  time_column: time
+  label_column: trend_label
+  label_mapping:
+    -1: 0
+    0: 1
+    1: 2
+  target_columns: null
+  price_columns: auto
+  volume_columns: auto
+  feature_exclude_columns:
+  - long_net_return_ticks
+  - short_net_return_ticks
+  sequence_window: 256
+dataset_splits:
+  train_dates:
+  - '2023-11-01'
+  - '2023-11-02'
+  - '2023-11-03'
+  - '2023-11-06'
+  - '2023-11-07'
+  - '2023-11-08'
+  - '2023-11-09'
+  - '2023-11-10'
+  - '2023-11-13'
+  - '2023-11-14'
+  - '2023-11-15'
+  - '2023-11-16'
+  - '2023-11-17'
+  - '2023-11-20'
+  - '2023-11-21'
+  - '2023-11-22'
+  - '2023-11-24'
+  - '2023-11-27'
+  - '2023-11-28'
+  - '2023-11-29'
+  - '2023-11-30'
+  - '2023-12-01'
+  - '2023-12-04'
+  - '2023-12-05'
+  - '2023-12-06'
+  - '2023-12-07'
+  - '2023-12-08'
+  - '2023-12-11'
+  - '2023-12-12'
+  - '2023-12-13'
+  - '2023-12-14'
+  - '2023-12-15'
+  - '2023-12-18'
+  - '2023-12-19'
+  - '2023-12-20'
+  - '2023-12-21'
+  - '2023-12-22'
+  - '2023-12-26'
+  - '2023-12-27'
+  - '2023-12-28'
+  - '2023-12-29'
+  - '2024-01-02'
+  - '2024-01-03'
+  - '2024-01-04'
+  - '2024-01-05'
+  - '2024-01-08'
+  - '2024-01-09'
+  - '2024-01-10'
+  - '2024-01-11'
+  - '2024-01-12'
+  - '2024-01-16'
+  - '2024-01-17'
+  - '2024-01-18'
+  - '2024-01-19'
+  - '2024-01-22'
+  - '2024-01-23'
+  - '2024-01-24'
+  - '2024-01-25'
+  - '2024-01-26'
+  - '2024-01-29'
+  - '2024-01-30'
+  - '2024-01-31'
+  - '2024-02-01'
+  - '2024-02-02'
+  - '2024-02-05'
+  - '2024-02-06'
+  - '2024-02-07'
+  - '2024-02-08'
+  - '2024-02-09'
+  - '2024-02-12'
+  - '2024-02-13'
+  - '2024-02-14'
+  - '2024-02-15'
+  - '2024-02-16'
+  - '2024-02-20'
+  - '2024-02-21'
+  - '2024-02-22'
+  - '2024-02-23'
+  - '2024-02-26'
+  - '2024-02-27'
+  - '2024-02-28'
+  - '2024-02-29'
+  - '2024-03-01'
+  - '2024-03-04'
+  - '2024-03-05'
+  - '2024-03-06'
+  - '2024-03-07'
+  - '2024-03-08'
+  - '2024-03-11'
+  - '2024-03-12'
+  - '2024-03-13'
+  - '2024-03-14'
+  - '2024-03-15'
+  - '2024-03-18'
+  - '2024-03-19'
+  - '2024-03-20'
+  - '2024-03-21'
+  - '2024-03-22'
+  - '2024-03-25'
+  - '2024-03-26'
+  - '2024-03-27'
+  - '2024-03-28'
+  - '2024-04-01'
+  - '2024-04-02'
+  - '2024-04-03'
+  - '2024-04-04'
+  - '2024-04-05'
+  - '2024-04-08'
+  - '2024-04-09'
+  - '2024-04-10'
+  - '2024-04-11'
+  - '2024-04-12'
+  - '2024-04-15'
+  - '2024-04-16'
+  - '2024-04-17'
+  - '2024-04-18'
+  - '2024-04-19'
+  - '2024-04-22'
+  - '2024-04-23'
+  - '2024-04-24'
+  - '2024-04-25'
+  - '2024-04-26'
+  - '2024-04-29'
+  - '2024-04-30'
+  validation_dates:
+  - '2024-05-01'
+  - '2024-05-02'
+  - '2024-05-03'
+  - '2024-05-06'
+  - '2024-05-07'
+  - '2024-05-08'
+  - '2024-05-09'
+  - '2024-05-10'
+  - '2024-05-13'
+  - '2024-05-14'
+  - '2024-05-15'
+  - '2024-05-16'
+  - '2024-05-17'
+  test_dates:
+  - '2024-05-20'
+  - '2024-05-21'
+  - '2024-05-22'
+  - '2024-05-23'
+  - '2024-05-24'
+  - '2024-05-28'
+  - '2024-05-29'
+  - '2024-05-30'
+  - '2024-05-31'
+  - '2024-06-03'
+  - '2024-06-04'
+  - '2024-06-05'
+  - '2024-06-06'
+  - '2024-06-07'
+folds:
+- id: intc_dev
+  train_dates:
+  - '2023-11-01'
+  - '2023-11-02'
+  - '2023-11-03'
+  - '2023-11-06'
+  - '2023-11-07'
+  - '2023-11-08'
+  - '2023-11-09'
+  - '2023-11-10'
+  - '2023-11-13'
+  - '2023-11-14'
+  - '2023-11-15'
+  - '2023-11-16'
+  - '2023-11-17'
+  - '2023-11-20'
+  - '2023-11-21'
+  - '2023-11-22'
+  - '2023-11-24'
+  - '2023-11-27'
+  - '2023-11-28'
+  - '2023-11-29'
+  - '2023-11-30'
+  - '2023-12-01'
+  - '2023-12-04'
+  - '2023-12-05'
+  - '2023-12-06'
+  - '2023-12-07'
+  - '2023-12-08'
+  - '2023-12-11'
+  - '2023-12-12'
+  - '2023-12-13'
+  - '2023-12-14'
+  - '2023-12-15'
+  - '2023-12-18'
+  - '2023-12-19'
+  - '2023-12-20'
+  - '2023-12-21'
+  - '2023-12-22'
+  - '2023-12-26'
+  - '2023-12-27'
+  - '2023-12-28'
+  - '2023-12-29'
+  - '2024-01-02'
+  - '2024-01-03'
+  - '2024-01-04'
+  - '2024-01-05'
+  - '2024-01-08'
+  - '2024-01-09'
+  - '2024-01-10'
+  - '2024-01-11'
+  - '2024-01-12'
+  - '2024-01-16'
+  - '2024-01-17'
+  - '2024-01-18'
+  - '2024-01-19'
+  - '2024-01-22'
+  - '2024-01-23'
+  - '2024-01-24'
+  - '2024-01-25'
+  - '2024-01-26'
+  - '2024-01-29'
+  - '2024-01-30'
+  - '2024-01-31'
+  - '2024-02-01'
+  - '2024-02-02'
+  - '2024-02-05'
+  - '2024-02-06'
+  - '2024-02-07'
+  - '2024-02-08'
+  - '2024-02-09'
+  - '2024-02-12'
+  - '2024-02-13'
+  - '2024-02-14'
+  - '2024-02-15'
+  - '2024-02-16'
+  - '2024-02-20'
+  - '2024-02-21'
+  - '2024-02-22'
+  - '2024-02-23'
+  - '2024-02-26'
+  - '2024-02-27'
+  - '2024-02-28'
+  - '2024-02-29'
+  - '2024-03-01'
+  - '2024-03-04'
+  - '2024-03-05'
+  - '2024-03-06'
+  - '2024-03-07'
+  - '2024-03-08'
+  - '2024-03-11'
+  - '2024-03-12'
+  - '2024-03-13'
+  - '2024-03-14'
+  - '2024-03-15'
+  - '2024-03-18'
+  - '2024-03-19'
+  - '2024-03-20'
+  - '2024-03-21'
+  - '2024-03-22'
+  - '2024-03-25'
+  - '2024-03-26'
+  - '2024-03-27'
+  - '2024-03-28'
+  - '2024-04-01'
+  - '2024-04-02'
+  - '2024-04-03'
+  - '2024-04-04'
+  - '2024-04-05'
+  - '2024-04-08'
+  - '2024-04-09'
+  - '2024-04-10'
+  - '2024-04-11'
+  - '2024-04-12'
+  - '2024-04-15'
+  - '2024-04-16'
+  - '2024-04-17'
+  - '2024-04-18'
+  - '2024-04-19'
+  - '2024-04-22'
+  - '2024-04-23'
+  - '2024-04-24'
+  - '2024-04-25'
+  - '2024-04-26'
+  - '2024-04-29'
+  - '2024-04-30'
+  validation_dates:
+  - '2024-05-01'
+  - '2024-05-02'
+  - '2024-05-03'
+  - '2024-05-06'
+  - '2024-05-07'
+  - '2024-05-08'
+  - '2024-05-09'
+  - '2024-05-10'
+  - '2024-05-13'
+  - '2024-05-14'
+  - '2024-05-15'
+  - '2024-05-16'
+  - '2024-05-17'
+  test_dates:
+  - '2024-05-20'
+  - '2024-05-21'
+  - '2024-05-22'
+  - '2024-05-23'
+  - '2024-05-24'
+  - '2024-05-28'
+  - '2024-05-29'
+  - '2024-05-30'
+  - '2024-05-31'
+  - '2024-06-03'
+  - '2024-06-04'
+  - '2024-06-05'
+  - '2024-06-06'
+  - '2024-06-07'
+preprocessing:
+  snapshot_window: 100
+  save_processed_dataframes: false
+  common_endpoint_support:
+    enabled: true
+  labels:
+    strategy: executable_return
+    smoothing:
+      method: C
+      threshold: null
+      fit_scope: null
+      k: 9
+      h: 100
+      bid_column: bid_price_1
+      ask_column: ask_price_1
+      adaptive_threshold:
+        enabled: true
+        exit_spread_window: 100
+        volatility_window: 256
+        round_trip_fees_bps: 1.5
+        volatility_lambda: 1.0
+        label_timing: ex_ante
+        include_exante_features: false
+    triple_barrier:
+      horizon: 10
+      upper_barrier_ticks: 2.0
+      lower_barrier_ticks: 3.0
+      bid_column: bid_price_1
+      ask_column: ask_price_1
+      price_column: null
+    executable_return:
+      horizon_events: 100
+      entry_lag_events: 1
+      round_trip_fees_bps: 1.5
+      slippage_ticks_per_side: 0.0
+      minimum_edge_ticks: 0.0
+      clip_target_ticks: null
+      bid_column: bid_price_1
+      ask_column: ask_price_1
+  message:
+    size_column: size
+    price_column: price
+    order_id_column: order_id
+    categorical_value_map:
+      type:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      direction:
+      - -1
+      - 1
+    drop_columns:
+    - price
+    - size
+    - type
+    - direction
+    - order_id
+  temporal_features:
+    add_day_sincos: true
+    day_frequency: 86400
+    keep_timestamp: true
+    market_open_seconds: 34200
+    market_close_seconds: 57600
+    start_offset_minutes: 0
+    end_offset_minutes: 0
+  causal_market_features:
+    enabled: true
+    volatility_windows:
+    - 32
+    - 128
+    - 256
+    spread_regime_window: 128
+    imbalance_levels:
+    - 1
+    - 5
+    microprice_levels: 5
+    ofi_windows:
+    - 10
+    - 50
+    - 100
+    intensity_windows:
+    - 10
+    - 50
+    - 100
+    momentum_windows:
+    - 5
+    - 20
+    - 100
+    trade_type_values:
+    - 4
+    - 5
+  normalization:
+    derivatives_stats_dir: ../data/normalization_final/exec_cls_base
+    scope: train_only
+    derivative_scaling_method: quantile_scaling
+    position_scaling_method: zscore
+    size_log1p_scaling_method: zscore
+    price_static_scaling_method: zscore
+    adaptive_label_feature_scaling_method: zscore
+    causal_market_feature_scaling_method: robust_mad
+    delta_t_transform: log1p
+    delta_t_scaling_method: robust_mad
+  kinematic_tokenization:
+    method: fast
+    chunk_size: 100000
+    n_df_candidates: 25
+    orderbook_top_k_levels: 5
+  sample_clock:
+    mode: event
+    volume_step_shares: 500
+    volume_source: traded
+    trade_type_values:
+    - 4
+    - 5
+  microprice:
+    enabled: false
+    levels: 5
+  price_kinematic:
+    enabled: false
+    columns: auto
+    reference: tick
+    basis:
+      alpha: 5.0
+    fast:
+      n_basis: 20
+      df: 12.0
+      eval_at: 0.95
+  price_static:
+    enabled: true
+    columns: auto
+    tau_start: 2.0
+  volume_kinematic:
+    enabled: false
+    columns: auto
+    reference: tick
+    basis:
+      alpha: 5.0
+    fast:
+      n_basis: 20
+      df: 8.0
+      eval_at: 0.95
+  volume_static:
+    enabled: true
+    columns: auto
+    quantile: 95.0
+    target: 0.5
+model:
+  d_input: null
+  d_model: 256
+  feature_embed_dim: 32
+  feature_num_frequencies: 8
+  feature_sigma: 1.0
+  feature_include_raw_value: true
+  num_layers: 2
+  latent_spatial_embed_dim: 16
+  num_heads: 4
+  max_dt_quantile: 95.0
+  use_moe: false
+  use_spatial_attention: true
+  use_temporal_attention: true
+  num_experts: 4
+  top_k: 2
+  num_classes: 3
+  rope_type: hybrid_crope
+  rope_base: 10000
+  attention_dropout: 0.1
+  moe_dropout: 0.1
+  moe_expansion_factor: 4
+  moe_router_noise: 0.01
+  moe_load_balancing_weight: 0.01
+  moe_router_z_loss_weight: 0.001
+  classifier_dropout: 0.1
+  local_attention_context_tokens: 128
+  classifier_pooling:
+    methods:
+    - last
+    - mean
+    last_k: 16
+  auxiliary_heads:
+    enabled: false
+    movement: true
+    direction: true
+    hidden_dim: null
+  max_dt: null
+training:
+  objective:
+    type: classification
+    loss: cross_entropy
+    huber_delta: 1.0
+    quantiles:
+    - 0.1
+    - 0.5
+    - 0.9
+    quantile_loss_weight: 0.25
+    quantile_crossing_weight: 0.1
+    decision_threshold_ticks: 0.0
+    fixed_rate: 0.005
+  device: cuda
+  epochs: 20
+  batch_size: 32
+  gradient_accumulation_steps: 2
+  eval_batch_size: 128
+  num_workers: 0
+  prefetch_factor: null
+  preload_data_to_memory: false
+  validate_every_n_batches: epoch
+  validate_at_epoch_end: false
+  early_stopping_patience: 0
+  early_stopping_warmup: 0
+  early_stopping_min_delta: 0.0
+  monitor: precision_at_fixed_rate
+  monitor_mode: max
+  top_k_checkpoints: 3
+  monitor_params:
+    base_metric: val_directional_macro_f1
+    lambda_ece: 0.0
+    lambda_rate: 0.1
+    fixed_rate: 0.005
+  persistent_workers: false
+  optimizer: adamw
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  focal_gamma: 0.0
+  class_weight_beta: 0.25
+  class_weight_min: 0.75
+  class_weight_max: 1.5
+  auxiliary_losses:
+    movement_weight: 0.05
+    direction_weight: 0.05
+    consistency_weight: 0.0
+    movement_pos_weight: auto_clipped
+    movement_pos_weight_min: 0.5
+    movement_pos_weight_max: 5.0
+    direction_class_weight_beta: 0.0
+  grad_clip_norm: 1.0
+  model_dir: ../results
+  use_amp: true
+  deterministic_torch: false
+  torch_compile:
+    enabled: true
+    backend: inductor
+    mode: default
+    fullgraph: false
+    dynamic: false
+    require_cuda: true
+  temperature_scaling:
+    enabled: false
+    class_bias_calibration: true
+  directional_thresholds:
+    enabled: false
+    method: top_x_quantile
+    score: precision_at_fixed_rate
+    min: 0.1
+    max: 0.95
+    step: 0.05
+    delta: 0.0
+    up_precision_floor: null
+    down_precision_floor: null
+    up_quantile: 0.005
+    down_quantile: 0.005
+  sampling:
+    neutral_to_directional_ratio: 20.0
+  sequence_supervision:
+    mode: token_chunk
+    loss_warmup_tokens: 128
+    chunk_stride: 128
+    neutral_weighting: loss_weight
+  supervision_time_window:
+    enabled: false
+    start_seconds: null
+    end_seconds: null
+  evaluate_test_after_fit: false
+tracking:
+  wandb:
+    enabled: true
+    project: lob-price-trend
+    entity: ilias-ramim-imperial-college-london
+    mode: online
+    dir: null
+    tags:
+    - thesis-final
+    - INTC
+    - exec_cls
+    - base
+    - EC-B-S42
+    log_training_steps: true
+    log_best_checkpoint: true
+    log_top_k_checkpoints: false
+    required: true
+run_metadata:
+  campaign: thesis_final
+  config_id: EC-B-S42
+  role: core
+  target: exec_cls
+  representation: base
+  preprocessing_group: exec_cls_base
+  h_star: 100
+  loss: cross_entropy
+  selection_status: provisional

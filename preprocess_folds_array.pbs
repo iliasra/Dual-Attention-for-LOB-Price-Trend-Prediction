@@ -130,8 +130,25 @@ export MKL_NUM_THREADS=8
 export OPENBLAS_NUM_THREADS=8
 export NUMEXPR_NUM_THREADS=8
 
-echo "===== COPYING PROJECT TO TMPDIR ====="
-cp -r "$PROJECT_DIR" "$TMPDIR/"
+echo "===== COPYING PROJECT CODE TO TMPDIR ====="
+mkdir -p "$WORK_DIR"
+rsync -a --exclude=".git" --exclude="data" --exclude="logs" --exclude="results" --exclude="output" --exclude="backtest" "$PROJECT_DIR/" "$WORK_DIR/"
+
+PROJECT_RAW_DATA_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" data.raw_data_dir)"
+WORK_RAW_DATA_DIR="$(resolve_configured_path "$WORK_CONFIG_PATH" data.raw_data_dir)"
+if [ ! -d "$PROJECT_RAW_DATA_DIR" ]; then
+  echo "Configured raw data directory not found: $PROJECT_RAW_DATA_DIR" >&2
+  exit 1
+fi
+if [ "$WORK_RAW_DATA_DIR" != "$PROJECT_RAW_DATA_DIR" ]; then
+  case "$WORK_RAW_DATA_DIR" in
+    "$WORK_DIR"/*) ;;
+    *) echo "Refusing to stage raw data outside WORK_DIR: $WORK_RAW_DATA_DIR" >&2; exit 1 ;;
+  esac
+  mkdir -p "$(dirname "$WORK_RAW_DATA_DIR")"
+  rm -rf -- "$WORK_RAW_DATA_DIR"
+  ln -s "$PROJECT_RAW_DATA_DIR" "$WORK_RAW_DATA_DIR"
+fi
 cd "$WORK_DIR"
 
 PROJECT_SEQUENCE_DIR="$(resolve_configured_path "$PROJECT_DIR/$TRAINING_CONFIG" data.sequence_data_dir)"

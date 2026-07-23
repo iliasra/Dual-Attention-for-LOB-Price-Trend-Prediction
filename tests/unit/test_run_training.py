@@ -21,6 +21,7 @@ from run_training import (
     build_train_sampler,
     monitor_value_after_postprocessing,
     resolve_resume_checkpoint,
+    resolve_test_evaluation_plan,
     resume_wandb_run_id,
     select_checkpoint_after_validation_postprocessing,
     evaluate_best_model_on_validation_and_test_splits,
@@ -55,6 +56,28 @@ def test_fold_artifact_paths_are_scoped_by_fold() -> None:
     assert paths["sequence_dir"] == Path("data/sequences/fold_003")
     assert paths["log_dir"] == Path("logs/run_7/fold_003")
     assert paths["result_dir"] == Path("results/run_7/fold_003")
+
+
+@pytest.mark.parametrize(
+    ("evaluate_test_after_fit", "fold_has_test_split", "expected_open", "expected_reason"),
+    [
+        (False, True, False, "training.evaluate_test_after_fit=false"),
+        (False, None, False, "training.evaluate_test_after_fit=false"),
+        (True, False, False, "fold has no configured test split"),
+        (True, True, True, None),
+        (True, None, True, None),
+    ],
+)
+def test_resolve_test_evaluation_plan(
+    evaluate_test_after_fit: bool,
+    fold_has_test_split: bool | None,
+    expected_open: bool,
+    expected_reason: str | None,
+) -> None:
+    assert resolve_test_evaluation_plan(
+        evaluate_test_after_fit=evaluate_test_after_fit,
+        fold_has_test_split=fold_has_test_split,
+    ) == (expected_open, expected_reason)
 
 
 def test_sequence_paths_uses_manifest_and_ignores_stale_glob_files(artifact_dir: Path) -> None:

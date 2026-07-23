@@ -14,10 +14,15 @@ for path in (ROOT, SRC):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from action_value import action_value_coverage_curve, action_value_policy_frontier, action_value_quantile_calibration
+from action_value import (
+    ACTION_VALUE_METRICS_SCHEMA_VERSION,
+    action_value_coverage_curve,
+    action_value_policy_frontier,
+    action_value_quantile_calibration,
+)
 from action_value_training import ActionValueTrainer
 from configuration import ExperimentConfig
-from datasets import EpochShuffledSampler
+from datasets import EpochShuffledSampler, attach_evaluation_metadata
 from model import build_model
 from run_logging import model_parameter_summary, save_run_config_snapshot, save_run_summary
 from run_training import (
@@ -25,6 +30,7 @@ from run_training import (
     build_dataset,
     resolve_model_max_dt,
     resolve_resume_checkpoint,
+    resolve_test_evaluation_plan,
     resume_wandb_run_id,
 )
 from utils import load_yaml, seed_torch_worker, set_global_seed
@@ -173,7 +179,16 @@ def train_action_value_fold(
     if len(train_dataset) == 0 or len(validation_dataset) == 0:
         raise ValueError("Action-value regression requires non-empty train and validation datasets.")
     test_dataset = None
-    if fold_has_test_split:
+    open_test_split, test_skip_reason = resolve_test_evaluation_plan(
+        evaluate_test_after_fit=config.training.evaluate_test_after_fit,
+        fold_has_test_split=fold_has_test_split,
+    )
+    if not open_test_split and not config.training.evaluate_test_after_fit:
+        print(
+            f"Fold '{fold_id}' test evaluation disabled by training.evaluate_test_after_fit; "
+            "the test dataset will not be opened."
+        )
+    elif open_test_split:
         test_dataset = build_dataset(
             fold_sequence_dir,
             "test",
@@ -182,6 +197,8 @@ def train_action_value_fold(
         )
         if len(test_dataset) == 0:
             raise ValueError("Configured action-value test split has no prepared sequences.")
+    else:
+        print(f"Fold '{fold_id}' has no configured test split; test evaluation will be skipped.")
 
     max_dt_summary = resolve_model_max_dt(config, train_dataset)
     loader_kwargs = config.training.data_loader_kwargs()
@@ -270,7 +287,10 @@ def train_action_value_fold(
     )
     if trainer.last_evaluation_outputs is None:
         raise RuntimeError("Validation action-value outputs were not collected.")
-    validation_outputs = trainer.last_evaluation_outputs
+    validation_outputs = attach_evaluation_metadata(
+        trainer.last_evaluation_outputs,
+        validation_dataset,
+    )
     validation_quantile_calibration = None
     validation_quantile_artifacts = None
     if "quantile_predictions" in validation_outputs:
@@ -307,7 +327,12 @@ def train_action_value_fold(
         test_payload = {"loss": test_loss, "metrics": test_metrics.to_dict()}
         if trainer.last_evaluation_outputs is None:
             raise RuntimeError("Test action-value outputs were not collected.")
-        test_outputs = trainer.last_evaluation_outputs
+        if test_dataset is None:
+            raise RuntimeError("Test outputs were collected without a test dataset.")
+        test_outputs = attach_evaluation_metadata(
+            trainer.last_evaluation_outputs,
+            test_dataset,
+        )
         if "quantile_predictions" in test_outputs:
             test_payload["quantile_calibration"] = action_value_quantile_calibration(
                 np.asarray(test_outputs["quantile_predictions"]),
@@ -336,8 +361,15 @@ def train_action_value_fold(
 
     history_path = fold_log_dir / "action_value_history.yaml"
     metrics_path = fold_log_dir / "action_value_metrics.yaml"
-    save_run_summary({"epochs": [item.to_dict() for item in history]}, history_path)
+    save_run_summary(
+        {
+            "metrics_schema_version": ACTION_VALUE_METRICS_SCHEMA_VERSION,
+            "epochs": [item.to_dict() for item in history],
+        },
+        history_path,
+    )
     summary = {
+        "metrics_schema_version": ACTION_VALUE_METRICS_SCHEMA_VERSION,
         "objective": "action_value_regression",
         "target_columns": list(config.data.target_columns or []),
         "max_dt": max_dt_summary,
@@ -345,6 +377,8 @@ def train_action_value_fold(
         "training_state_path": str(training_state_path),
         "wandb_run_id": wandb_tracker.run_id,
         "top_k_checkpoints": [str(item[2]) for item in trainer.top_checkpoints],
+        "test_evaluation_skipped": test_loader is None,
+        "test_evaluation_skip_reason": test_skip_reason,
         "validation": {
             "loss": validation_loss,
             "metrics": validation_metrics.to_dict(),
@@ -366,6 +400,7 @@ def train_action_value_fold(
     final_global_step = int(getattr(trainer, "last_train_epoch_state", {}).get("global_step", 0))
     final_payload: dict[str, object] = {
         "global_step": final_global_step,
+        "selected/metrics_schema_version": ACTION_VALUE_METRICS_SCHEMA_VERSION,
         "selected/validation_loss": float(validation_loss),
     }
     for key, value in validation_metrics.to_dict().items():

@@ -140,6 +140,8 @@ folds:
 preprocessing:
   snapshot_window: 100
   save_processed_dataframes: false # set true to also save large normalized CSV debug/audit files
+  common_endpoint_support:
+    enabled: false # A5 legacy cache; final matched configs in configs_runs set this to true
   labels:
     strategy: executable_return # A-series INTC target: executable long/short net returns
     smoothing:
@@ -386,6 +388,10 @@ training:
     loss_warmup_tokens: 128 # mask the first 128 tokens of each 256-token chunk
     chunk_stride: 128 # covers each supervised event once
     neutral_weighting: loss_weight # downweight neutral-token loss by neutral_to_directional_ratio
+  supervision_time_window:
+    enabled: false # conditional early-session runs set this after W_STAR is selected on train only
+    start_seconds: null # seconds since midnight; does not truncate the causal sequence context
+    end_seconds: null # inclusive endpoint bound in seconds since midnight
 
 tracking:
   wandb:
